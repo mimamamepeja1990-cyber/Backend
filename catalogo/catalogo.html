@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="es">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Catálogo · DistriAr</title>
+        <link rel="icon" href="../images/icon.png" />
+        <link rel="stylesheet" href="../styles.css">
+        <link rel="stylesheet" href="catalogo.css">
+    </head>
+    <body>
+        <header class="site-header">
+            <div class="container header-inner">
+                <a href="../index.html" class="logo">
+                    <img src="../images/distriar.png" alt="DistriAr logo" />
+                </a>
+                <nav class="nav" role="navigation">
+                    <ul>
+                        <li><a href="../index.html#inicio">Inicio</a></li>
+                        <li><a href="../index.html#productos">Productos</a></li>
+                        <li><a href="../index.html#marcas">Marcas</a></li>
+                        <li><a href="../index.html#contacto" class="btn btn-primary">Contacto</a></li>
+                    </ul>
+                </nav>
+                <button class="menu-toggle" aria-label="Abrir menú" aria-expanded="false">☰</button>
+            </div>
+        </header>
+
+        <main>
+            <section class="hero small-hero">
+                <div class="container hero-grid">
+                                        <div class="hero-text">
+                                                <h1>Catálogo de productos</h1>
+                                                <p class="lead subtitulo">Explora nuestro catalogo de lácteos, fiambres y complementos. Usa los filtros para ver lo que necesitas y solicita un presupuesto por WhatsApp.</p>
+                                                <div class="hero-cta" style="margin-top:14px">
+                                                    <a class="btn btn-primary" href="#catalogGrid">Explorar productos</a>
+                                                    <a class="btn btn-outline" href="https://wa.me/5492616838446" target="_blank" rel="noopener">Pedir presupuesto</a>
+                                                </div>
+                                        </div>
+                    <div class="hero-art">
+                        <img src="../images/ramolac.png" alt="Ramolac" class="hero-brand" loading="lazy" />
+                        <img src="../images/santamaria.png" alt="Santa María" class="hero-brand" loading="lazy" />
+                    </div>
+                </div>
+            </section>
+
+            <section class="section">
+                <div class="container">
+                    <div class="catalog-controls">
+                        <div class="filters">
+                            <button data-filter="all" class="filter-btn active">Todos</button>
+                            <button data-filter="lacteos" class="filter-btn">Lácteos</button>
+                            <button data-filter="fiambres" class="filter-btn">Fiambres</button>
+                            <button data-filter="complementos" class="filter-btn">Complementos</button>
+                            <button data-filter="promociones" class="filter-btn">Promociones</button>
+                        </div>
+                        <div class="search" role="search" aria-label="Buscar productos">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false"><path d="M21 21l-4.35-4.35" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><circle cx="11" cy="11" r="6" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></circle></svg>
+                            <input id="search" type="search" aria-label="Buscar productos" placeholder="Buscar producto (ej. mozzarella, jamón)" />
+                        </div>
+                                                <div style="display:flex;align-items:center;gap:8px">
+                                                    <button id="refreshPromosBtn" class="btn" title="Recargar promociones">Recargar promociones</button>
+                                                    <div id="wsStatus" class="ws-indicator" aria-live="polite" title="Estado WebSocket"><span class="dot"></span></div>
+                                                </div>
+                    </div>
+
+                    <div class="catalog-grid" id="catalogGrid">
+                        <!-- product cards are injected by JS for ease of editing -->
+                    </div>
+
+                    <div class="catalog-footer">
+                        <p class="section-lead">¿No encontrás algo? Contactanos por WhatsApp y te ayudamos a conseguirlo.</p>
+                        <a class="btn btn-primary" href="https://wa.me/5492616838446" target="_blank" rel="noopener">Contactar por WhatsApp</a>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <footer class="site-footer">
+            <div class="container footer-grid">
+                <div class="footer-left">
+                    <img src="../images/distriar.png" alt="DistriAr logo" class="footer-logo" />
+                </div>
+                <div class="footer-right">
+                    <small>&copy; 2025 DistriAr</small>
+                </div>
+            </div>
+        </footer>
+
+    <!-- Cart UI elements injected by JS, but modal containers are provided here for better accessibility -->
+    <div id="productModal" class="cart-modal" aria-hidden="true"></div>
+    <div id="cartDrawer" class="cart-drawer" aria-hidden="true"></div>
+
+    <!-- floating cart button (created via JS but placed here for fallback and ordering) -->
+    <div id="cartFloating" class="cart-floating" aria-hidden="true" title="Ver carrito"></div>
+    <script src="catalogo.js"></script>
+    </body>
+</html>

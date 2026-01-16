@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin - Catálogo</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" type="image/png" href="../images/icon.png">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <div class="app">
+    <aside class="sidebar">
+      <div class="brand">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M12 2l3 7h7l-6 5 3 8-7-4-7 4 3-8-6-5h7z" fill="#fff"/></svg>
+        <span>Catálogo</span>
+      </div>
+      <nav>
+        <a class="active" data-section="dashboard">Dashboard</a>
+        <a data-section="catalog">Catálogo</a>
+        <a data-section="promotions">Promociones</a>
+      </nav>
+      <div class="footer-controls">
+        <label class="theme-toggle" title="Alternar modo oscuro">
+          <input id="toggleDark" type="checkbox">
+          <span>Modo oscuro</span>
+        </label>
+      </div>
+    </aside>
+    <main> 
+      <header>
+        <div class="header-left">
+          <h1 id="title">Dashboard</h1>
+          <div class="counter">Productos: <span id="productCounter">—</span></div>
+        </div>
+  <div class="api-indicator">API: <span id="apiBaseIndicator">—</span></div>
+  <div class="ws-indicator" id="wsStatus" title="Estado WebSocket" aria-live="polite">WS: <span class="dot" aria-hidden="true"></span></div>
+        <div class="top-actions">
+          <button id="refreshBtn" class="btn">Actualizar</button>
+          <button id="newBtn" class="btn primary">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            Nuevo producto
+          </button>
+        </div>
+      </header>
+
+      <section id="dashboard" class="section">
+        <div class="cards">
+          <div class="card">
+            <h3>Total activos</h3>
+            <div id="totalActive" class="stat">—</div>
+          </div>
+          <div class="card">
+            <h3>Precio promedio</h3>
+            <div id="avgPrice" class="stat">—</div>
+          </div>
+        </div>
+        <div class="charts">
+          <div class="chart-card">
+            <h4>Productos por categoría</h4>
+            <canvas id="categoryChart"></canvas>
+          </div>
+        </div>
+      </section>
+
+      <section id="catalog" class="section hidden">
+        <div class="controls">
+          <input id="searchInput" placeholder="Buscar producto por nombre o descripción..." />
+          <select id="categoryFilter"><option value="">Todas</option></select>
+          <select id="sortSelect"><option value="">Ordenar</option><option value="price_asc">Precio ↑</option><option value="price_desc">Precio ↓</option><option value="name_asc">Nombre A-Z</option><option value="name_desc">Nombre Z-A</option></select>
+        </div>
+        <div class="table-wrap">
+          <table id="productsTable">
+            <thead>
+              <tr>
+                <th>Imagen</th>
+                <th>Nombre</th>
+                <th>Categoria</th>
+                <th>Precio</th>
+                <th>Activo</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+      <section id="promotions" class="section hidden">
+          <div class="controls">
+          <input id="promoSearch" placeholder="Buscar promociones..." />
+          <button id="newPromoBtn" type="button" class="btn primary">Añadir promoción</button>
+          <button id="exportPromosBtn" type="button" class="btn" title="Exportar promociones">Exportar promos</button>
+        </div>
+        <div class="table-wrap">
+          <table id="promotionsTable">
+            <thead>
+              <tr>
+                <th>Nombre</th>
+                <th>Tipo</th>
+                <th>Productos</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Modal -->
+  <div id="modal" class="modal hidden" aria-hidden="true" role="dialog" aria-labelledby="modalTitle" aria-modal="true">
+    <div class="modal-card">
+      <button id="modalClose" class="modal-close" aria-label="Cerrar">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <h2 id="modalTitle">Nuevo producto</h2>
+      <form id="productForm" class="product-form">
+        <div class="row">
+          <div class="field">
+            <label for="name">Nombre</label>
+            <input id="name" name="name" required placeholder="Nombre del producto" />
+          </div>
+          <div class="field">
+            <label for="price">Precio</label>
+            <input id="price" name="price" required type="number" step="0.01" placeholder="0.00" />
+          </div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="category">Categoría</label>
+            <input id="category" name="category" placeholder="Categoría" />
+          </div>
+          <div class="field">
+            <label for="description">Descripción</label>
+            <textarea id="description" name="description" rows="3" placeholder="Descripción..." required></textarea>
+          </div>
+        </div>
+        <div class="row image-row">
+          <div class="file-field">
+            <label class="file-label" for="imageInput">Seleccionar imagen</label>
+            <input id="imageInput" class="file-input" type="file" accept="image/*">
+            <div class="file-name" id="fileName">Ningún archivo seleccionado</div>
+            <button id="uploadImageBtn" type="button" class="btn upload" disabled>Subir imagen</button>
+            <progress id="uploadProgress" value="0" max="100" hidden style="width:120px;margin-left:8px"></progress>
+          </div>
+          <div id="imagePreview" class="preview"></div>
+        </div>
+        <div class="form-actions">
+          <button type="button" id="saveBtn" class="btn primary" disabled>Guardar</button>
+          <button id="cancelBtn" type="button" class="btn">Cancelar</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Promotion Modal -->
+  <div id="promoModal" class="modal hidden" aria-hidden="true" role="dialog" aria-labelledby="promoModalTitle" aria-modal="true">
+    <div class="modal-card">
+      <button id="promoModalClose" class="modal-close" aria-label="Cerrar">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <h2 id="promoModalTitle">Nueva promoción</h2>
+      <form id="promoForm" class="product-form">
+        <div class="row">
+          <div class="field">
+            <label for="promoName">Nombre de la promoción</label>
+            <input id="promoName" name="promoName" required placeholder="Titulo de la promoción" />
+          </div>
+          <div class="field">
+            <label for="promoDesc">Descripción</label>
+            <input id="promoDesc" name="promoDesc" placeholder="Descripción breve" />
+          </div>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <div class="field">
+            <label for="promoType">Tipo de promoción</label>
+            <select id="promoType">
+              <option value="percent">Descuento %</option>
+              <option value="2x1">2 x 1</option>
+            </select>
+          </div>
+          <div class="field" id="promoValueField" style="display:block">
+            <label for="promoValue">Valor</label>
+            <input id="promoValue" type="number" min="0" max="100" placeholder="10 (para 10%)" />
+          </div>
+        </div>
+        <div class="controls" style="margin-top:12px;align-items:center">
+          <input id="promoProductSearch" placeholder="Buscar productos para añadir..." />
+        </div>
+        <div id="promoProductsList" style="max-height:320px;overflow:auto;margin-top:10px"></div>
+        <div class="form-actions" style="margin-top:12px">
+          <button type="button" id="savePromoBtn" class="btn primary" disabled>Guardar promoción</button>
+          <button id="cancelPromoBtn" type="button" class="btn">Cancelar</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+  <script src="app.js"></script>
+</body>
+</html>
