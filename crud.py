@@ -1,5 +1,4 @@
-from . import models
-from . import schemas
+from app import models, schemas
 from sqlalchemy.orm import Session
 import os
 from typing import Optional, List

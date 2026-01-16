@@ -19,8 +19,9 @@ from io import StringIO
 import anyio
 from sqlalchemy.orm import Session as OrmSession
 
-from . import models, schemas, crud, utils
-from .database import engine, get_db, SessionLocal
+from app import models, schemas, crud, utils
+from app.database import engine, get_db, SessionLocal
+
 
 # -------------------------------------------------------------------
 # LOGGING
