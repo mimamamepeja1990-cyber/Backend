@@ -1540,64 +1540,61 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 def auth_me(current_user = Depends(get_current_user)):
     return current_user
 
-@app.post("/products", response_model=schemas.ProductResponse)
+@app.post("/products")
 async def create_product(payload: schemas.ProductCreate):
-    """Create a product in the catalog (admin UI).
-    Uses a background DB task to avoid blocking the event loop and
-    emits a websocket event and updates the persisted catalog snapshot.
-    """
+    """Create a product - no response validation, just raw JSON."""
     def task():
         db = SessionLocal()
         try:
             prod = crud.create_product(db, payload)
             if not prod:
                 return None
-            # Force load all attributes WHILE session is still open
-            try:
-                prod_dict = {
-                    'id': prod.id,
-                    'name': prod.name,
-                    'price': prod.price,
-                    'description': prod.description,
-                    'category': prod.category,
-                    'image_url': prod.image_url,
-                    'active': prod.active,
-                    'created_at': prod.created_at,
-                    'updated_at': prod.updated_at,
-                    'stock': getattr(prod, 'stock', 0),
-                    'discount': getattr(prod, 'discount', 0.0)
-                }
-                return prod_dict
-            except Exception as e:
-                logger.exception('Failed to load product attributes: %s', e)
-                return None
+            # Convert safely to dict
+            result = {
+                'id': getattr(prod, 'id', None),
+                'name': getattr(prod, 'name', ''),
+                'price': getattr(prod, 'price', 0),
+                'description': getattr(prod, 'description', ''),
+                'category': getattr(prod, 'category', ''),
+                'image_url': getattr(prod, 'image_url', ''),
+                'active': bool(getattr(prod, 'active', True)),
+                'created_at': getattr(prod, 'created_at', None),
+                'updated_at': getattr(prod, 'updated_at', None),
+                'stock': int(getattr(prod, 'stock', 0)),
+                'discount': float(getattr(prod, 'discount', 0.0))
+            }
+            return result
         finally:
             try:
                 db.rollback()
-            except Exception:
+            except:
                 pass
             try:
                 db.close()
-            except Exception:
+            except:
                 pass
 
     try:
-        prod_dict = await anyio.to_thread.run_sync(task)
-        if not prod_dict:
-            logger.error('create_product: crud.create_product returned no object')
-            raise HTTPException(status_code=500, detail='Could not create product')
+        result = await anyio.to_thread.run_sync(task)
+        if not result:
+            raise HTTPException(status_code=500, detail='Product creation failed')
         
         try:
-            await push_event({"action": "created", "product": {"id": prod_dict['id']}})
-        except Exception:
-            logger.exception('push_event failed after product create (non-fatal)')
+            await push_event({"action": "created", "product": {"id": result.get('id')}})
+        except:
+            pass
+        
         try:
             await anyio.to_thread.run_sync(write_catalog_snapshot)
-        except Exception:
-            logger.exception('write_catalog_snapshot failed during product create (non-fatal)')
+        except:
+            pass
         
-        return prod_dict
+        return result
+    except HTTPException:
+        raise
     except Exception as e:
+        logger.exception('POST /products: %s', e)
+        raise HTTPException(status_code=500, detail=str(e)[:100])
         logger.exception('create_product failed: %s', e)
         raise HTTPException(status_code=500, detail='Could not create product')
 

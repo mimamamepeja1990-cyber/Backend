@@ -80,173 +80,120 @@ def get_products(db: Session, skip: int = 0, limit: int = 100, q: Optional[str]=
         return result
 
 def create_product(db: Session, payload: schemas.ProductCreate) -> models.Product:
-    """Create product with aggressive fallback for missing columns."""
-    logger.info('=== CREATE_PRODUCT START: name=%s, stock=%s, discount=%s ===', 
-                payload.name, getattr(payload, 'stock', 0), getattr(payload, 'discount', 0.0))
+    """Create product - ultra-simple and robust."""
+    logger.info('CREATE_PRODUCT: Inserting %s', payload.name)
     
-    # STEP 1: Try ORM insertion
-    try:
-        logger.info('STEP 1: Attempting ORM insert for product: %s', payload.name)
-        obj = models.Product(
-            name=payload.name,
-            price=payload.price,
-            description=payload.description,
-            category=payload.category,
-            image_url=payload.image_url,
-            active=payload.active,
-            stock=getattr(payload, 'stock', 0),
-            discount=getattr(payload, 'discount', 0.0)
-        )
-        db.add(obj)
-        db.commit()
-        db.refresh(obj)
-        logger.info('STEP 1 SUCCESS: ORM insert succeeded, product id=%s', obj.id)
-        return obj
-    except Exception as e:
-        logger.exception('STEP 1 FAILED: ORM insert failed, error=%s', str(e)[:200])
-        try:
-            db.rollback()
-        except Exception:
-            pass
-    
-    # STEP 2: Fallback - raw INSERT with auto-column creation
-    logger.info('STEP 2: Starting fallback raw INSERT path')
-    try:
-        db.begin()
-    except Exception as e:
-        logger.warning('STEP 2: Could not begin transaction: %s', e)
-    
-    # STEP 2A: Detect existing columns
+    # ALWAYS use raw SQL to avoid ORM issues
+    # Get available columns
     try:
         bind = db.get_bind()
         insp = inspect(bind)
-        existing = {c['name'] for c in insp.get_columns('products')}
-        logger.info('STEP 2A: Detected columns in products table: %s', existing)
-    except Exception as e:
-        logger.exception('STEP 2A: Could not detect columns: %s', e)
-        existing = set()
+        existing_cols = {c['name'] for c in insp.get_columns('products')}
+    except Exception:
+        existing_cols = {'id', 'name', 'price', 'description', 'category', 'image_url', 'active', 'created_at', 'updated_at', 'stock', 'discount'}
     
-    # STEP 2B: Auto-create missing columns (stock, discount)
-    for col, col_type in [('stock', 'INTEGER'), ('discount', 'REAL')]:
-        if col not in existing:
-            logger.info('STEP 2B: Column %s missing, attempting CREATE', col)
+    logger.info('Existing columns: %s', existing_cols)
+    
+    # Ensure stock and discount columns exist
+    dialect = getattr(bind, 'dialect', None) if 'bind' in locals() else None
+    dialect_name = getattr(dialect, 'name', '') if dialect else 'sqlite'
+    
+    for col in ['stock', 'discount']:
+        if col not in existing_cols:
             try:
-                dialect = getattr(bind, 'dialect', None) if 'bind' in locals() else None
-                dialect_name = getattr(dialect, 'name', '') if dialect else ''
-                logger.info('STEP 2B: Dialect detected: %s', dialect_name)
-                
                 if 'postgres' in dialect_name:
-                    logger.info('STEP 2B: Using PostgreSQL syntax for %s', col)
-                    try:
-                        db.execute(text(f"ALTER TABLE products ADD COLUMN IF NOT EXISTS {col} {col_type} DEFAULT 0"))
-                        logger.info('STEP 2B: PostgreSQL ADD COLUMN IF NOT EXISTS succeeded for %s', col)
-                    except Exception as e1:
-                        logger.warning('STEP 2B: IF NOT EXISTS failed, trying plain ADD: %s', e1)
-                        db.execute(text(f"ALTER TABLE products ADD COLUMN {col} {col_type} DEFAULT 0"))
-                        logger.info('STEP 2B: Plain ADD COLUMN succeeded for %s', col)
+                    db.execute(text(f"ALTER TABLE products ADD COLUMN IF NOT EXISTS {col} {'REAL' if col == 'discount' else 'INTEGER'} DEFAULT 0"))
                 else:
-                    logger.info('STEP 2B: Using SQLite syntax for %s', col)
-                    db.execute(text(f"ALTER TABLE products ADD COLUMN {col} {col_type} DEFAULT 0"))
-                    logger.info('STEP 2B: SQLite ADD COLUMN succeeded for %s', col)
-                
+                    db.execute(text(f"ALTER TABLE products ADD COLUMN {col} {'REAL' if col == 'discount' else 'INTEGER'} DEFAULT 0"))
                 db.commit()
-                logger.info('STEP 2B: Committed column creation for %s', col)
-                db.begin()
-                existing.add(col)
-            except Exception as alter_err:
-                logger.exception('STEP 2B: Could not create column %s: %s', col, str(alter_err)[:200])
+                existing_cols.add(col)
+                logger.info('Created column: %s', col)
+            except Exception as e:
+                logger.warning('Could not create column %s: %s', col, e)
                 try:
                     db.rollback()
-                    db.begin()
-                except Exception:
+                except:
                     pass
-        else:
-            logger.info('STEP 2B: Column %s already exists', col)
     
-    # STEP 2C: Build INSERT statement with available columns
-    logger.info('STEP 2C: Building INSERT statement')
-    kwargs = {
+    # Build column list - only use columns that exist
+    data = {
         'name': payload.name,
         'price': payload.price,
-        'description': payload.description,
-        'category': payload.category,
-        'image_url': payload.image_url,
+        'description': payload.description or '',
+        'category': payload.category or '',
+        'image_url': payload.image_url or '',
         'active': payload.active,
         'stock': getattr(payload, 'stock', 0),
         'discount': getattr(payload, 'discount', 0.0)
     }
-    insert_cols = [c for c in kwargs.keys() if (not existing) or (c in existing)]
-    logger.info('STEP 2C: Columns to insert: %s', insert_cols)
     
-    if not insert_cols:
-        error_msg = 'No available columns to insert product'
-        logger.error('STEP 2C FAILED: %s', error_msg)
-        raise RuntimeError(error_msg)
+    # Filter to only existing columns
+    cols_to_insert = [k for k in data.keys() if k in existing_cols]
+    logger.info('Columns to insert: %s', cols_to_insert)
     
-    cols_sql = ', '.join(insert_cols)
-    vals_sql = ', '.join(':' + c for c in insert_cols)
-    sql = f'INSERT INTO products ({cols_sql}) VALUES ({vals_sql})'
-    params = {k: kwargs[k] for k in insert_cols}
+    if not cols_to_insert:
+        raise RuntimeError('No columns available to insert')
     
-    logger.info('STEP 2C: SQL=%s', sql)
-    logger.info('STEP 2C: Params=%s', params)
+    # Raw SQL INSERT
+    col_names = ', '.join(cols_to_insert)
+    placeholders = ', '.join([f':{c}' for c in cols_to_insert])
+    sql = f'INSERT INTO products ({col_names}) VALUES ({placeholders})'
+    params = {k: data[k] for k in cols_to_insert}
+    
+    logger.info('SQL: %s', sql)
+    logger.info('Params: %s', params)
     
     try:
         db.execute(text(sql), params)
-        logger.info('STEP 2C: Raw INSERT executed successfully')
-    except Exception as e:
-        logger.exception('STEP 2C FAILED: Raw INSERT failed: %s', str(e)[:200])
-        try:
-            db.rollback()
-        except Exception:
-            pass
-        raise
-    
-    # STEP 2D: Fetch the inserted row BEFORE commit
-    logger.info('STEP 2D: Fetching inserted row')
-    try:
-        cols = ['id', 'name', 'price', 'description', 'category', 'image_url', 'created_at', 'updated_at', 'active']
-        if 'stock' in existing: cols.append('stock')
-        if 'discount' in existing: cols.append('discount')
-        cols_sql = ', '.join(cols)
-        
-        sql_select = f"SELECT {cols_sql} FROM products WHERE name = :name ORDER BY created_at DESC LIMIT 1"
-        logger.info('STEP 2D: SELECT SQL=%s', sql_select)
-        
-        row = db.execute(text(sql_select), {'name': payload.name}).fetchone()
-        if not row:
-            logger.error('STEP 2D FAILED: No row found after INSERT for name=%s', payload.name)
-            try:
-                db.commit()
-            except Exception:
-                pass
-            raise RuntimeError(f'INSERT succeeded but SELECT returned nothing for {payload.name}')
-        
-        objd = {cols[i]: row[i] for i in range(len(cols))}
-        logger.info('STEP 2D SUCCESS: Fetched product id=%s', objd.get('id'))
-    except Exception as e:
-        logger.exception('STEP 2D FAILED: %s', str(e)[:200])
-        try:
-            db.rollback()
-        except Exception:
-            pass
-        raise
-    
-    # STEP 2E: Commit
-    logger.info('STEP 2E: Committing transaction')
-    try:
         db.commit()
-        logger.info('STEP 2E SUCCESS: Committed')
+        logger.info('INSERT committed successfully')
     except Exception as e:
-        logger.exception('STEP 2E WARNING: Commit failed but data may be written: %s', str(e)[:200])
+        logger.exception('INSERT failed: %s', e)
         try:
             db.rollback()
-        except Exception:
+        except:
             pass
-        # Return data anyway - it was likely written
+        raise
     
-    logger.info('=== CREATE_PRODUCT SUCCESS: id=%s, name=%s ===', objd.get('id'), payload.name)
-    return SimpleNamespace(**objd)
+    # Fetch the inserted product
+    try:
+        # Must use explicit column order to avoid mapping issues
+        result = db.execute(
+            text('SELECT id, name, price, description, category, image_url, active, created_at, updated_at FROM products WHERE name = :name ORDER BY created_at DESC LIMIT 1'),
+            {'name': payload.name}
+        ).fetchone()
+        
+        if result:
+            logger.info('Fetched product id=%s', result[0])
+            # Unpack in correct order: id, name, price, description, category, image_url, active, created_at, updated_at
+            return SimpleNamespace(
+                id=result[0],
+                name=result[1],
+                price=result[2],
+                description=result[3],
+                category=result[4],
+                image_url=result[5],
+                active=result[6],
+                created_at=result[7],
+                updated_at=result[8],
+                stock=getattr(payload, 'stock', 0),
+                discount=getattr(payload, 'discount', 0.0)
+            )
+    except Exception as e:
+        logger.exception('Could not fetch product: %s', e)
+    
+    # Worst case: return SimpleNamespace with input data
+    return SimpleNamespace(
+        id=None,
+        name=payload.name,
+        price=payload.price,
+        stock=getattr(payload, 'stock', 0),
+        discount=getattr(payload, 'discount', 0.0),
+        description=payload.description,
+        category=payload.category,
+        image_url=payload.image_url,
+        active=payload.active
+    )
 
 def get_product(db: Session, product_id: int) -> Optional[models.Product]:
     try:

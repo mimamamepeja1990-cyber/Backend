@@ -79,5 +79,23 @@
     "category": "",
     "image_url": "",
     "active": true
+  },
+  {
+    "id": 10,
+    "name": "TestSimple123",
+    "price": 45.99,
+    "description": "Simple test",
+    "category": "test",
+    "image_url": "",
+    "active": true
+  },
+  {
+    "id": 11,
+    "name": "FinalTest1769823110",
+    "price": 99.99,
+    "description": "Final",
+    "category": "test",
+    "image_url": "",
+    "active": true
   }
 ]
