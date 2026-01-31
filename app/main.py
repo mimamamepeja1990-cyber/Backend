@@ -1549,19 +1549,23 @@ async def create_product(payload: schemas.ProductCreate):
             prod = crud.create_product(db, payload)
             if not prod:
                 return None
-            # Convert safely to dict
+            # Convert safely to dict whether prod is a dict or object
+            if isinstance(prod, dict):
+                getv = prod.get
+            else:
+                getv = lambda k, d=None: getattr(prod, k, d)
             result = {
-                'id': getattr(prod, 'id', None),
-                'name': getattr(prod, 'name', ''),
-                'price': getattr(prod, 'price', 0),
-                'description': getattr(prod, 'description', ''),
-                'category': getattr(prod, 'category', ''),
-                'image_url': getattr(prod, 'image_url', ''),
-                'active': bool(getattr(prod, 'active', True)),
-                'created_at': getattr(prod, 'created_at', None),
-                'updated_at': getattr(prod, 'updated_at', None),
-                'stock': int(getattr(prod, 'stock', 0)),
-                'discount': float(getattr(prod, 'discount', 0.0))
+                'id': getv('id', None),
+                'name': getv('name', ''),
+                'price': getv('price', 0),
+                'description': getv('description', ''),
+                'category': getv('category', ''),
+                'image_url': getv('image_url', ''),
+                'active': bool(getv('active', True)),
+                'created_at': getv('created_at', None),
+                'updated_at': getv('updated_at', None),
+                'stock': int(getv('stock', 0) or 0),
+                'discount': float(getv('discount', 0.0) or 0.0)
             }
             return result
         finally:
@@ -1572,6 +1576,7 @@ async def create_product(payload: schemas.ProductCreate):
             try:
                 db.close()
             except:
+                pass
                 pass
 
     try:

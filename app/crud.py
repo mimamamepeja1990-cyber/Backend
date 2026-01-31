@@ -63,6 +63,23 @@ def _safe_scalar(db, stmt, params=None):
             return db.execute(text(stmt), params).scalar()
         raise
 
+
+def _safe_execute(db, stmt, params=None):
+    params = params or {}
+    try:
+        return db.execute(text(stmt), params)
+    except Exception as e:
+        msg = str(e)
+        logger.exception('safe_execute initial failed: %s', msg[:300])
+        if 'current transaction is aborted' in msg.lower():
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return db.execute(text(stmt), params)
+        raise
+
+
 def _append_server_log(msg, tb=None):
     try:
         base = os.path.dirname(os.path.dirname(__file__))
