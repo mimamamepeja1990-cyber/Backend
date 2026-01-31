@@ -1,35 +1,83 @@
 [
   {
     "id": 1,
-    "name": "dasddasd",
-    "price": 299.0,
-    "description": "aaad",
-    "category": "lacteos",
-    "image_url": "/uploads/34937a68f61845bb9768f3d64ebba8b5.png",
-    "created_at": "2025-12-06T21:36:42",
-    "updated_at": null,
+    "name": "Test Product",
+    "price": 9.99,
+    "description": "Created by test",
+    "category": "Test",
+    "image_url": null,
     "active": true
   },
   {
     "id": 2,
-    "name": "2112121",
-    "price": 1000.0,
-    "description": "adsssad",
-    "category": "fiambres",
-    "image_url": "/uploads/ca8e2af9756d42ed97ceda6f5e5522a5.png",
-    "created_at": "2025-12-06T22:08:11",
-    "updated_at": null,
+    "name": "PruebaDirect",
+    "price": 2.5,
+    "description": "creado por test directo",
+    "category": "Test",
+    "image_url": null,
     "active": true
   },
   {
     "id": 3,
-    "name": "12212",
-    "price": 122.0,
-    "description": "221",
-    "category": "lacteos",
-    "image_url": "/uploads/a204a50a17e442109c9fa7dca08414f5.png",
-    "created_at": "2025-12-07T02:11:54",
-    "updated_at": null,
+    "name": "TestProd123",
+    "price": 2.5,
+    "description": "test",
+    "category": "Test",
+    "image_url": null,
+    "active": true
+  },
+  {
+    "id": 4,
+    "name": "TestProd456",
+    "price": 3.5,
+    "description": "test creado",
+    "category": "TestCat",
+    "image_url": null,
+    "active": true
+  },
+  {
+    "id": 5,
+    "name": "ProdGuardado999",
+    "price": 9.99,
+    "description": "debe guardarse",
+    "category": "GuardarTest",
+    "image_url": null,
+    "active": true
+  },
+  {
+    "id": 6,
+    "name": "TestFixed6",
+    "price": 12.99,
+    "description": "",
+    "category": "",
+    "image_url": "",
+    "active": true
+  },
+  {
+    "id": 7,
+    "name": "TestFinal7",
+    "price": 15.99,
+    "description": "Test",
+    "category": "",
+    "image_url": "",
+    "active": true
+  },
+  {
+    "id": 8,
+    "name": "Urgente1769818772",
+    "price": 99.99,
+    "description": "",
+    "category": "",
+    "image_url": "",
+    "active": true
+  },
+  {
+    "id": 9,
+    "name": "Urgente1769818776",
+    "price": 99.99,
+    "description": "",
+    "category": "",
+    "image_url": "",
     "active": true
   }
 ]

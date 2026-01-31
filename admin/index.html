@@ -3,13 +3,22 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Admin - Catálogo</title>
+  <title>Administración</title>
+  <style>
+    /* Admin tabs and badges */
+    .btn.tab { background: #f3f4f6; border: 1px solid #e5e7eb; padding: 6px 10px; border-radius: 999px; font-weight:600 }
+    .btn.tab.active { background: #111827; color: #fff; border-color: #111827 }
+    .badge-pill { display:inline-block; min-width:20px; padding:2px 8px; font-size:12px; border-radius:999px; background:#e6eef8; color:#0366d6; }
+    #ordersTabs { display:flex; align-items:center; gap:8px }
+    #clearOrderCache { background: #fff; border: 1px solid #e5e7eb; }
+  </style>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="styles.css">
-  <link rel="icon" type="image/png" href="../images/icon.png">
+  <!-- Fix: use admin-scoped image path so the favicon is served by the /admin static mount -->
+  <link rel="icon" type="image/png" href="icon.png">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
-<body>
+<body>  
   <div class="app">
     <aside class="sidebar">
       <div class="brand">
@@ -19,13 +28,13 @@
       <nav>
         <a class="active" data-section="dashboard">Dashboard</a>
         <a data-section="catalog">Catálogo</a>
+        <a data-section="consumos">Consumición inmediata</a>
         <a data-section="promotions">Promociones</a>
+        <a data-section="promo-images">Imágenes Promocionales</a>
+        <a data-section="filters">Filtros</a>
+        <a data-section="orders">Pedidos</a>
       </nav>
       <div class="footer-controls">
-        <label class="theme-toggle" title="Alternar modo oscuro">
-          <input id="toggleDark" type="checkbox">
-          <span>Modo oscuro</span>
-        </label>
       </div>
     </aside>
     <main> 
@@ -34,10 +43,12 @@
           <h1 id="title">Dashboard</h1>
           <div class="counter">Productos: <span id="productCounter">—</span></div>
         </div>
+          <button id="mobileMenuBtn" class="mobile-menu-btn" aria-label="Abrir menú" aria-expanded="false">☰</button>
   <div class="api-indicator">API: <span id="apiBaseIndicator">—</span></div>
   <div class="ws-indicator" id="wsStatus" title="Estado WebSocket" aria-live="polite">WS: <span class="dot" aria-hidden="true"></span></div>
         <div class="top-actions">
           <button id="refreshBtn" class="btn">Actualizar</button>
+          <button id="backupBtn" class="btn" title="Crear backup remoto (si está configurado)">Backup</button>
           <button id="newBtn" class="btn primary">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
             Nuevo producto
@@ -46,6 +57,8 @@
       </header>
 
       <section id="dashboard" class="section">
+
+      
         <div class="cards">
           <div class="card">
             <h3>Total activos</h3>
@@ -62,9 +75,23 @@
             <canvas id="categoryChart"></canvas>
           </div>
         </div>
-      </section>
+        </section>
 
-      <section id="catalog" class="section hidden">
+        <!-- Sección de gestión de imágenes promocionales (top-level) -->
+        <section id="promo-images" class="section hidden">
+          <h2>Imágenes Promocionales</h2>
+          <div id="promoControlsWrapper" style="margin-bottom:18px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+            <input type="file" id="promoImageInput" accept="image/*" required style="display:none;" />
+            <button type="button" id="promoImageSelectBtn" class="btn">Seleccionar imagen</button>
+            <span id="promoImageFileName" style="color:#555;font-size:15px;min-width:160px;">Ningún archivo seleccionado</span>
+            <button type="button" class="btn primary" id="promoImageUploadBtn" disabled>Subir imagen</button>
+          </div>
+          <div id="promoImagesList" class="promo-images-list">
+            <div class="empty-note" id="promoFallback">Seleccione una imagen o recargue la página para ver las imágenes existentes.</div>
+          </div>
+        </section>
+
+        <section id="catalog" class="section hidden">
         <div class="controls">
           <input id="searchInput" placeholder="Buscar producto por nombre o descripción..." />
           <select id="categoryFilter"><option value="">Todas</option></select>
@@ -106,6 +133,138 @@
           </table>
         </div>
       </section>
+
+      <section id="consumos" class="section hidden">
+        <h2>Consumición inmediata</h2>
+        <p>Seleccione productos próximos a vencerse y asigne un descuento (%) que se aplicará en el catálogo público.</p>
+        <div class="controls">
+          <input id="consumoSearch" placeholder="Buscar producto..." />
+          <button id="loadConsumosBtn" class="btn">Cargar consumos</button>
+          <button id="saveConsumosBtn" class="btn primary">Guardar consumos</button>
+        </div>
+        <div id="consumosList" class="table-wrap" style="margin-top:12px; max-height:420px; overflow:auto; border:1px solid rgba(0,0,0,0.04); padding:8px; border-radius:8px; background:#fff">
+          <!-- rows will be injected here -->
+        </div>
+      </section>
+
+      <section id="filters" class="section hidden">
+        <div class="controls center">
+          <input id="filterName" placeholder="Nombre del filtro (ej: Lacteos)" />
+          <button id="addFilterBtn" class="btn primary">Agregar filtro</button>
+          <button id="importFiltersBtn" class="btn">Importar</button>
+        </div>
+        <div class="table-wrap">
+          <table id="filtersTable">
+            <thead>
+              <tr>
+                <th>Filtro</th>
+                <th>Valor</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="orders" class="section hidden">
+        <div id="ordersTabs" class="controls tabs">
+          <button id="tab_todos" class="btn tab active">Todos <span id="badge_todos" class="badge-pill">0</span></button>
+          <button id="tab_web" class="btn tab">Web <span id="badge_web" class="badge-pill">0</span></button>
+          <button id="tab_app" class="btn tab">App <span id="badge_app" class="badge-pill">0</span></button>
+          <button id="clearOrderCache" class="btn clear-cache">Limpiar caché local</button>
+        </div>
+                <section id="orders_todos" class="section">
+                  <h3>Pedidos — Todos</h3>
+                <div class="controls center">
+                  <input id="orderSearch_todos" placeholder="Buscar pedidos por producto o id..." />
+                  <input id="orderDate_todos" type="date" title="Filtrar por fecha" />
+                  <button id="clearOrderDate_todos" class="btn">Limpiar fecha</button>
+                  <button id="refreshOrdersBtn_todos" class="btn">Actualizar pedidos (Todos)</button>
+                </div>
+                <div class="table-wrap">
+                  <table id="ordersTable_todos">
+                    <thead>
+                      <tr>
+                        <th>ID</th>
+                        <th>Items</th>
+                        <th>Total</th>
+                        <th>Usuario</th>
+                        <th>Dirección</th>
+                        <th>Estado</th>
+                        <th>Fecha</th>
+                        <th>Acciones</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+                </section>
+        <section id="orders_web" class="section">
+          <h3>Pedidos — Web</h3>
+        <div class="controls center">
+          <input id="orderSearch_web" placeholder="Buscar pedidos por producto o id..." />
+          <input id="orderDate_web" type="date" title="Filtrar por fecha" />
+          <button id="clearOrderDate_web" class="btn">Limpiar fecha</button>
+          <button id="refreshOrdersBtn_web" class="btn">Actualizar pedidos (Web)</button>
+        </div>
+        <div class="table-wrap">
+          <table id="ordersTable_web">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Items</th>
+                <th>Total</th>
+                <th>Usuario</th>
+                <th>Contacto / Dirección</th>
+                <th>Estado</th>
+                <th>Fecha</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        </section>
+
+        <section id="orders_app" class="section hidden">
+          <h3>Pedidos — App</h3>
+        <div class="controls center">
+          <input id="orderSearch_app" placeholder="Buscar pedidos por producto o id..." />
+          <input id="orderDate_app" type="date" title="Filtrar por fecha" />
+          <button id="clearOrderDate_app" class="btn">Limpiar fecha</button>
+          <button id="refreshOrdersBtn_app" class="btn">Actualizar pedidos (App)</button>
+        </div>
+        <div class="table-wrap">
+          <table id="ordersTable_app">
+            <thead>
+              <tr>
+                <th>ID</th>
+                <th>Items</th>
+                <th>Total</th>
+                <th>Usuario</th>
+                <th>Contacto / Dirección</th>
+                <th>Estado</th>
+                <th>Fecha</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        </section>
+      </section>
+
+      <!-- Order Detail Modal -->
+      <div id="orderModal" class="modal hidden" aria-hidden="true" role="dialog" aria-modal="true">
+        <div class="modal-card">
+          <button id="orderModalClose" class="modal-close" aria-label="Cerrar">✕</button>
+          <h2 id="orderModalTitle">Pedido</h2>
+          <div id="orderModalBody">
+            <!-- filled dynamically -->
+          </div>
+        </div>
+      </div>
     </main>
   </div>
 
@@ -126,11 +285,20 @@
             <label for="price">Precio</label>
             <input id="price" name="price" required type="number" step="0.01" placeholder="0.00" />
           </div>
+          <div class="field">
+            <label for="stock">Stock</label>
+            <input id="stock" name="stock" type="number" min="0" step="1" value="0" placeholder="0" />
+          </div>
+          <div class="field">
+            <label for="discount">Descuento %</label>
+            <input id="discount" name="discount" type="number" min="0" max="100" step="0.01" value="0" placeholder="0" />
+          </div>
         </div>
         <div class="row">
           <div class="field">
-            <label for="category">Categoría</label>
-            <input id="category" name="category" placeholder="Categoría" />
+            <label for="categoryCheckboxes">Categorías</label>
+            <div id="categoryCheckboxes" class="checkbox-grid" aria-live="polite"></div>
+            <input type="hidden" id="category" name="category" />
           </div>
           <div class="field">
             <label for="description">Descripción</label>
@@ -143,7 +311,7 @@
             <input id="imageInput" class="file-input" type="file" accept="image/*">
             <div class="file-name" id="fileName">Ningún archivo seleccionado</div>
             <button id="uploadImageBtn" type="button" class="btn upload" disabled>Subir imagen</button>
-            <progress id="uploadProgress" value="0" max="100" hidden style="width:120px;margin-left:8px"></progress>
+            <progress id="uploadProgress" value="0" max="100" hidden class="progress-sm"></progress>
           </div>
           <div id="imagePreview" class="preview"></div>
         </div>
@@ -173,7 +341,7 @@
             <input id="promoDesc" name="promoDesc" placeholder="Descripción breve" />
           </div>
         </div>
-        <div class="row" style="margin-top:8px">
+        <div class="row mt-8">
           <div class="field">
             <label for="promoType">Tipo de promoción</label>
             <select id="promoType">
@@ -181,16 +349,16 @@
               <option value="2x1">2 x 1</option>
             </select>
           </div>
-          <div class="field" id="promoValueField" style="display:block">
+          <div class="field" id="promoValueField">
             <label for="promoValue">Valor</label>
             <input id="promoValue" type="number" min="0" max="100" placeholder="10 (para 10%)" />
           </div>
         </div>
-        <div class="controls" style="margin-top:12px;align-items:center">
+        <div class="controls center mt-12">
           <input id="promoProductSearch" placeholder="Buscar productos para añadir..." />
         </div>
-        <div id="promoProductsList" style="max-height:320px;overflow:auto;margin-top:10px"></div>
-        <div class="form-actions" style="margin-top:12px">
+        <div id="promoProductsList" class="promo-products-list"></div>
+        <div class="form-actions mt-12">
           <button type="button" id="savePromoBtn" class="btn primary" disabled>Guardar promoción</button>
           <button id="cancelPromoBtn" type="button" class="btn">Cancelar</button>
         </div>
@@ -199,6 +367,31 @@
   </div>
 
   <div id="toast" class="toast hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+  <script>
+    // Global admin error banner for easier debugging when JS fails to load or throws
+    window.adminFallback = function(msg){
+      try{
+        var existing = document.getElementById('adminErrorBanner');
+        if(!existing){
+          existing = document.createElement('div');
+            existing.id = 'adminErrorBanner';
+            existing.setAttribute('role','alert');
+            existing.style.position = 'fixed'; existing.style.left = '0'; existing.style.right = '0'; existing.style.top = '0'; existing.style.zIndex = '99999'; existing.style.background = '#fee'; existing.style.color = '#900'; existing.style.padding = '10px 16px'; existing.style.fontWeight = '700'; existing.style.borderBottom = '2px solid #fbb';
+            // content container
+            const msgSpan = document.createElement('span'); msgSpan.style.flex = '1'; msgSpan.style.display = 'inline-block'; msgSpan.id = 'adminErrorBannerMsg';
+            const dismiss = document.createElement('button'); dismiss.className = 'dismiss-btn'; dismiss.type = 'button'; dismiss.title = 'Cerrar'; dismiss.innerText = '✕'; dismiss.onclick = function(){ try{ existing.remove(); }catch(_){ existing.style.display='none'; } };
+            existing.appendChild(msgSpan);
+            existing.appendChild(dismiss);
+            document.body.insertBefore(existing, document.body.firstChild);
+          }
+          const msgEl = document.getElementById('adminErrorBannerMsg');
+          if(msgEl) msgEl.textContent = String(msg || 'Error en el panel de administración');
+          console.error('adminFallback:', msg);
+      }catch(e){ /* ignore */ }
+    };
+    window.addEventListener('error', function(e){ try{ window.adminFallback('JS error: ' + (e && e.message ? e.message : e)); }catch(_){} });
+    window.addEventListener('unhandledrejection', function(e){ try{ var r = e && e.reason ? (e.reason.message || JSON.stringify(e.reason)) : e; window.adminFallback('Unhandled promise rejection: ' + r); }catch(_){} });
+  </script>
   <script src="app.js"></script>
 </body>
 </html>
