@@ -12,7 +12,56 @@ logger = logging.getLogger('catalog_api.crud')
 import traceback
 import datetime
 import os
+from sqlalchemy.exc import InternalError
 
+
+def _safe_execute_fetchall(db, stmt, params=None):
+    params = params or {}
+    try:
+        return db.execute(text(stmt), params).fetchall()
+    except Exception as e:
+        msg = str(e)
+        logger.exception('safe_fetchall initial failed: %s', msg[:300])
+        if 'current transaction is aborted' in msg.lower():
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            # retry once
+            return db.execute(text(stmt), params).fetchall()
+        raise
+
+
+def _safe_execute_fetchone(db, stmt, params=None):
+    params = params or {}
+    try:
+        return db.execute(text(stmt), params).fetchone()
+    except Exception as e:
+        msg = str(e)
+        logger.exception('safe_fetchone initial failed: %s', msg[:300])
+        if 'current transaction is aborted' in msg.lower():
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return db.execute(text(stmt), params).fetchone()
+        raise
+
+
+def _safe_scalar(db, stmt, params=None):
+    params = params or {}
+    try:
+        return db.execute(text(stmt), params).scalar()
+    except Exception as e:
+        msg = str(e)
+        logger.exception('safe_scalar initial failed: %s', msg[:300])
+        if 'current transaction is aborted' in msg.lower():
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return db.execute(text(stmt), params).scalar()
+        raise
 
 def _append_server_log(msg, tb=None):
     try:
@@ -42,6 +91,7 @@ def get_products(db: Session, skip: int = 0, limit: int = 100, q: Optional[str]=
             query = query.order_by(models.Product.price.desc())
         return query.offset(skip).limit(limit).all()
     except Exception as e:
+        logger.exception('ORM get_products failed, falling back to raw SQL: %s', e)
         # If ORM select fails (e.g. missing columns in legacy DB), fallback to a raw select
         try:
             bind = db.get_bind()
@@ -72,7 +122,10 @@ def get_products(db: Session, skip: int = 0, limit: int = 100, q: Optional[str]=
         if sort == 'price_asc': order_clause = ' ORDER BY price ASC'
         elif sort == 'price_desc': order_clause = ' ORDER BY price DESC'
         sql = f"SELECT {cols_sql} FROM products{where_clause}{order_clause} LIMIT :limit OFFSET :skip"
-        rows = db.execute(text(sql), params).fetchall()
+
+        # Use safe helper that retries once after rollback if needed
+        rows = _safe_execute_fetchall(db, sql, params)
+
         result = []
         for row in rows:
             objd = {cols[i]: row[i] for i in range(len(cols))}
@@ -102,9 +155,9 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
         if col not in existing_cols:
             try:
                 if 'postgres' in dialect_name:
-                    db.execute(text(f"ALTER TABLE products ADD COLUMN IF NOT EXISTS {col} {'REAL' if col == 'discount' else 'INTEGER'} DEFAULT 0"))
+                    _safe_execute(db, f"ALTER TABLE products ADD COLUMN IF NOT EXISTS {col} {'REAL' if col == 'discount' else 'INTEGER'} DEFAULT 0")
                 else:
-                    db.execute(text(f"ALTER TABLE products ADD COLUMN {col} {'REAL' if col == 'discount' else 'INTEGER'} DEFAULT 0"))
+                    _safe_execute(db, f"ALTER TABLE products ADD COLUMN {col} {'REAL' if col == 'discount' else 'INTEGER'} DEFAULT 0")
                 db.commit()
                 existing_cols.add(col)
                 logger.info('Created column: %s', col)
@@ -144,7 +197,7 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
     logger.info('Params: %s', params)
     
     try:
-        db.execute(text(sql), params)
+        _safe_execute(db, sql, params)
         db.commit()
         logger.info('INSERT committed successfully')
     except Exception as e:
@@ -158,10 +211,7 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
     # Fetch the inserted product
     try:
         # Must use explicit column order to avoid mapping issues
-        result = db.execute(
-            text('SELECT id, name, price, description, category, image_url, active, created_at, updated_at FROM products WHERE name = :name ORDER BY created_at DESC LIMIT 1'),
-            {'name': payload.name}
-        ).fetchone()
+        result = _safe_execute_fetchone(db, 'SELECT id, name, price, description, category, image_url, active, created_at, updated_at FROM products WHERE name = :name ORDER BY created_at DESC LIMIT 1', {'name': payload.name})
         
         if result:
             logger.info('Fetched product id=%s', result[0])
@@ -212,7 +262,7 @@ def get_product(db: Session, product_id: int) -> Optional[models.Product]:
         if 'discount' in existing:
             cols.append('discount')
         cols_sql = ', '.join(cols)
-        row = db.execute(text(f"SELECT {cols_sql} FROM products WHERE id = :id LIMIT 1"), {'id': product_id}).fetchone()
+        row = _safe_execute_fetchone(db, f"SELECT {cols_sql} FROM products WHERE id = :id LIMIT 1", {'id': product_id})
         if not row:
             return None
         objd = {cols[i]: row[i] for i in range(len(cols))}
@@ -254,7 +304,7 @@ def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate)
     params = {c: updates[c] for c in set_cols}
     params['id'] = product_id
     try:
-        db.execute(text(f"UPDATE products SET {set_sql}, updated_at = CURRENT_TIMESTAMP WHERE id = :id"), params)
+        _safe_execute(db, f"UPDATE products SET {set_sql}, updated_at = CURRENT_TIMESTAMP WHERE id = :id", params)
         try:
             db.commit()
         except Exception:
@@ -276,7 +326,7 @@ def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate)
     if 'discount' in existing:
         cols.append('discount')
     cols_sql = ', '.join(cols)
-    row = db.execute(text(f"SELECT {cols_sql} FROM products WHERE id = :id LIMIT 1"), {'id': product_id}).fetchone()
+    row = _safe_execute_fetchone(db, f"SELECT {cols_sql} FROM products WHERE id = :id LIMIT 1", {'id': product_id})
     if not row:
         return None
     objd = {cols[i]: row[i] for i in range(len(cols))}
@@ -293,7 +343,7 @@ def export_all(db: Session):
 
 def stats(db: Session):
     try:
-        total = int(db.execute(text('SELECT count(*) FROM products')).scalar() or 0)
+        total = int(_safe_scalar(db, 'SELECT count(*) FROM products') or 0)
     except Exception:
         total = db.query(models.Product).count()
     avg = db.query(models.Product).with_entities(func.avg(models.Product.price)).scalar()
@@ -520,7 +570,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
             pass
 
         # Execute via Session.execute so it participates in the session transaction
-        res = db.execute(text(sql), params)
+        res = _safe_execute(db, sql, params)
         # For Postgres (returning) get id and created_at
         new_id = None
         new_created_at = None
@@ -558,7 +608,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                     cols.append(c)
             cols_sql = ', '.join(cols)
             try:
-                row = db_session.execute(text(f"SELECT {cols_sql} FROM orders WHERE id = :id LIMIT 1"), {'id': oid}).fetchone()
+                row = _safe_execute_fetchone(db_session, f"SELECT {cols_sql} FROM orders WHERE id = :id LIMIT 1", {'id': oid})
                 if not row:
                     return None
                 # map columns to values
@@ -630,12 +680,12 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                     try:
                         # Only insert if no preview exists yet for this order
                         try:
-                            exists = db.execute(text('SELECT 1 FROM order_token_previews WHERE order_id = :id LIMIT 1'), {'id': str(new_id)}).fetchone()
+                            exists = _safe_execute_fetchone(db, 'SELECT 1 FROM order_token_previews WHERE order_id = :id LIMIT 1', {'id': str(new_id)})
                         except Exception:
                             exists = None
                         if not exists:
                             ins_sql = "INSERT INTO order_token_previews (order_id, token_preview, token_received) VALUES (:oid, :tp, :tr)"
-                            db.execute(text(ins_sql), {'oid': str(new_id), 'tp': tp_json, 'tr': bool(tr_flag)})
+                            _safe_execute(db, ins_sql, {'oid': str(new_id), 'tp': tp_json, 'tr': bool(tr_flag)})
                             try:
                                 db.commit()
                             except Exception:
@@ -668,12 +718,12 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                         if preview:
                             tp_json = _json.dumps(preview, ensure_ascii=False)
                             try:
-                                exists = db.execute(text('SELECT 1 FROM order_token_previews WHERE order_id = :id LIMIT 1'), {'id': str(new_id)}).fetchone()
+                                exists = _safe_execute_fetchone(db, 'SELECT 1 FROM order_token_previews WHERE order_id = :id LIMIT 1', {'id': str(new_id)})
                             except Exception:
                                 exists = None
                             if not exists:
                                 ins_sql = "INSERT INTO order_token_previews (order_id, token_preview, token_received) VALUES (:oid, :tp, :tr)"
-                                db.execute(text(ins_sql), {'oid': str(new_id), 'tp': tp_json, 'tr': True})
+                                _safe_execute(db, ins_sql, {'oid': str(new_id), 'tp': tp_json, 'tr': True})
                                 try:
                                     db.commit()
                                 except Exception:
@@ -693,7 +743,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
             try:
                 cols = ['id', 'items', 'total', 'status', 'created_at']
                 cols_sql = ', '.join(cols)
-                row = db.execute(text(f"SELECT {cols_sql} FROM orders WHERE items = :items AND total = :total ORDER BY created_at DESC LIMIT 1"), {'items': kwargs.get('items'), 'total': kwargs.get('total')}).fetchone()
+                row = _safe_execute_fetchone(db, f"SELECT {cols_sql} FROM orders WHERE items = :items AND total = :total ORDER BY created_at DESC LIMIT 1", {'items': kwargs.get('items'), 'total': kwargs.get('total')})
                 if row:
                     objd = {k: row[idx] for idx, k in enumerate(cols)}
                     try:
@@ -733,7 +783,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
             sql = f'INSERT INTO orders ({cols_sql}) VALUES ({vals_sql}){returning}'
             params = {k: kwargs[k] for k in insert_cols}
             try:
-                res = db.execute(text(sql), params)
+                res = _safe_execute(db, sql, params)
                 db.commit()
                 if 'postgres' in dialect_name:
                     try:
@@ -766,7 +816,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                     try:
                         cols = ['id', 'items', 'total', 'status', 'created_at']
                         cols_sql = ', '.join(cols)
-                        row = db.execute(text(f"SELECT {cols_sql} FROM orders WHERE items = :items AND total = :total ORDER BY created_at DESC LIMIT 1"), {'items': kwargs.get('items'), 'total': kwargs.get('total')}).fetchone()
+                        row = _safe_execute_fetchone(db, f"SELECT {cols_sql} FROM orders WHERE items = :items AND total = :total ORDER BY created_at DESC LIMIT 1", {'items': kwargs.get('items'), 'total': kwargs.get('total')})
                         if row:
                             objd = {k: row[idx] for idx, k in enumerate(cols)}
                             try:
@@ -804,7 +854,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
         if oid is not None:
             # Only insert if no preview exists for this order_id yet
             try:
-                existing = db.execute(text('SELECT 1 FROM order_token_previews WHERE order_id = :id LIMIT 1'), {'id': str(oid)}).fetchone()
+                existing = _safe_execute_fetchone(db, 'SELECT 1 FROM order_token_previews WHERE order_id = :id LIMIT 1', {'id': str(oid)})
             except Exception:
                 existing = True
             if not existing:
@@ -824,11 +874,11 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                     try:
                         tp_json = _json.dumps(preview, ensure_ascii=False)
                         try:
-                            existing = db.execute(text('SELECT 1 FROM order_token_previews WHERE order_id = :id LIMIT 1'), {'id': str(oid)}).fetchone()
+                            existing = _safe_execute_fetchone(db, 'SELECT 1 FROM order_token_previews WHERE order_id = :id LIMIT 1', {'id': str(oid)})
                         except Exception:
                             existing = None
                         if not existing:
-                            db.execute(text('INSERT INTO order_token_previews (order_id, token_preview, token_received) VALUES (:oid, :tp, :tr)'), {'oid': str(oid), 'tp': tp_json, 'tr': True})
+                            _safe_execute(db, 'INSERT INTO order_token_previews (order_id, token_preview, token_received) VALUES (:oid, :tp, :tr)', {'oid': str(oid), 'tp': tp_json, 'tr': True})
                             try:
                                 db.commit()
                             except Exception:
@@ -891,7 +941,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                 try:
                     set_sql = ', '.join(f"{k} = :{k}" for k in to_set.keys())
                     params = {**to_set, 'id': oid}
-                    db.execute(text(f"UPDATE orders SET {set_sql} WHERE id = :id"), params)
+                    _safe_execute(db, f"UPDATE orders SET {set_sql} WHERE id = :id", params)
                     try:
                         db.commit()
                     except Exception:
@@ -935,7 +985,7 @@ def get_orders(db: Session, skip: int = 0, limit: int = 200, source: Optional[st
         if source and 'source' in existing:
             where_clause = ' WHERE source = :source'
             params['source'] = source
-        rows = db.execute(text(f"SELECT {cols_sql} FROM orders{where_clause} ORDER BY created_at DESC LIMIT :limit OFFSET :skip"), params).fetchall()
+        rows = _safe_execute_fetchall(db, f"SELECT {cols_sql} FROM orders{where_clause} ORDER BY created_at DESC LIMIT :limit OFFSET :skip", params)
     except Exception:
         logger.exception('get_orders raw select failed')
         # As a last resort try the ORM query (may raise too); let caller see a handled error
@@ -1020,7 +1070,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 def get_setting(db: Session, key: str):
     try:
-        row = db.execute(text("SELECT key, value FROM settings WHERE key = :k LIMIT 1"), {'k': key}).fetchone()
+        row = _safe_execute_fetchone(db, "SELECT key, value FROM settings WHERE key = :k LIMIT 1", {'k': key})
         if not row:
             return None
         k, v = row[0], row[1]
@@ -1050,12 +1100,12 @@ def set_setting(db: Session, key: str, value):
         dialect_name = getattr(dialect, 'name', '') if dialect else ''
         if 'postgres' in dialect_name:
             sql = "INSERT INTO settings (key, value) VALUES (:k, :v) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value"
-            db.execute(text(sql), {'k': key, 'v': val})
+            _safe_execute(db, sql, {'k': key, 'v': val})
             db.commit()
         else:
             # SQLite / generic: delete existing then insert
-            db.execute(text("DELETE FROM settings WHERE key = :k"), {'k': key})
-            db.execute(text("INSERT INTO settings (key, value) VALUES (:k, :v)"), {'k': key, 'v': val})
+            _safe_execute(db, "DELETE FROM settings WHERE key = :k", {'k': key})
+            _safe_execute(db, "INSERT INTO settings (key, value) VALUES (:k, :v)", {'k': key, 'v': val})
             db.commit()
         return True
     except Exception:
