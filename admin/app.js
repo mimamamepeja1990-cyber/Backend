@@ -531,7 +531,17 @@ async function handleSave(ev){
     try{
       const key = String((created && created.id) ? created.id : payload.name);
       const mapping = loadProductCategories() || {};
-      if(selectedCats && selectedCats.length) mapping[key] = selectedCats; else delete mapping[key];
+      // Only overwrite mapping when we have checkboxes loaded (admin explicitly made a choice).
+      // If checkboxes did not exist (filters not loaded), preserve any existing mapping to avoid accidental deletion.
+      const anyCheckboxes = !!document.querySelector('#categoryCheckboxes input[type=checkbox]');
+      if (selectedCats && selectedCats.length) {
+        mapping[key] = selectedCats;
+      } else if (anyCheckboxes) {
+        // If checkboxes exist and none are checked, user intentionally cleared categories -> delete mapping
+        delete mapping[key];
+      } else {
+        // No checkboxes present: do not modify existing mapping (preserve)
+      }
       await saveProductCategories(mapping);
     }catch(e){ console.warn('Failed to save product categories', e); }
 
