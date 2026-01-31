@@ -472,6 +472,9 @@ function updateStats(products){
 if(newBtn) newBtn.onclick = () => { openModal(); };
 if(modalClose) modalClose.onclick = () => closeModal();
 if(cancelBtn) cancelBtn.onclick = () => closeModal();
+// Bind the save button and form submit to handleSave so "Guardar" actually triggers product create/update
+if(saveBtn) saveBtn.onclick = handleSave;
+if(productForm) productForm.addEventListener('submit', handleSave);
 if(refreshBtn) refreshBtn.onclick = () => refresh();
 if(searchInput) searchInput.oninput = () => refresh();
 if(sortSelect) sortSelect.onchange = () => refresh();
