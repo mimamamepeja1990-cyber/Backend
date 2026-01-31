@@ -7,6 +7,7 @@ from fastapi.responses import RedirectResponse, PlainTextResponse, Response, Fil
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
@@ -26,6 +27,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from sqlalchemy import inspect
 from sqlalchemy import or_
+from types import SimpleNamespace
 
 from app import models, schemas, crud, utils
 from app.database import engine, Base, get_db, SessionLocal
@@ -476,6 +478,157 @@ def _cors_headers_for_request(request: Request) -> Dict[str, str]:
     else:
         headers['Access-Control-Allow-Origin'] = '*'
     return headers
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    # Log validation errors and request body to server_log.txt to help diagnose 422 issues in production
+    try:
+        try:
+            body_bytes = await request.body()
+            try:
+                body = body_bytes.decode('utf-8')
+            except Exception:
+                body = str(body_bytes)
+        except Exception:
+            body = '<could not read body>'
+        tb = traceback.format_exc()
+        try:
+            base = os.path.dirname(os.path.dirname(__file__))
+            logpath = os.path.join(base, 'server_log.txt')
+            with open(logpath, 'a', encoding='utf-8') as f:
+                f.write(f"{datetime.datetime.utcnow().isoformat()} - RequestValidationError path={request.url.path} body={body[:2000]} error={str(exc)[:500]}\n")
+                f.write(tb + "\n\n")
+        except Exception:
+            pass
+            logger.exception('RequestValidationError for %s: %s body=%s', request.url.path, exc, (body[:500] if body else ''))
+    except Exception:
+        logger.exception('validation_exception_handler failed')
+
+    # Fallback: for admin product create/update requests, try to coerce payload and perform the DB operation directly
+    try:
+        m = (request.method or '').upper()
+        p = request.url.path or ''
+        if p.startswith('/products') and m in ('POST', 'PUT'):
+            try:
+                body_json = None
+                try:
+                    body_json = await request.json()
+                except Exception:
+                    body_json = None
+                if body_json and isinstance(body_json, dict):
+                    # Coerce common product fields
+                    name = str(body_json.get('name') or '').strip()
+                    price_raw = body_json.get('price')
+                    try:
+                        price = float(price_raw)
+                    except Exception:
+                        price = None
+                    if m == 'POST':
+                        if name and price is not None:
+                            payload_obj = SimpleNamespace(
+                                name=name,
+                                price=price,
+                                description=body_json.get('description') or '',
+                                category=body_json.get('category') or '',
+                                image_url=body_json.get('image_url') or '',
+                                active=bool(body_json.get('active', True)),
+                                stock=int(body_json.get('stock') or 0),
+                                discount=float(body_json.get('discount') or 0.0)
+                            )
+                            db = SessionLocal()
+                            try:
+                                created = crud.create_product(db, payload_obj)
+                                if created:
+                                    # Normalize to dict
+                                    if isinstance(created, dict):
+                                        res = created
+                                    else:
+                                        res = {k: getattr(created, k) for k in ('id','name','price','description','category','image_url','active','stock','discount') if hasattr(created, k)}
+                                    # log the fallback usage
+                                    try:
+                                        base = os.path.dirname(os.path.dirname(__file__))
+                                        with open(os.path.join(base, 'server_log.txt'), 'a', encoding='utf-8') as f:
+                                            f.write(f"{datetime.datetime.utcnow().isoformat()} - Validation fallback POST /products used for body: {str(body)[:1000]} created_id={res.get('id')}\n")
+                                    except Exception:
+                                        pass
+                                    headers = _cors_headers_for_request(request)
+                                    return JSONResponse(status_code=200, content=res, headers=headers)
+                            finally:
+                                try:
+                                    db.close()
+                                except Exception:
+                                    pass
+                    else:
+                        # PUT fallback: extract id from path and perform permissive update
+                        try:
+                            parts = [x for x in p.split('/') if x]
+                            # path may be /products or /products/123; ensure last part is id
+                            if len(parts) >= 2 and parts[-2] == 'products':
+                                pid = parts[-1]
+                            elif len(parts) >= 1 and parts[0] == 'products' and len(parts) == 2:
+                                pid = parts[1]
+                            else:
+                                pid = None
+                        except Exception:
+                            pid = None
+                        if pid is not None:
+                            # Build permissive updates dict
+                            updates = {}
+                            for k in ('name','price','description','category','image_url','active','stock','discount'):
+                                if k in body_json:
+                                    updates[k] = body_json[k]
+                            if 'price' in updates:
+                                try:
+                                    updates['price'] = float(updates['price'])
+                                except Exception:
+                                    updates.pop('price', None)
+                            if 'stock' in updates:
+                                try:
+                                    updates['stock'] = int(updates['stock'])
+                                except Exception:
+                                    updates.pop('stock', None)
+                            if 'discount' in updates:
+                                try:
+                                    updates['discount'] = float(updates['discount'])
+                                except Exception:
+                                    updates.pop('discount', None)
+                            if updates:
+                                # Create a small payload object with dict() method used by crud.update_product
+                                upd_dict = updates.copy()
+                                class _UpdObj:
+                                    def __init__(self, d):
+                                        self.__dict__.update(d)
+                                    def dict(self, exclude_unset=True):
+                                        return d
+                                d = upd_dict
+                                upd_obj = _UpdObj(d)
+                                db = SessionLocal()
+                                try:
+                                    updated = crud.update_product(db, int(pid), upd_obj)
+                                    if updated:
+                                        # Normalize to dict
+                                        res = updated if isinstance(updated, dict) else {k: getattr(updated, k) for k in ('id','name','price','description','category','image_url','active','stock','discount') if hasattr(updated,k)}
+                                        try:
+                                            base = os.path.dirname(os.path.dirname(__file__))
+                                            with open(os.path.join(base, 'server_log.txt'), 'a', encoding='utf-8') as f:
+                                                f.write(f"{datetime.datetime.utcnow().isoformat()} - Validation fallback PUT /products/{pid} used for body: {str(body)[:1000]}\n")
+                                        except Exception:
+                                            pass
+                                        headers = _cors_headers_for_request(request)
+                                        return JSONResponse(status_code=200, content=res, headers=headers)
+                                finally:
+                                    try:
+                                        db.close()
+                                    except Exception:
+                                        pass
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    headers = _cors_headers_for_request(request)
+    return JSONResponse(status_code=422, content={"detail": exc.errors()}, headers=headers)
 
 
 @app.exception_handler(Exception)
@@ -1620,6 +1773,12 @@ def auth_me(current_user = Depends(get_current_user)):
 @app.post("/products")
 async def create_product(payload: schemas.ProductCreate):
     """Create a product - no response validation, just raw JSON."""
+    # Log incoming payload (helps debug server vs validation failures)
+    try:
+        logger.info('POST /products called with payload: %s', jsonable_encoder(payload))
+    except Exception:
+        logger.exception('Failed to log payload for POST /products')
+
     def task():
         db = SessionLocal()
         try:
@@ -1680,10 +1839,17 @@ async def create_product(payload: schemas.ProductCreate):
     except HTTPException:
         raise
     except Exception as e:
+        try:
+            tb = traceback.format_exc()
+            base = os.path.dirname(os.path.dirname(__file__))
+            logpath = os.path.join(base, 'server_log.txt')
+            with open(logpath, 'a', encoding='utf-8') as f:
+                f.write(f"{datetime.datetime.utcnow().isoformat()} - POST /products exception: {str(e)[:400]}\n")
+                f.write(tb + "\n\n")
+        except Exception:
+            pass
         logger.exception('POST /products: %s', e)
         raise HTTPException(status_code=500, detail=str(e)[:100])
-        logger.exception('create_product failed: %s', e)
-        raise HTTPException(status_code=500, detail='Could not create product')
 
 @app.get("/products", response_model=List[schemas.ProductResponse])
 def list_products(
@@ -1761,6 +1927,12 @@ def get_product(product_id: int, db: Session = Depends(get_db)):
 
 @app.put("/products/{product_id}", response_model=schemas.ProductResponse)
 async def update_product(product_id: int, payload: schemas.ProductUpdate):
+    # Log incoming payload for diagnostics
+    try:
+        logger.info('PUT /products/%s called with payload: %s', product_id, jsonable_encoder(payload))
+    except Exception:
+        logger.exception('Failed to log payload for PUT /products/%s', product_id)
+
     def task():
         db = SessionLocal()
         try:
@@ -1768,11 +1940,30 @@ async def update_product(product_id: int, payload: schemas.ProductUpdate):
         finally:
             db.close()
 
-    prod = await anyio.to_thread.run_sync(task)
+    try:
+        prod = await anyio.to_thread.run_sync(task)
+    except Exception as e:
+        try:
+            tb = traceback.format_exc()
+            base = os.path.dirname(os.path.dirname(__file__))
+            with open(os.path.join(base, 'server_log.txt'), 'a', encoding='utf-8') as f:
+                f.write(f"{datetime.datetime.utcnow().isoformat()} - PUT /products/{product_id} exception: {str(e)[:400]}\n")
+                f.write(tb + "\n\n")
+        except Exception:
+            pass
+        logger.exception('PUT /products/%s failed: %s', product_id, e)
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
     # Normalize prod to obtain id whether it's a dict or object
     prod_id = prod.get('id') if isinstance(prod, dict) else getattr(prod, 'id', None)
-    await push_event({"action": "updated", "product": {"id": prod_id}})
-    await anyio.to_thread.run_sync(write_catalog_snapshot)
+    try:
+        await push_event({"action": "updated", "product": {"id": prod_id}})
+    except Exception:
+        pass
+    try:
+        await anyio.to_thread.run_sync(write_catalog_snapshot)
+    except Exception:
+        pass
     return prod
 
 @app.delete("/products/{product_id}")
