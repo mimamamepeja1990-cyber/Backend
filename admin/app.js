@@ -275,7 +275,8 @@ function validateForm(){
   const price = productForm.price.value;
   const desc = productForm.description.value.trim();
   // Basic form checks for product creation/update
-  const ok = name.length > 0 && desc.length > 0 && price !== '' && !isNaN(Number(price));
+  // Allow empty description (legacy products may not have descriptions)
+  const ok = name.length > 0 && price !== '' && !isNaN(Number(price));
   // Log last product form change (do not pollute with promotion variables)
   try{
     const timestamp = new Date().toISOString();
