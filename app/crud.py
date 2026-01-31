@@ -17,8 +17,22 @@ from sqlalchemy.exc import InternalError
 
 def _safe_execute_fetchall(db, stmt, params=None):
     params = params or {}
+    bind = db.get_bind()
+    conn = None
     try:
-        return db.execute(text(stmt), params).fetchall()
+        conn = bind.connect()
+        try:
+            return conn.execute(text(stmt), params).fetchall()
+        except Exception as inner_e:
+            # If the underlying DB connection is poisoned (aborted tx), invalidate it so pool removes it
+            try:
+                conn.invalidate()
+            except Exception:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            raise inner_e
     except Exception as e:
         msg = str(e)
         logger.exception('safe_fetchall initial failed: %s', msg[:300])
@@ -32,15 +46,44 @@ def _safe_execute_fetchall(db, stmt, params=None):
                 db.rollback()
             except Exception:
                 pass
-            # retry once
-            return db.execute(text(stmt), params).fetchall()
+            # retry once using a fresh engine-level connection (pool should not return the invalidated conn)
+            try:
+                bind2 = db.get_bind()
+                conn2 = bind2.connect()
+                try:
+                    return conn2.execute(text(stmt), params).fetchall()
+                finally:
+                    try: conn2.close()
+                    except Exception: pass
+            except Exception as e2:
+                logger.exception('safe_fetchall retry failed: %s', str(e2)[:300])
+                raise
         raise
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 
 def _safe_execute_fetchone(db, stmt, params=None):
     params = params or {}
+    bind = db.get_bind()
+    conn = None
     try:
-        return db.execute(text(stmt), params).fetchone()
+        conn = bind.connect()
+        try:
+            return conn.execute(text(stmt), params).fetchone()
+        except Exception as inner_e:
+            try:
+                conn.invalidate()
+            except Exception:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            raise inner_e
     except Exception as e:
         msg = str(e)
         logger.exception('safe_fetchone initial failed: %s', msg[:300])
@@ -54,14 +97,43 @@ def _safe_execute_fetchone(db, stmt, params=None):
                 db.rollback()
             except Exception:
                 pass
-            return db.execute(text(stmt), params).fetchone()
+            try:
+                bind2 = db.get_bind()
+                conn2 = bind2.connect()
+                try:
+                    return conn2.execute(text(stmt), params).fetchone()
+                finally:
+                    try: conn2.close()
+                    except Exception: pass
+            except Exception as e2:
+                logger.exception('safe_fetchone retry failed: %s', str(e2)[:300])
+                raise
         raise
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 
 def _safe_scalar(db, stmt, params=None):
     params = params or {}
+    bind = db.get_bind()
+    conn = None
     try:
-        return db.execute(text(stmt), params).scalar()
+        conn = bind.connect()
+        try:
+            return conn.execute(text(stmt), params).scalar()
+        except Exception as inner_e:
+            try:
+                conn.invalidate()
+            except Exception:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            raise inner_e
     except Exception as e:
         msg = str(e)
         logger.exception('safe_scalar initial failed: %s', msg[:300])
@@ -75,8 +147,24 @@ def _safe_scalar(db, stmt, params=None):
                 db.rollback()
             except Exception:
                 pass
-            return db.execute(text(stmt), params).scalar()
+            try:
+                bind2 = db.get_bind()
+                conn2 = bind2.connect()
+                try:
+                    return conn2.execute(text(stmt), params).scalar()
+                finally:
+                    try: conn2.close()
+                    except Exception: pass
+            except Exception as e2:
+                logger.exception('safe_scalar retry failed: %s', str(e2)[:300])
+                raise
         raise
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 
 def _safe_execute(db, stmt, params=None):
