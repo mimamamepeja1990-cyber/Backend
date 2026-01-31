@@ -2399,6 +2399,25 @@ def debug_token_previews():
     return out
 
 
+@app.get('/debug/server-log')
+async def debug_server_log(request: Request):
+    """Return last 200 lines of server_log.txt (requires MIGRATION_SECRET header)."""
+    secret = os.environ.get('MIGRATION_SECRET')
+    provided = request.headers.get('x-migrate-secret')
+    if secret and provided != secret:
+        return JSONResponse(status_code=403, content={'error': 'forbidden'})
+    try:
+        path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'server_log.txt')
+        if not os.path.exists(path):
+            return JSONResponse(status_code=200, content={'lines': []})
+        with open(path, 'r', encoding='utf-8') as f:
+            lines = f.read().splitlines()
+        return JSONResponse(status_code=200, content={'lines': lines[-200:]})
+    except Exception as e:
+        logger.exception('debug_server_log failed: %s', e)
+        return JSONResponse(status_code=500, content={'error': str(e)})
+
+
 @app.post('/backup-orders')
 async def backup_orders(request: Request):
     """Accept one or many order payloads and persist them to the DB so they are
