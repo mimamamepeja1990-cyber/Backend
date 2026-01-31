@@ -24,6 +24,11 @@ def _safe_execute_fetchall(db, stmt, params=None):
         logger.exception('safe_fetchall initial failed: %s', msg[:300])
         if 'current transaction is aborted' in msg.lower():
             try:
+                tb = traceback.format_exc()
+                _append_server_log(f'Aborted transaction detected during safe_fetchall: stmt={stmt} msg={msg[:300]}', tb)
+            except Exception:
+                pass
+            try:
                 db.rollback()
             except Exception:
                 pass
@@ -41,6 +46,11 @@ def _safe_execute_fetchone(db, stmt, params=None):
         logger.exception('safe_fetchone initial failed: %s', msg[:300])
         if 'current transaction is aborted' in msg.lower():
             try:
+                tb = traceback.format_exc()
+                _append_server_log(f'Aborted transaction detected during safe_fetchone: stmt={stmt} msg={msg[:300]}', tb)
+            except Exception:
+                pass
+            try:
                 db.rollback()
             except Exception:
                 pass
@@ -57,6 +67,11 @@ def _safe_scalar(db, stmt, params=None):
         logger.exception('safe_scalar initial failed: %s', msg[:300])
         if 'current transaction is aborted' in msg.lower():
             try:
+                tb = traceback.format_exc()
+                _append_server_log(f'Aborted transaction detected during safe_scalar: stmt={stmt} msg={msg[:300]}', tb)
+            except Exception:
+                pass
+            try:
                 db.rollback()
             except Exception:
                 pass
@@ -72,6 +87,11 @@ def _safe_execute(db, stmt, params=None):
         msg = str(e)
         logger.exception('safe_execute initial failed: %s', msg[:300])
         if 'current transaction is aborted' in msg.lower():
+            try:
+                tb = traceback.format_exc()
+                _append_server_log(f'Aborted transaction detected during safe_execute: stmt={stmt} msg={msg[:300]}', tb)
+            except Exception:
+                pass
             try:
                 db.rollback()
             except Exception:
