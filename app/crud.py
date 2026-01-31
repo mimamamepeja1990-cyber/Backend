@@ -210,40 +210,46 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
     
     # Fetch the inserted product
     try:
-        # Must use explicit column order to avoid mapping issues
-        result = _safe_execute_fetchone(db, 'SELECT id, name, price, description, category, image_url, active, created_at, updated_at FROM products WHERE name = :name ORDER BY created_at DESC LIMIT 1', {'name': payload.name})
-        
+        # Build an explicit column list that includes optional `stock` and `discount` if present
+        cols = ['id', 'name', 'price', 'description', 'category', 'image_url', 'active', 'created_at', 'updated_at']
+        try:
+            bind = db.get_bind()
+            insp = inspect(bind)
+            existing = {c['name'] for c in insp.get_columns('products')}
+        except Exception:
+            existing = set()
+        if 'stock' in existing:
+            cols.append('stock')
+        if 'discount' in existing:
+            cols.append('discount')
+        cols_sql = ', '.join(cols)
+        result = _safe_execute_fetchone(db, f'SELECT {cols_sql} FROM products WHERE name = :name ORDER BY created_at DESC LIMIT 1', {'name': payload.name})
+
         if result:
             logger.info('Fetched product id=%s', result[0])
-            # Unpack in correct order: id, name, price, description, category, image_url, active, created_at, updated_at
-            return SimpleNamespace(
-                id=result[0],
-                name=result[1],
-                price=result[2],
-                description=result[3],
-                category=result[4],
-                image_url=result[5],
-                active=result[6],
-                created_at=result[7],
-                updated_at=result[8],
-                stock=getattr(payload, 'stock', 0),
-                discount=getattr(payload, 'discount', 0.0)
-            )
+            # Unpack in correct order and return plain dict (avoid SimpleNamespace so callers can use .get())
+            obj = {cols[i]: result[i] for i in range(len(cols))}
+            # coerce numeric types
+            obj['price'] = float(obj.get('price') or 0.0)
+            obj['stock'] = int(obj.get('stock') or 0)
+            obj['discount'] = float(obj.get('discount') or 0.0)
+            obj['active'] = bool(obj.get('active')) if 'active' in obj else False
+            return obj
     except Exception as e:
         logger.exception('Could not fetch product: %s', e)
     
-    # Worst case: return SimpleNamespace with input data
-    return SimpleNamespace(
-        id=None,
-        name=payload.name,
-        price=payload.price,
-        stock=getattr(payload, 'stock', 0),
-        discount=getattr(payload, 'discount', 0.0),
-        description=payload.description,
-        category=payload.category,
-        image_url=payload.image_url,
-        active=payload.active
-    )
+    # Worst case: return a plain dict with input data
+    return {
+        'id': None,
+        'name': payload.name,
+        'price': float(payload.price) if getattr(payload, 'price', None) is not None else 0.0,
+        'stock': int(getattr(payload, 'stock', 0) or 0),
+        'discount': float(getattr(payload, 'discount', 0.0) or 0.0),
+        'description': payload.description,
+        'category': payload.category,
+        'image_url': payload.image_url,
+        'active': bool(getattr(payload, 'active', True))
+    }
 
 def get_product(db: Session, product_id: int) -> Optional[models.Product]:
     try:
@@ -330,7 +336,8 @@ def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate)
     if not row:
         return None
     objd = {cols[i]: row[i] for i in range(len(cols))}
-    return SimpleNamespace(**objd)
+    # Return plain dict for consistency
+    return objd
 
 def delete_product(db: Session, product_id: int):
     obj = get_product(db, product_id)

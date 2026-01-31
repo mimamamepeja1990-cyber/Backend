@@ -254,7 +254,7 @@ async def lifespan(app: FastAPI):
         try:
             # Use a raw count select to avoid SQLAlchemy attempting to select
             # mapped columns that may not yet exist in legacy DB schemas.
-            r = db.execute(text('SELECT count(*) FROM products')).scalar()
+            r = crud._safe_scalar(db, 'SELECT count(*) FROM products')
             prod_count = int(r or 0)
         except Exception as e:
             # Avoid any ORM-based product queries here because the ORM may
@@ -1578,7 +1578,12 @@ async def create_product(payload: schemas.ProductCreate):
         result = await anyio.to_thread.run_sync(task)
         if not result:
             raise HTTPException(status_code=500, detail='Product creation failed')
-        
+        # Normalize result to plain dict
+        if not isinstance(result, dict):
+            try:
+                result = {k: getattr(result, k) for k in ('id','name','price','description','category','image_url','active','stock','discount') if hasattr(result, k)}
+            except Exception:
+                result = dict(result.__dict__) if hasattr(result, '__dict__') else dict(result)
         try:
             await push_event({"action": "created", "product": {"id": result.get('id')}})
         except:
@@ -1637,7 +1642,7 @@ def list_products(
             elif sort == 'price_desc': order_clause = ' ORDER BY price DESC'
             cols_sql = ', '.join(cols)
             sql = f"SELECT {cols_sql} FROM products{where_clause}{order_clause} LIMIT :limit OFFSET :skip"
-            rows = db.execute(text(sql), params).fetchall()
+            rows = crud._safe_execute_fetchall(db, sql, params)
             result = []
             for row in rows:
                 objd = {cols[i]: row[i] for i in range(len(cols))}
@@ -1666,7 +1671,7 @@ def get_product(product_id: int, db: Session = Depends(get_db)):
         if 'stock' in existing: cols.append('stock')
         if 'discount' in existing: cols.append('discount')
         cols_sql = ', '.join(cols)
-        row = db.execute(text(f"SELECT {cols_sql} FROM products WHERE id = :id LIMIT 1"), {'id': product_id}).fetchone()
+        row = crud._safe_execute_fetchone(db, f"SELECT {cols_sql} FROM products WHERE id = :id LIMIT 1", {'id': product_id})
         if not row:
             raise HTTPException(404, 'Product not found')
         objd = {cols[i]: row[i] for i in range(len(cols))}
@@ -1682,7 +1687,9 @@ async def update_product(product_id: int, payload: schemas.ProductUpdate):
             db.close()
 
     prod = await anyio.to_thread.run_sync(task)
-    await push_event({"action": "updated", "product": {"id": prod.id}})
+    # Normalize prod to obtain id whether it's a dict or object
+    prod_id = prod.get('id') if isinstance(prod, dict) else getattr(prod, 'id', None)
+    await push_event({"action": "updated", "product": {"id": prod_id}})
     await anyio.to_thread.run_sync(write_catalog_snapshot)
     return prod
 
@@ -1716,7 +1723,7 @@ def debug_products_info(db: Session = Depends(get_db)):
     try:
         if cols:
             cols_sql = ', '.join(cols)
-            rows = db.execute(text(f"SELECT {cols_sql} FROM products ORDER BY created_at DESC LIMIT 10")).fetchall()
+            rows = crud._safe_execute_fetchall(db, f"SELECT {cols_sql} FROM products ORDER BY created_at DESC LIMIT 10")
             for row in rows:
                 obj = {cols[i]: row[i] for i in range(len(cols))}
                 sample.append(obj)
