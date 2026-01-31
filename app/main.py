@@ -7,6 +7,7 @@ from fastapi.responses import RedirectResponse, PlainTextResponse, Response, Fil
 from fastapi.responses import JSONResponse
 from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
@@ -476,6 +477,34 @@ def _cors_headers_for_request(request: Request) -> Dict[str, str]:
     else:
         headers['Access-Control-Allow-Origin'] = '*'
     return headers
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    # Log validation errors and request body to server_log.txt to help diagnose 422 issues in production
+    try:
+        try:
+            body_bytes = await request.body()
+            try:
+                body = body_bytes.decode('utf-8')
+            except Exception:
+                body = str(body_bytes)
+        except Exception:
+            body = '<could not read body>'
+        tb = traceback.format_exc()
+        try:
+            base = os.path.dirname(os.path.dirname(__file__))
+            logpath = os.path.join(base, 'server_log.txt')
+            with open(logpath, 'a', encoding='utf-8') as f:
+                f.write(f"{datetime.datetime.utcnow().isoformat()} - RequestValidationError path={request.url.path} body={body[:2000]} error={str(exc)[:500]}\n")
+                f.write(tb + "\n\n")
+        except Exception:
+            pass
+        logger.exception('RequestValidationError for %s: %s body=%s', request.url.path, exc, (body[:500] if body else ''))
+    except Exception:
+        logger.exception('validation_exception_handler failed')
+    headers = _cors_headers_for_request(request)
+    return JSONResponse(status_code=422, content={"detail": exc.errors()}, headers=headers)
 
 
 @app.exception_handler(Exception)
@@ -1620,6 +1649,12 @@ def auth_me(current_user = Depends(get_current_user)):
 @app.post("/products")
 async def create_product(payload: schemas.ProductCreate):
     """Create a product - no response validation, just raw JSON."""
+    # Log incoming payload (helps debug server vs validation failures)
+    try:
+        logger.info('POST /products called with payload: %s', jsonable_encoder(payload))
+    except Exception:
+        logger.exception('Failed to log payload for POST /products')
+
     def task():
         db = SessionLocal()
         try:
@@ -1680,10 +1715,17 @@ async def create_product(payload: schemas.ProductCreate):
     except HTTPException:
         raise
     except Exception as e:
+        try:
+            tb = traceback.format_exc()
+            base = os.path.dirname(os.path.dirname(__file__))
+            logpath = os.path.join(base, 'server_log.txt')
+            with open(logpath, 'a', encoding='utf-8') as f:
+                f.write(f"{datetime.datetime.utcnow().isoformat()} - POST /products exception: {str(e)[:400]}\n")
+                f.write(tb + "\n\n")
+        except Exception:
+            pass
         logger.exception('POST /products: %s', e)
         raise HTTPException(status_code=500, detail=str(e)[:100])
-        logger.exception('create_product failed: %s', e)
-        raise HTTPException(status_code=500, detail='Could not create product')
 
 @app.get("/products", response_model=List[schemas.ProductResponse])
 def list_products(
@@ -1761,6 +1803,12 @@ def get_product(product_id: int, db: Session = Depends(get_db)):
 
 @app.put("/products/{product_id}", response_model=schemas.ProductResponse)
 async def update_product(product_id: int, payload: schemas.ProductUpdate):
+    # Log incoming payload for diagnostics
+    try:
+        logger.info('PUT /products/%s called with payload: %s', product_id, jsonable_encoder(payload))
+    except Exception:
+        logger.exception('Failed to log payload for PUT /products/%s', product_id)
+
     def task():
         db = SessionLocal()
         try:
@@ -1768,11 +1816,30 @@ async def update_product(product_id: int, payload: schemas.ProductUpdate):
         finally:
             db.close()
 
-    prod = await anyio.to_thread.run_sync(task)
+    try:
+        prod = await anyio.to_thread.run_sync(task)
+    except Exception as e:
+        try:
+            tb = traceback.format_exc()
+            base = os.path.dirname(os.path.dirname(__file__))
+            with open(os.path.join(base, 'server_log.txt'), 'a', encoding='utf-8') as f:
+                f.write(f"{datetime.datetime.utcnow().isoformat()} - PUT /products/{product_id} exception: {str(e)[:400]}\n")
+                f.write(tb + "\n\n")
+        except Exception:
+            pass
+        logger.exception('PUT /products/%s failed: %s', product_id, e)
+        raise HTTPException(status_code=500, detail=str(e)[:200])
+
     # Normalize prod to obtain id whether it's a dict or object
     prod_id = prod.get('id') if isinstance(prod, dict) else getattr(prod, 'id', None)
-    await push_event({"action": "updated", "product": {"id": prod_id}})
-    await anyio.to_thread.run_sync(write_catalog_snapshot)
+    try:
+        await push_event({"action": "updated", "product": {"id": prod_id}})
+    except Exception:
+        pass
+    try:
+        await anyio.to_thread.run_sync(write_catalog_snapshot)
+    except Exception:
+        pass
     return prod
 
 @app.delete("/products/{product_id}")
