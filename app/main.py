@@ -17,6 +17,7 @@ import logging
 import csv
 import json
 import time
+import datetime
 from io import StringIO
 import anyio
 import sys
@@ -112,6 +113,74 @@ logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
 # -------------------------------------------------------------------
+# Engine-level safe helpers 🔧
+# -------------------------------------------------------------------
+
+def _invalidate_conn(conn):
+    try:
+        # mark connection as invalid so it's removed from pool
+        conn.invalidate()
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+def _safe_engine_fetchall(sql, params=None):
+    params = params or {}
+    try:
+        with engine.connect() as conn:
+            return conn.execute(text(sql), params).fetchall()
+    except Exception as e:
+        msg = str(e)
+        logger.exception('safe_engine_fetchall initial failed: %s', e)
+        if 'current transaction is aborted' in msg.lower():
+            try:
+                tb = traceback.format_exc()
+                # Persist diagnostic so we can find the originating failure in Render logs
+                base = os.path.dirname(os.path.dirname(__file__))
+                logpath = os.path.join(base, 'server_log.txt')
+                with open(logpath, 'a', encoding='utf-8') as f:
+                    f.write(f"{datetime.datetime.utcnow().isoformat()} - safe_engine_fetchall aborted transaction: stmt={sql} msg={msg[:300]}\n")
+                    f.write(tb + "\n\n")
+            except Exception:
+                pass
+        # retry once with a fresh connection
+        try:
+            with engine.connect() as conn2:
+                return conn2.execute(text(sql), params).fetchall()
+        except Exception as e2:
+            logger.exception('safe_engine_fetchall retry failed: %s', e2)
+            return None
+
+
+def _safe_engine_fetchone(sql, params=None):
+    params = params or {}
+    try:
+        with engine.connect() as conn:
+            return conn.execute(text(sql), params).fetchone()
+    except Exception as e:
+        msg = str(e)
+        logger.exception('safe_engine_fetchone initial failed: %s', e)
+        if 'current transaction is aborted' in msg.lower():
+            try:
+                tb = traceback.format_exc()
+                base = os.path.dirname(os.path.dirname(__file__))
+                logpath = os.path.join(base, 'server_log.txt')
+                with open(logpath, 'a', encoding='utf-8') as f:
+                    f.write(f"{datetime.datetime.utcnow().isoformat()} - safe_engine_fetchone aborted transaction: stmt={sql} msg={msg[:300]}\n")
+                    f.write(tb + "\n\n")
+            except Exception:
+                pass
+        try:
+            with engine.connect() as conn2:
+                return conn2.execute(text(sql), params).fetchone()
+        except Exception as e2:
+            logger.exception('safe_engine_fetchone retry failed: %s', e2)
+            return None
+
+# -------------------------------------------------------------------
 # LIFESPAN (startup / shutdown)
 # -------------------------------------------------------------------
 @asynccontextmanager
@@ -202,6 +271,10 @@ async def lifespan(app: FastAPI):
                         conn.execute(text(f"ALTER TABLE products ADD COLUMN {col} {coltype}"))
                     logger.info('Added missing column to products: %s', col)
                 except Exception as e:
+                    try:
+                        _invalidate_conn(conn)
+                    except Exception:
+                        pass
                     logger.warning('Could not add column %s to products: %s', col, e)
         finally:
             conn.close()
@@ -599,6 +672,10 @@ def _run_add_user_columns() -> dict:
                     conn.execute(text(sql))
                     results['added'].append(name)
                 except Exception as e:
+                    try:
+                        _invalidate_conn(conn)
+                    except Exception:
+                        pass
                     results['failed'].append({ 'name': name, 'error': str(e) })
         return results
     except Exception as e:
@@ -2271,8 +2348,15 @@ def debug_db_test(request: Request):
         try:
             conn2 = engine.connect()
             try:
-                r = conn2.execute(text('SELECT 1')).fetchone()
-                out['checks'].append({'select_1': True, 'result': list(r) if r is not None else None})
+                try:
+                    r = conn2.execute(text('SELECT 1')).fetchone()
+                    out['checks'].append({'select_1': True, 'result': list(r) if r is not None else None})
+                except Exception as e:
+                    try:
+                        _invalidate_conn(conn2)
+                    except Exception:
+                        pass
+                    out['checks'].append({'select_1': False, 'error': str(e)})
             finally:
                 conn2.close()
         except Exception as e:
@@ -2297,7 +2381,7 @@ def debug_db_test(request: Request):
 def debug_token_previews():
     """Return recent rows from `order_token_previews` for debugging/verification."""
     try:
-        rows = engine.execute(text('SELECT order_id, token_preview, token_received, created_at FROM order_token_previews ORDER BY created_at DESC LIMIT 50')).fetchall()
+        rows = _safe_engine_fetchall('SELECT order_id, token_preview, token_received, created_at FROM order_token_previews ORDER BY created_at DESC LIMIT 50') or []
     except Exception:
         return []
     out = []
@@ -2313,6 +2397,25 @@ def debug_token_previews():
             tp = None
         out.append({'order_id': r[0], 'token_preview': tp, 'token_received': bool(r[2]), 'created_at': str(r[3])})
     return out
+
+
+@app.get('/debug/server-log')
+async def debug_server_log(request: Request):
+    """Return last 200 lines of server_log.txt (requires MIGRATION_SECRET header)."""
+    secret = os.environ.get('MIGRATION_SECRET')
+    provided = request.headers.get('x-migrate-secret')
+    if secret and provided != secret:
+        return JSONResponse(status_code=403, content={'error': 'forbidden'})
+    try:
+        path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'server_log.txt')
+        if not os.path.exists(path):
+            return JSONResponse(status_code=200, content={'lines': []})
+        with open(path, 'r', encoding='utf-8') as f:
+            lines = f.read().splitlines()
+        return JSONResponse(status_code=200, content={'lines': lines[-200:]})
+    except Exception as e:
+        logger.exception('debug_server_log failed: %s', e)
+        return JSONResponse(status_code=500, content={'error': str(e)})
 
 
 @app.post('/backup-orders')
@@ -2400,7 +2503,7 @@ def list_orders(skip: int = 0, limit: int = 200, source: Optional[str] = None, d
                 if (not od.get('user_full_name') and not od.get('user_email')) and od.get('id'):
                     try:
                         # order_id stored as text in order_token_previews to support debug ids
-                        row = engine.execute(text('SELECT token_preview, token_received FROM order_token_previews WHERE order_id = :id ORDER BY created_at DESC LIMIT 1'), {'id': str(od.get('id'))}).fetchone()
+                        row = _safe_engine_fetchone('SELECT token_preview, token_received FROM order_token_previews WHERE order_id = :id ORDER BY created_at DESC LIMIT 1', {'id': str(od.get('id'))})
                         if row:
                             try:
                                 tp_raw = row[0]
@@ -2496,12 +2599,13 @@ async def update_order_status(order_id: str, request: Request):
 
     cols_sql = ', '.join(cols)
     try:
-        conn2 = engine.connect()
         if use_id_int:
-            row = conn2.execute(text(f"SELECT {cols_sql} FROM orders WHERE id = :id LIMIT 1"), {'id': id_param}).fetchone()
+            row = _safe_engine_fetchone(f"SELECT {cols_sql} FROM orders WHERE id = :id LIMIT 1", {'id': id_param})
         else:
-            row = conn2.execute(text(f"SELECT {cols_sql} FROM orders WHERE CAST(id AS TEXT) = :id LIMIT 1"), {'id': id_param}).fetchone()
-        conn2.close()
+            row = _safe_engine_fetchone(f"SELECT {cols_sql} FROM orders WHERE CAST(id AS TEXT) = :id LIMIT 1", {'id': id_param})
+        if row is None:
+            # treat as not found or as a DB failure depending on caller
+            pass
     except Exception as e:
         logger.exception('fetch updated order failed: %s', e)
         headers = _cors_headers_for_request(request)

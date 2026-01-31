@@ -97,5 +97,77 @@
     "category": "test",
     "image_url": "",
     "active": true
+  },
+  {
+    "id": 12,
+    "name": "PruebaDirect",
+    "price": 2.5,
+    "description": "creado por test directo",
+    "category": "Test",
+    "image_url": "",
+    "active": true
+  },
+  {
+    "id": 13,
+    "name": "APITestNoDiscount",
+    "price": 7.5,
+    "description": "No discount provided",
+    "category": "API",
+    "image_url": "",
+    "active": true
+  },
+  {
+    "id": 14,
+    "name": "APITestNoDiscount",
+    "price": 7.5,
+    "description": "No discount provided",
+    "category": "API",
+    "image_url": "",
+    "active": true
+  },
+  {
+    "id": 15,
+    "name": "APITestNoDiscount",
+    "price": 7.5,
+    "description": "Updated via API test",
+    "category": "API",
+    "image_url": "",
+    "active": true
+  },
+  {
+    "id": 16,
+    "name": "APITestNoDiscount",
+    "price": 7.5,
+    "description": "Updated via API test",
+    "category": "API",
+    "image_url": "",
+    "active": true
+  },
+  {
+    "id": 17,
+    "name": "APITestEmptyDesc",
+    "price": 6.0,
+    "description": "",
+    "category": "API",
+    "image_url": "",
+    "active": true
+  },
+  {
+    "id": 18,
+    "name": "APITestNoDiscount",
+    "price": 7.5,
+    "description": "Updated via API test",
+    "category": "API",
+    "image_url": "",
+    "active": true
+  },
+  {
+    "id": 19,
+    "name": "APITestEmptyDesc",
+    "price": 6.0,
+    "description": "",
+    "category": "API",
+    "image_url": "",
+    "active": true
   }
 ]
