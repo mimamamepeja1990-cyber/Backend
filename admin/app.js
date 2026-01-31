@@ -512,7 +512,13 @@ async function handleSave(ev){
   // maintain compatibility: set hidden category to first selected or existing value
   productForm.category.value = (selectedCats && selectedCats.length) ? String(selectedCats[0]) : (productForm.category.value || '');
 
-  const payload = { name: productForm.name.value.trim(), price: Number(productForm.price.value), description: productForm.description.value.trim(), category: productForm.category.value.trim() || null, image_url: imageUrl, active: true, stock: Number(productForm.stock?.value || 0), discount: Number(productForm.discount?.value || 0) };
+  const payload = { name: productForm.name.value.trim(), price: Number(productForm.price.value), description: productForm.description.value.trim(), category: productForm.category.value.trim() || null, image_url: imageUrl, active: true, stock: Number(productForm.stock?.value || 0) };
+  // Only include discount when provided so it's optional
+  try{
+    const discVal = productForm.discount && productForm.discount.value !== '' ? Number(productForm.discount.value) : undefined;
+    if(typeof discVal !== 'undefined' && !isNaN(discVal)) payload.discount = discVal;
+  }catch(e){ }
+
   try{
     let created = null;
     if(currentEditId){ await updateProduct(currentEditId, payload); showToast('Producto actualizado'); created = { id: currentEditId }; }
@@ -579,7 +585,7 @@ async function onEdit(id){
     productForm.category.value = p.category;
     productForm.description.value = p.description;
     try{ productForm.stock.value = (p.stock != null) ? String(p.stock) : '0'; }catch(_){ }
-    try{ productForm.discount.value = (p.discount != null) ? String(p.discount) : '0'; }catch(_){ }
+    try{ productForm.discount.value = (p.discount != null) ? String(p.discount) : ''; }catch(_){ }
     let previewSrc = '';
     if(p.image_url){
       if(p.image_url.startsWith('http://') || p.image_url.startsWith('https://') || p.image_url.startsWith('//')) previewSrc = p.image_url;
