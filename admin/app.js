@@ -1829,7 +1829,9 @@ function renderAddConsumosList(products, existing){
     for(const p of (products || [])){
       try{
         const row = document.createElement('div'); row.className = 'add-consumo-row'; row.style.display = 'flex'; row.style.justifyContent = 'space-between'; row.style.alignItems = 'center'; row.style.padding = '6px 8px'; row.style.borderBottom = '1px solid rgba(0,0,0,0.04)';
-        const left = document.createElement('div'); left.style.flex = '1'; left.innerHTML = `${escapeHtml(p.name || p.nombre || '')} <small style="color:#666; display:block">${escapeHtml(p.category || p.categoria || '')}</small>`;
+        const left = document.createElement('div'); left.style.flex = '1';
+        const stockText = (p.stock != null) ? (Number(p.stock) > 0 ? ('Stock: ' + Number(p.stock)) : 'Sin stock') : '';
+        left.innerHTML = `${escapeHtml(p.name || p.nombre || '')} <small style="color:#666; display:block">${escapeHtml(p.category || p.categoria || '')}${stockText ? ' — ' + escapeHtml(String(stockText)) : ''}</small>`;
         const right = document.createElement('div'); right.style.display = 'flex'; right.style.gap = '8px';
         const cb = document.createElement('input'); cb.type = 'checkbox'; cb.dataset.id = String(p.id); cb.id = 'addc_' + String(p.id);
         const inp = document.createElement('input'); inp.type = 'number'; inp.min = 0; inp.max = 100; inp.placeholder = 'Descuento %'; inp.style.width = '88px'; inp.dataset.id = String(p.id);
@@ -1890,6 +1892,8 @@ function renderConsumosList(products, consumos){
   consumosList.innerHTML = '';
   const map = {};
   (consumos || []).forEach(c => { map[String(c.id)] = c.discount; });
+  // update count indicator
+  try{ const count = Object.keys(map).length; const el = document.getElementById('consumosCount'); if(el) el.textContent = count + ' producto' + (count === 1 ? '' : 's'); }catch(_){ }
   for(const p of (products || [])){
     const row = document.createElement('div'); row.className = 'consumo-row';
     const left = document.createElement('div'); left.className = 'left';
@@ -1899,7 +1903,9 @@ function renderConsumosList(products, consumos){
     const right = document.createElement('div'); right.className = 'right';
     const inp = document.createElement('input'); inp.type='number'; inp.min=0; inp.max=100; inp.placeholder='Descuento %'; inp.value = map[String(p.id)] != null ? String(map[String(p.id)]) : '';
     inp.dataset.id = String(p.id);
+    const stockSpan = document.createElement('small'); stockSpan.style.color = '#666'; stockSpan.style.marginLeft = '8px'; stockSpan.textContent = (p.stock != null) ? (Number(p.stock) > 0 ? 'Stock: ' + Number(p.stock) : 'Sin stock') : '';
     right.appendChild(inp);
+    right.appendChild(stockSpan);
     row.appendChild(left); row.appendChild(right);
     consumosList.appendChild(row);
   }

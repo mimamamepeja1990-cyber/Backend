@@ -1576,6 +1576,16 @@ async def save_consumos(request: Request):
             os.makedirs(CATALOG_DIR, exist_ok=True)
             with open(consumos_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+            # Update static snapshot with consumos reflected (best-effort) and notify WS clients
+            try:
+                import anyio
+                await anyio.to_thread.run_sync(write_catalog_snapshot)
+            except Exception:
+                logger.exception('write_catalog_snapshot after save_consumos failed')
+            try:
+                await push_event({"action": "consumos-updated", "consumos": data})
+            except Exception:
+                logger.exception('push_event consumos-updated failed')
             headers = _cors_headers_for_request(request)
             return JSONResponse(status_code=200, content={'detail': 'saved'}, headers=headers)
         except Exception as write_err:
@@ -2038,6 +2048,8 @@ def write_catalog_snapshot():
             "category": p.category,
             "image_url": p.image_url,
             "active": p.active,
+            "stock": int(p.stock) if getattr(p, 'stock', None) is not None else None,
+            "discount": int(p.discount) if getattr(p, 'discount', None) is not None else None,
         }
         for p in products
     ]
@@ -2388,6 +2400,22 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
         except Exception:
             pass
         await push_event({"action": "order_created", "order": payload})
+        # If order creation decremented stock, update snapshot and notify product watchers
+        try:
+            updated = getattr(order, '_updated_product_ids', None)
+            if updated:
+                try:
+                    import anyio
+                    await anyio.to_thread.run_sync(write_catalog_snapshot)
+                except Exception:
+                    logger.exception('write_catalog_snapshot after order failed')
+                try:
+                    for pid in updated:
+                        await push_event({"action": "updated", "product": {"id": pid}})
+                except Exception:
+                    logger.exception('push_event product updates after order failed')
+        except Exception:
+            logger.exception('post-order product update notifications failed')
         return order
     except HTTPException:
         raise

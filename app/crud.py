@@ -703,6 +703,39 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
 
         # Execute via Session.execute so it participates in the session transaction
         res = _safe_execute(db, sql, params)
+        # Attempt to decrement stock for ordered items (atomic within this transaction)
+        updated_product_ids = set()
+        try:
+            for it in items_list:
+                try:
+                    pid = int(it.get('id'))
+                except Exception:
+                    pid = None
+                if pid is None:
+                    continue
+                qty = int(it.get('qty', 1) or 1)
+                if qty <= 0:
+                    continue
+                # Try row-level lock when supported
+                try:
+                    prod_row = db.query(models.Product).filter(models.Product.id == pid).with_for_update().first()
+                except Exception:
+                    prod_row = db.query(models.Product).filter(models.Product.id == pid).first()
+                if not prod_row:
+                    continue
+                try:
+                    avail = int(getattr(prod_row, 'stock', 0) or 0)
+                except Exception:
+                    avail = 0
+                if avail < qty:
+                    raise HTTPException(status_code=400, detail='actualmente no contamos con stock de este articulo')
+                prod_row.stock = avail - qty
+                db.add(prod_row)
+                updated_product_ids.add(pid)
+        except HTTPException:
+            raise
+        except Exception:
+            logger.exception('Stock decrement step failed; continuing')
         # For Postgres (returning) get id and created_at
         new_id = None
         new_created_at = None
@@ -1086,6 +1119,11 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                         db.rollback()
                     except Exception:
                         pass
+    except Exception:
+        pass
+    try:
+        # Attach any updated product ids so callers can notify frontends / update snapshots
+        obj._updated_product_ids = list(updated_product_ids) if 'updated_product_ids' in locals() else []
     except Exception:
         pass
     return obj
