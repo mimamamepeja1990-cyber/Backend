@@ -22,6 +22,7 @@ import datetime
 from io import StringIO
 import anyio
 import sys
+import traceback
 
 from sqlalchemy.orm import Session
 from sqlalchemy import text
@@ -1578,7 +1579,6 @@ async def save_consumos(request: Request):
                 json.dump(data, f, ensure_ascii=False, indent=2)
             # Update static snapshot with consumos reflected (best-effort) and notify WS clients
             try:
-                import anyio
                 await anyio.to_thread.run_sync(write_catalog_snapshot)
             except Exception:
                 logger.exception('write_catalog_snapshot after save_consumos failed')
@@ -2406,7 +2406,6 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
             updated = getattr(order, '_updated_product_ids', None)
             if updated:
                 try:
-                    import anyio
                     await anyio.to_thread.run_sync(write_catalog_snapshot)
                 except Exception:
                     logger.exception('write_catalog_snapshot after order failed')
@@ -2419,7 +2418,6 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
             consumed = getattr(order, '_consumos_consumed', None)
             if consumed:
                 try:
-                    import anyio
                     def _apply_consumos(consumed_map):
                         try:
                             path = os.path.join(CATALOG_DIR, 'consumos.json')
@@ -2466,7 +2464,6 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
                         except Exception:
                             logger.exception('push_event consumos-updated after order failed')
                         try:
-                            import anyio
                             await anyio.to_thread.run_sync(write_catalog_snapshot)
                         except Exception:
                             logger.exception('write_catalog_snapshot after consumos update failed')

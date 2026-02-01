@@ -1867,12 +1867,11 @@ async function confirmAddConsumos(){
     // Merge with existing consumos: fetch current, replace per selected, preserve others not touched
     let existing = [];
     try{ const r = await safeFetch(API_BASE + '/api/consumos').catch(()=>[]); existing = Array.isArray(r) ? r : []; }catch(e){ existing = []; }
-    const selMap = {}; selected.forEach(s => { selMap[String(s.id)] = s.discount; });
-    const merged = [];
-    // keep existing ones not replaced
-    (existing || []).forEach(e => { if(!selMap[String(e.id)]) merged.push(e); });
-    // add selected ones
-    selected.forEach(s => merged.push({ id: s.id, discount: s.discount }));
+    // build existing map and overwrite with selected values (preserve discount + qty)
+    const existingMap = {};
+    (existing || []).forEach(e => { try{ existingMap[String(e.id)] = { id: e.id, discount: Number(e.discount || e.value || 0), qty: Number(e.qty || e.cantidad || 0) }; }catch(_){ } });
+    selected.forEach(s => { try{ existingMap[String(s.id)] = { id: s.id, discount: Number(s.discount || 0), qty: Number(s.qty || 0) }; }catch(_){ } });
+    const merged = Object.values(existingMap);
     // Save merged consumos
     const resp = await safeFetch(API_BASE + '/api/consumos', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(merged) });
     showToast('Consumiciones agregadas', 'info');

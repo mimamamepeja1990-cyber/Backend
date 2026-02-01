@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Optional, List, Union
 from datetime import datetime
 
 class ProductBase(BaseModel):
@@ -76,7 +76,7 @@ class LoginRequest(BaseModel):
 
 # Orders
 class OrderItem(BaseModel):
-    id: str
+    id: Union[str, int]
     qty: int
     meta: Optional[dict] = None
 
