@@ -2400,8 +2400,9 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
         except Exception:
             pass
         await push_event({"action": "order_created", "order": payload})
-        # If order creation decremented stock, update snapshot and notify product watchers
+        # If order creation decremented stock, update snapshot and notify product watchers.
         try:
+            # Product stock updates
             updated = getattr(order, '_updated_product_ids', None)
             if updated:
                 try:
@@ -2414,6 +2415,63 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
                         await push_event({"action": "updated", "product": {"id": pid}})
                 except Exception:
                     logger.exception('push_event product updates after order failed')
+            # Consumptions consumed: reduce quantities in consumos.json on disk
+            consumed = getattr(order, '_consumos_consumed', None)
+            if consumed:
+                try:
+                    import anyio
+                    def _apply_consumos(consumed_map):
+                        try:
+                            path = os.path.join(CATALOG_DIR, 'consumos.json')
+                            cur = []
+                            if os.path.exists(path):
+                                try:
+                                    with open(path, 'r', encoding='utf-8') as f:
+                                        cur = json.load(f) or []
+                                except Exception:
+                                    cur = []
+                            # Build map of existing entries
+                            emap = { int(c.get('id')): c for c in cur }
+                            changed = False
+                            for pid_s, delta in consumed_map.items():
+                                try:
+                                    pid = int(pid_s)
+                                except Exception:
+                                    continue
+                                if pid not in emap:
+                                    continue
+                                try:
+                                    curqty = int(emap[pid].get('qty', 0) or 0)
+                                except Exception:
+                                    curqty = 0
+                                newqty = max(0, curqty - int(delta or 0))
+                                if newqty <= 0:
+                                    del emap[pid]
+                                    changed = True
+                                else:
+                                    emap[pid]['qty'] = newqty
+                                    changed = True
+                            if changed:
+                                new_list = list(emap.values())
+                                with open(path, 'w', encoding='utf-8') as f:
+                                    json.dump(new_list, f, ensure_ascii=False, indent=2)
+                                return new_list
+                            return None
+                        except Exception:
+                            return None
+                    new_consumos = await anyio.to_thread.run_sync(lambda: _apply_consumos(consumed))
+                    if new_consumos is not None:
+                        try:
+                            await push_event({"action": "consumos-updated", "consumos": new_consumos})
+                        except Exception:
+                            logger.exception('push_event consumos-updated after order failed')
+                        try:
+                            import anyio
+                            await anyio.to_thread.run_sync(write_catalog_snapshot)
+                        except Exception:
+                            logger.exception('write_catalog_snapshot after consumos update failed')
+                except Exception:
+                    logger.exception('apply consumos after order failed')
         except Exception:
             logger.exception('post-order product update notifications failed')
         return order

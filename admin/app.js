@@ -427,6 +427,7 @@ function renderProducts(products){
       <td>${p.name}</td>
       <td>${catsDisplay}</td>
       <td>$${parseFloat(p.price).toFixed(2)}</td>
+      <td>${(p.stock != null) ? (Number(p.stock) > 0 ? Number(p.stock) : 'Sin stock') : '—'}</td>
       <td>${p.active ? 'Sí' : 'No'}</td>
       <td>
         <button data-id="${p.id}" class="editBtn btn">Editar</button>
@@ -1823,7 +1824,7 @@ function renderAddConsumosList(products, existing){
   if(!addConsumosList) return;
   try{
     const map = {};
-    (existing || []).forEach(c => { try{ map[String(c.id)] = Number(c.discount || c.value || 0); }catch(_){ } });
+    (existing || []).forEach(c => { try{ map[String(c.id)] = { discount: Number(c.discount || c.value || 0), qty: Number(c.qty || c.cantidad || 0) }; }catch(_){ } });
     addConsumosList.innerHTML = '';
     const frag = document.createDocumentFragment();
     for(const p of (products || [])){
@@ -1834,9 +1835,10 @@ function renderAddConsumosList(products, existing){
         left.innerHTML = `${escapeHtml(p.name || p.nombre || '')} <small style="color:#666; display:block">${escapeHtml(p.category || p.categoria || '')}${stockText ? ' — ' + escapeHtml(String(stockText)) : ''}</small>`;
         const right = document.createElement('div'); right.style.display = 'flex'; right.style.gap = '8px';
         const cb = document.createElement('input'); cb.type = 'checkbox'; cb.dataset.id = String(p.id); cb.id = 'addc_' + String(p.id);
-        const inp = document.createElement('input'); inp.type = 'number'; inp.min = 0; inp.max = 100; inp.placeholder = 'Descuento %'; inp.style.width = '88px'; inp.dataset.id = String(p.id);
-        if(map[String(p.id)] != null){ cb.checked = true; inp.value = String(map[String(p.id)]); }
-        right.appendChild(inp); right.appendChild(cb);
+        const inpDiscount = document.createElement('input'); inpDiscount.type = 'number'; inpDiscount.className = 'discount-input'; inpDiscount.min = 0; inpDiscount.max = 100; inpDiscount.placeholder = 'Descuento %'; inpDiscount.style.width = '88px'; inpDiscount.dataset.id = String(p.id);
+        const inpQty = document.createElement('input'); inpQty.type = 'number'; inpQty.className = 'qty-input'; inpQty.min = 0; inpQty.placeholder = 'Cant. venc.'; inpQty.style.width = '88px'; inpQty.dataset.id = String(p.id);
+        if(map[String(p.id)]){ cb.checked = true; inpDiscount.value = String(map[String(p.id)].discount); inpQty.value = String(map[String(p.id)].qty || ''); }
+        right.appendChild(inpDiscount); right.appendChild(inpQty); right.appendChild(cb);
         row.appendChild(left); row.appendChild(right); frag.appendChild(row);
       }catch(e){ /* ignore individual row errors */ }
     }
@@ -1852,11 +1854,13 @@ async function confirmAddConsumos(){
     for(const r of rows){
       try{
         const cb = r.querySelector('input[type=checkbox]');
-        const inp = r.querySelector('input[type=number]');
+        const inpDiscount = r.querySelector('.discount-input');
+        const inpQty = r.querySelector('.qty-input');
         if(cb && cb.checked){
           const id = Number(cb.dataset.id);
-          const discount = Number(inp && inp.value ? inp.value : 0);
-          if(!isNaN(discount) && discount > 0){ selected.push({ id, discount }); }
+          const discount = Number(inpDiscount && inpDiscount.value ? inpDiscount.value : 0);
+          const qty = Number(inpQty && inpQty.value ? inpQty.value : 0);
+          if(!isNaN(discount) && discount > 0 && !isNaN(qty) && qty >= 0){ selected.push({ id, discount, qty }); }
         }
       }catch(_){ }
     }
@@ -1891,20 +1895,22 @@ function renderConsumosList(products, consumos){
   if(!consumosList) return;
   consumosList.innerHTML = '';
   const map = {};
-  (consumos || []).forEach(c => { map[String(c.id)] = c.discount; });
+  (consumos || []).forEach(c => { map[String(c.id)] = { discount: c.discount, qty: c.qty }; });
   // update count indicator
   try{ const count = Object.keys(map).length; const el = document.getElementById('consumosCount'); if(el) el.textContent = count + ' producto' + (count === 1 ? '' : 's'); }catch(_){ }
   for(const p of (products || [])){
     const row = document.createElement('div'); row.className = 'consumo-row';
     const left = document.createElement('div'); left.className = 'left';
-    const cb = document.createElement('input'); cb.type='checkbox'; cb.dataset.id = String(p.id); cb.id = 'consumo-p-' + p.id; if(map[String(p.id)]) cb.checked = true;
+    const cb = document.createElement('input'); cb.type='checkbox'; cb.dataset.id = String(p.id); cb.id = 'consumo-p-' + p.id; if(map[String(p.id)] && map[String(p.id)].discount) cb.checked = true;
     const lbl = document.createElement('label'); lbl.htmlFor = cb.id; lbl.innerText = p.name + (p.category ? ' — '+p.category : '');
     left.appendChild(cb); left.appendChild(lbl);
     const right = document.createElement('div'); right.className = 'right';
-    const inp = document.createElement('input'); inp.type='number'; inp.min=0; inp.max=100; inp.placeholder='Descuento %'; inp.value = map[String(p.id)] != null ? String(map[String(p.id)]) : '';
-    inp.dataset.id = String(p.id);
+    const inpDiscount = document.createElement('input'); inpDiscount.type='number'; inpDiscount.className='discount-input'; inpDiscount.min=0; inpDiscount.max=100; inpDiscount.placeholder='Descuento %'; inpDiscount.value = (map[String(p.id)] && map[String(p.id)].discount != null) ? String(map[String(p.id)].discount) : '';
+    inpDiscount.dataset.id = String(p.id);
+    const inpQty = document.createElement('input'); inpQty.type='number'; inpQty.className='qty-input'; inpQty.min=0; inpQty.placeholder='Cant. venc.'; inpQty.value = (map[String(p.id)] && map[String(p.id)].qty != null) ? String(map[String(p.id)].qty) : '';
     const stockSpan = document.createElement('small'); stockSpan.style.color = '#666'; stockSpan.style.marginLeft = '8px'; stockSpan.textContent = (p.stock != null) ? (Number(p.stock) > 0 ? 'Stock: ' + Number(p.stock) : 'Sin stock') : '';
-    right.appendChild(inp);
+    right.appendChild(inpDiscount);
+    right.appendChild(inpQty);
     right.appendChild(stockSpan);
     row.appendChild(left); row.appendChild(right);
     consumosList.appendChild(row);
@@ -1918,12 +1924,15 @@ async function saveConsumos(){
     const data = [];
     for(const r of rows){
       const cb = r.querySelector('input[type=checkbox]');
-      const inp = r.querySelector('input[type=number]');
+      const inpDiscount = r.querySelector('.discount-input');
+      const inpQty = r.querySelector('.qty-input');
       if(cb && cb.checked){
         const id = Number(cb.dataset.id);
-        const discount = Number(inp && inp.value ? inp.value : 0);
+        const discount = Number(inpDiscount && inpDiscount.value ? inpDiscount.value : 0);
+        const qty = Number(inpQty && inpQty.value ? inpQty.value : 0);
         if(isNaN(discount) || discount <= 0) continue;
-        data.push({ id, discount });
+        if(isNaN(qty) || qty < 0) continue;
+        data.push({ id, discount, qty });
       }
     }
     const resp = await safeFetch(API_BASE + '/api/consumos', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });

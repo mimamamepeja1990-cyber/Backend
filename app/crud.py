@@ -515,26 +515,55 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
 
     items_json = _json.dumps(items_list, ensure_ascii=False)
 
-    # Validate stock availability: if any product lacks enough stock, raise HTTP 400
+    # Validate stock availability: consider near-expiry consumos and total stock.
+    # Read consumos.json to get available near-expiry quantities (best-effort, file may not exist).
     try:
+        root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        catalog_dir = os.environ.get('CATALOG_DIR') or os.path.join(root_dir, 'catalogo')
+        consumos_path = os.path.join(catalog_dir, 'consumos.json')
+        consumos_map = {}
+        try:
+            if os.path.exists(consumos_path):
+                with open(consumos_path, 'r', encoding='utf-8') as f:
+                    c_list = _json.load(f) or []
+                    for c in c_list:
+                        try:
+                            cid = int(c.get('id'))
+                            qty_c = int(c.get('qty', 0) or 0)
+                            consumos_map[cid] = qty_c
+                        except Exception:
+                            continue
+        except Exception:
+            consumos_map = {}
         for it in items_list:
             try:
                 pid = int(it.get('id'))
             except Exception:
-                # non-numeric id: skip strict stock enforcement (admin may use name-based ids)
                 pid = None
             if pid is None:
                 continue
+            qty_req = int(it.get('qty', 1) or 1)
             prod = db.query(models.Product).filter(models.Product.id == pid).first()
             if prod is None:
                 continue
-            # treat None stock as 0
-            try:
-                available = int(getattr(prod, 'stock', 0) or 0)
-            except Exception:
-                available = 0
-            if available < int(it.get('qty', 1) or 1):
-                raise HTTPException(status_code=400, detail='actualmente no contamos con stock de este articulo')
+            # nearest-expiry available
+            near_avail = int(consumos_map.get(pid, 0) or 0)
+            # stock may be None (unknown) or numeric
+            stock_attr = getattr(prod, 'stock', None)
+            if stock_attr is None:
+                # If stock unknown, allow order as long as near-expiry covers it; otherwise allow (do not block) to avoid preventing orders
+                if near_avail >= qty_req:
+                    continue
+                else:
+                    # stock unknown and near-expiry insufficient -> allow (do not block)
+                    continue
+            else:
+                try:
+                    stock_avail = int(stock_attr or 0)
+                except Exception:
+                    stock_avail = 0
+                if (near_avail + stock_avail) < qty_req:
+                    raise HTTPException(status_code=400, detail='actualmente no contamos con stock de este articulo')
     except HTTPException:
         raise
     except Exception:
@@ -703,9 +732,27 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
 
         # Execute via Session.execute so it participates in the session transaction
         res = _safe_execute(db, sql, params)
-        # Attempt to decrement stock for ordered items (atomic within this transaction)
+        # Consume near-expiry quantities first (from consumos.json), then decrement DB stock for remaining units.
         updated_product_ids = set()
+        consumed_map = {}
         try:
+            # Re-load consumos file (best-effort snapshot from disk)
+            root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+            catalog_dir = os.environ.get('CATALOG_DIR') or os.path.join(root_dir, 'catalogo')
+            consumos_path = os.path.join(catalog_dir, 'consumos.json')
+            consumos_disk = {}
+            try:
+                if os.path.exists(consumos_path):
+                    with open(consumos_path, 'r', encoding='utf-8') as f:
+                        _cl = _json.load(f) or []
+                        for c in _cl:
+                            try:
+                                cid = int(c.get('id'))
+                                consumos_disk[cid] = int(c.get('qty', 0) or 0)
+                            except Exception:
+                                continue
+            except Exception:
+                consumos_disk = {}
             for it in items_list:
                 try:
                     pid = int(it.get('id'))
@@ -716,26 +763,38 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                 qty = int(it.get('qty', 1) or 1)
                 if qty <= 0:
                     continue
-                # Try row-level lock when supported
+                # First: take from consumos (near-expiry) if available
+                take_from_consumos = min(consumos_disk.get(pid, 0), qty)
+                if take_from_consumos > 0:
+                    consumed_map[pid] = consumed_map.get(pid, 0) + take_from_consumos
+                remaining = qty - take_from_consumos
+                if remaining <= 0:
+                    continue
+                # Then: decrement DB stock when available (row-lock when supported)
                 try:
                     prod_row = db.query(models.Product).filter(models.Product.id == pid).with_for_update().first()
                 except Exception:
                     prod_row = db.query(models.Product).filter(models.Product.id == pid).first()
                 if not prod_row:
+                    # no product row to decrement, allow (we cannot enforce)
+                    continue
+                stock_attr = getattr(prod_row, 'stock', None)
+                if stock_attr is None:
+                    # stock unknown: allow remaining (do not block or decrement)
                     continue
                 try:
-                    avail = int(getattr(prod_row, 'stock', 0) or 0)
+                    avail = int(stock_attr or 0)
                 except Exception:
                     avail = 0
-                if avail < qty:
+                if avail < remaining:
                     raise HTTPException(status_code=400, detail='actualmente no contamos con stock de este articulo')
-                prod_row.stock = avail - qty
+                prod_row.stock = avail - remaining
                 db.add(prod_row)
                 updated_product_ids.add(pid)
         except HTTPException:
             raise
         except Exception:
-            logger.exception('Stock decrement step failed; continuing')
+            logger.exception('Stock/consumos decrement step failed; continuing')
         # For Postgres (returning) get id and created_at
         new_id = None
         new_created_at = None
@@ -1124,6 +1183,8 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
     try:
         # Attach any updated product ids so callers can notify frontends / update snapshots
         obj._updated_product_ids = list(updated_product_ids) if 'updated_product_ids' in locals() else []
+        # Attach consumos consumed deltas so higher layer can update consumos.json on-disk
+        obj._consumos_consumed = { str(k): int(v) for k, v in (consumed_map.items() if 'consumed_map' in locals() else []) } if 'consumed_map' in locals() else {}
     except Exception:
         pass
     return obj
