@@ -140,6 +140,7 @@
         <div class="controls">
           <input id="consumoSearch" placeholder="Buscar producto..." />
           <button id="loadConsumosBtn" class="btn">Cargar consumos</button>
+          <button id="addConsumosBtn" class="btn primary">Agregar consumos</button>
           <button id="saveConsumosBtn" class="btn primary">Guardar consumos</button>
         </div>
         <div id="consumosList" class="table-wrap" style="margin-top:12px; max-height:420px; overflow:auto; border:1px solid rgba(0,0,0,0.04); padding:8px; border-radius:8px; background:#fff">
@@ -254,6 +255,22 @@
         </div>
         </section>
       </section>
+
+      <!-- Add Consumo Modal -->
+      <div id="addConsumoModal" class="modal hidden" aria-hidden="true" role="dialog" aria-labelledby="addConsumoModalTitle" aria-modal="true">
+        <div class="modal-card">
+          <button id="addConsumosCloseBtn" class="modal-close" aria-label="Cerrar">✕</button>
+          <h2 id="addConsumoModalTitle">Agregar consumos</h2>
+          <div class="controls">
+            <input id="addConsumosSearch" placeholder="Buscar productos..." />
+          </div>
+          <div id="addConsumosList" style="max-height:420px; overflow:auto; margin-top:12px"></div>
+          <div class="form-actions">
+            <button id="addConsumosConfirmBtn" class="btn primary">Agregar seleccionados</button>
+            <button id="addConsumosCancelBtn" type="button" class="btn">Cancelar</button>
+          </div>
+        </div>
+      </div>
 
       <!-- Order Detail Modal -->
       <div id="orderModal" class="modal hidden" aria-hidden="true" role="dialog" aria-modal="true">

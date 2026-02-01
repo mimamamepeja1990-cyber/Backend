@@ -1782,6 +1782,13 @@ const loadConsumosBtn = document.getElementById('loadConsumosBtn');
 const saveConsumosBtn = document.getElementById('saveConsumosBtn');
 const consumosList = document.getElementById('consumosList');
 const consumoSearch = document.getElementById('consumoSearch');
+const addConsumosBtn = document.getElementById('addConsumosBtn');
+const addConsumosModal = document.getElementById('addConsumoModal');
+const addConsumosList = document.getElementById('addConsumosList');
+const addConsumosSearch = document.getElementById('addConsumosSearch');
+const addConsumosConfirmBtn = document.getElementById('addConsumosConfirmBtn');
+const addConsumosCloseBtn = document.getElementById('addConsumosCloseBtn');
+const addConsumosCancelBtn = document.getElementById('addConsumosCancelBtn');
 
 async function loadConsumos(){
   try{
@@ -1794,6 +1801,89 @@ async function loadConsumos(){
     renderConsumosList(products, consumos);
   }catch(e){ console.error('loadConsumos failed', e); showToast('No se pudieron cargar consumos','error'); }
 }
+
+// --- Add Consumptions modal behaviors ---
+async function openAddConsumosModal(){
+  if(!addConsumosModal) return;
+  try{
+    // Fetch products and existing consumos to prefill values
+    let products = [];
+    try{ products = await fetchProducts(); }catch(e){ console.warn('openAddConsumosModal: fetchProducts failed', e); }
+    if(!products || !products.length){ try{ const resp = await fetch('../catalogo/products.json'); if(resp.ok) products = await resp.json(); }catch(e){} }
+    let existing = [];
+    try{ const r = await safeFetch(API_BASE + '/api/consumos').catch(()=>[]); existing = Array.isArray(r) ? r : []; }catch(e){ existing = []; }
+    renderAddConsumosList(products, existing);
+    addConsumosModal.classList.remove('hidden'); addConsumosModal.setAttribute('aria-hidden','false');
+    if(addConsumosSearch) setTimeout(()=> addConsumosSearch.focus(), 80);
+  }catch(e){ console.error('openAddConsumosModal failed', e); showToast('No se pudo abrir el selector de consumos','error'); }
+}
+function closeAddConsumosModal(){ if(!addConsumosModal) return; addConsumosModal.classList.add('hidden'); addConsumosModal.setAttribute('aria-hidden','true'); if(addConsumosList) addConsumosList.innerHTML = ''; }
+
+function renderAddConsumosList(products, existing){
+  if(!addConsumosList) return;
+  try{
+    const map = {};
+    (existing || []).forEach(c => { try{ map[String(c.id)] = Number(c.discount || c.value || 0); }catch(_){ } });
+    addConsumosList.innerHTML = '';
+    const frag = document.createDocumentFragment();
+    for(const p of (products || [])){
+      try{
+        const row = document.createElement('div'); row.className = 'add-consumo-row'; row.style.display = 'flex'; row.style.justifyContent = 'space-between'; row.style.alignItems = 'center'; row.style.padding = '6px 8px'; row.style.borderBottom = '1px solid rgba(0,0,0,0.04)';
+        const left = document.createElement('div'); left.style.flex = '1'; left.innerHTML = `${escapeHtml(p.name || p.nombre || '')} <small style="color:#666; display:block">${escapeHtml(p.category || p.categoria || '')}</small>`;
+        const right = document.createElement('div'); right.style.display = 'flex'; right.style.gap = '8px';
+        const cb = document.createElement('input'); cb.type = 'checkbox'; cb.dataset.id = String(p.id); cb.id = 'addc_' + String(p.id);
+        const inp = document.createElement('input'); inp.type = 'number'; inp.min = 0; inp.max = 100; inp.placeholder = 'Descuento %'; inp.style.width = '88px'; inp.dataset.id = String(p.id);
+        if(map[String(p.id)] != null){ cb.checked = true; inp.value = String(map[String(p.id)]); }
+        right.appendChild(inp); right.appendChild(cb);
+        row.appendChild(left); row.appendChild(right); frag.appendChild(row);
+      }catch(e){ /* ignore individual row errors */ }
+    }
+    addConsumosList.appendChild(frag);
+  }catch(e){ console.warn('renderAddConsumosList failed', e); }
+}
+
+async function confirmAddConsumos(){
+  try{
+    if(!addConsumosList) return;
+    const rows = Array.from(addConsumosList.querySelectorAll('.add-consumo-row'));
+    const selected = [];
+    for(const r of rows){
+      try{
+        const cb = r.querySelector('input[type=checkbox]');
+        const inp = r.querySelector('input[type=number]');
+        if(cb && cb.checked){
+          const id = Number(cb.dataset.id);
+          const discount = Number(inp && inp.value ? inp.value : 0);
+          if(!isNaN(discount) && discount > 0){ selected.push({ id, discount }); }
+        }
+      }catch(_){ }
+    }
+    // Merge with existing consumos: fetch current, replace per selected, preserve others not touched
+    let existing = [];
+    try{ const r = await safeFetch(API_BASE + '/api/consumos').catch(()=>[]); existing = Array.isArray(r) ? r : []; }catch(e){ existing = []; }
+    const selMap = {}; selected.forEach(s => { selMap[String(s.id)] = s.discount; });
+    const merged = [];
+    // keep existing ones not replaced
+    (existing || []).forEach(e => { if(!selMap[String(e.id)]) merged.push(e); });
+    // add selected ones
+    selected.forEach(s => merged.push({ id: s.id, discount: s.discount }));
+    // Save merged consumos
+    const resp = await safeFetch(API_BASE + '/api/consumos', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(merged) });
+    showToast('Consumiciones agregadas', 'info');
+    // Broadcast update so catalog refreshes
+    try{ if(window.BroadcastChannel){ const bc = new BroadcastChannel('consumos_channel'); bc.postMessage({ action: 'consumos-updated', consumos: merged }); bc.close(); } }catch(e){}
+    closeAddConsumosModal();
+    // reload admin view
+    await loadConsumos();
+  }catch(e){ console.error('confirmAddConsumos failed', e); showToast('Error agregando consumos','error'); }
+}
+
+// Wire add-consumos modal controls
+if(addConsumosBtn) addConsumosBtn.addEventListener('click', (e)=>{ e.preventDefault(); openAddConsumosModal(); });
+if(addConsumosCloseBtn) addConsumosCloseBtn.addEventListener('click', (e)=>{ e.preventDefault(); closeAddConsumosModal(); });
+if(addConsumosCancelBtn) addConsumosCancelBtn.addEventListener('click', (e)=>{ e.preventDefault(); closeAddConsumosModal(); });
+if(addConsumosConfirmBtn) addConsumosConfirmBtn.addEventListener('click', (e)=>{ e.preventDefault(); confirmAddConsumos(); });
+if(addConsumosSearch) addConsumosSearch.addEventListener('input', (e)=>{ const q = (e.target.value||'').toLowerCase(); if(!addConsumosList) return; Array.from(addConsumosList.children).forEach(r=>{ const txt = (r.textContent||'').toLowerCase(); r.style.display = (!q || txt.includes(q)) ? 'flex' : 'none'; }); });
 
 function renderConsumosList(products, consumos){
   if(!consumosList) return;
@@ -1832,6 +1922,8 @@ async function saveConsumos(){
     }
     const resp = await safeFetch(API_BASE + '/api/consumos', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
     showToast('Consumiciones guardadas', 'info');
+    // broadcast to frontend so catalog refreshes live
+    try{ if(window.BroadcastChannel){ const bc = new BroadcastChannel('consumos_channel'); bc.postMessage({ action: 'consumos-updated', consumos: data }); bc.close(); } }catch(e){}
   }catch(e){ console.error('saveConsumos failed', e); showToast('Error guardando consumos','error'); }
 }
 
