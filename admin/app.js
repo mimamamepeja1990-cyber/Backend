@@ -907,7 +907,10 @@ function orderRowFor(o){
   const itemsList = (itemsArr || []).map(it => {
     const name = (it && it.meta && it.meta.name) ? it.meta.name : (it && it.id) ? it.id : '';
     const qty = it && it.qty ? it.qty : 1;
-    return `<li>${escapeHtml(name)} <span class="muted">×${qty}</span></li>`;
+    const isConsumo = !!(it && it.meta && it.meta.consumo);
+    const consumed = it && it.meta && it.meta.consumo_consumed ? Number(it.meta.consumo_consumed) : null;
+    const badge = isConsumo ? (` <span class="badge-pill" style="margin-left:8px; background:#ffdede; color:#a00; padding:2px 6px; border-radius:10px; font-size:12px;">Consumo inmediato</span>` + (consumed ? ` <small class="muted">(${consumed} consumido)</small>` : '')) : '';
+    return `<li>${escapeHtml(name)}${badge} <span class="muted">×${qty}</span></li>`;
   }).join('');
   const tr = document.createElement('tr');
   const previewName = o._token_preview && (o._token_preview.name || o._token_preview.email) ? (o._token_preview.name || o._token_preview.email) : null;
@@ -1091,7 +1094,15 @@ function showOrderDetail(order){
   if(!modal || !body || !title) return;
   title.textContent = `Pedido #${order.id}`;
   const itemsArr = safeParseItems(order.items || []);
-  const itemsHtml = (itemsArr || []).map(it=>`<li><strong>${escapeHtml((it && it.meta && it.meta.name) ? it.meta.name : (it && it.id) ? it.id : '')}</strong> — ${it.qty} × $${Number(it.meta?.price||0).toFixed(2)}</li>`).join('') || '<li>(sin ítems)</li>';
+  const itemsHtml = (itemsArr || []).map(it => {
+    const name = escapeHtml((it && it.meta && it.meta.name) ? it.meta.name : (it && it.id) ? it.id : '');
+    const qty = it.qty || 1;
+    const price = Number(it.meta && it.meta.price ? it.meta.price : 0).toFixed(2);
+    const isConsumo = !!(it && it.meta && it.meta.consumo);
+    const consumed = it && it.meta && it.meta.consumo_consumed ? Number(it.meta.consumo_consumed) : null;
+    const badge = isConsumo ? (`<span class="badge-pill" style="margin-left:8px; background:#ffdede; color:#a00; padding:2px 6px; border-radius:10px; font-size:12px;">Consumo inmediato</span>` + (consumed ? ` <small class="muted">(${consumed} consumido)</small>` : '')) : '';
+    return `<li><strong>${name}</strong> ${badge} — ${qty} × $${price}</li>`;
+  }).join('') || '<li>(sin ítems)</li>';
   const address = [order.user_barrio, order.user_calle, order.user_numeracion].filter(Boolean).join(', ');
   // prefer user_* fields, otherwise display token preview when available
   const previewName = order._token_preview && (order._token_preview.name || order._token_preview.email) ? (order._token_preview.name || order._token_preview.email) : null;
