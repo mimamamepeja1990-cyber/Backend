@@ -2039,8 +2039,36 @@ def write_catalog_snapshot():
     finally:
         db.close()
 
-    data = [
-        {
+    # Try to reflect consumos (reserved near-expiry qty) in the snapshot so public catalog shows correct available stock
+    consumos_path = os.path.join(CATALOG_DIR, 'consumos.json')
+    consumos_map = {}
+    try:
+        if os.path.exists(consumos_path):
+            with open(consumos_path, 'r', encoding='utf-8') as f:
+                _items = json.load(f) or []
+            for it in _items:
+                try:
+                    pid = str(it.get('id'))
+                    qty = int(it.get('qty') or 0)
+                    disc = int(it.get('discount') or it.get('value') or 0)
+                    if pid not in consumos_map:
+                        consumos_map[pid] = {'qty': 0, 'discount': disc}
+                    consumos_map[pid]['qty'] += qty
+                except Exception:
+                    continue
+    except Exception:
+        consumos_map = {}
+
+    data = []
+    for p in products:
+        pid = str(p.id)
+        reserved = consumos_map.get(pid, {}).get('qty', 0)
+        discount_for_consumo = consumos_map.get(pid, {}).get('discount')
+        orig_stock = int(p.stock) if getattr(p, 'stock', None) is not None else None
+        adjusted_stock = None
+        if orig_stock is not None:
+            adjusted_stock = max(0, orig_stock - reserved)
+        data.append({
             "id": p.id,
             "name": p.name,
             "price": float(p.price) if p.price else None,
@@ -2048,11 +2076,11 @@ def write_catalog_snapshot():
             "category": p.category,
             "image_url": p.image_url,
             "active": p.active,
-            "stock": int(p.stock) if getattr(p, 'stock', None) is not None else None,
+            "stock": adjusted_stock,
             "discount": int(p.discount) if getattr(p, 'discount', None) is not None else None,
-        }
-        for p in products
-    ]
+            "consumo_qty": int(reserved) if reserved else None,
+            "consumo_discount": int(discount_for_consumo) if discount_for_consumo is not None else None,
+        })
 
     with open(os.path.join(CATALOG_DIR, "products.json"), "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)

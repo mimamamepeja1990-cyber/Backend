@@ -117,6 +117,13 @@ th,td{padding:14px 12px}
 
 /* Make the consumos list visually consistent with cards */
 #consumosList{ background:var(--card); border-radius:10px; padding:6px; box-shadow:0 6px 20px rgba(11,15,28,0.04) }
+/* small button variants used in add-consumos modal and inline actions */
+.btn.small{ padding:6px 8px; font-size:13px; border-radius:8px }
+.btn.small.danger{ background:transparent; border:1px solid rgba(239,68,68,0.08); color:var(--danger) }
+.btn.small:not(.danger){ background:#f8fafc; border:1px solid rgba(15,23,42,0.04); }
+.add-consumo-row{ padding:8px; border-bottom:1px solid rgba(0,0,0,0.04) }
+.add-consumo-row .btn{ min-width:72px }
+
 
 /* Admin error banner dismiss button */
 #adminErrorBanner{ display:flex; align-items:center; justify-content:space-between; gap:12px }

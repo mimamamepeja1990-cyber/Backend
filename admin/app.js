@@ -1791,6 +1791,9 @@ const addConsumosConfirmBtn = document.getElementById('addConsumosConfirmBtn');
 const addConsumosCloseBtn = document.getElementById('addConsumosCloseBtn');
 const addConsumosCancelBtn = document.getElementById('addConsumosCancelBtn');
 
+// keep reference to last fetched products for add-modal interactions
+let _lastAddConsumosProducts = [];
+
 async function loadConsumos(){
   try{
     let products = [];
@@ -1805,6 +1808,42 @@ async function loadConsumos(){
 
 // --- Add Consumptions modal behaviors ---
 async function openAddConsumosModal(){
+  // helper to add/update a single producto into admin consumos list
+  function addOrUpdateConsumoRow(prod, discount, qty){
+    if(!consumosList) return;
+    try{
+      // find existing
+      const existing = consumosList.querySelector('[data-id="' + String(prod.id) + '"]');
+      if(existing){
+        // update inputs
+        const inpDisc = existing.querySelector('.discount-input');
+        const inpQty = existing.querySelector('.qty-input');
+        const cb = existing.querySelector('input[type=checkbox]');
+        if(inpDisc) inpDisc.value = String(discount);
+        if(inpQty) inpQty.value = String(qty);
+        if(cb) cb.checked = true;
+        return;
+      }
+      const row = document.createElement('div'); row.className = 'consumo-row'; row.setAttribute('data-id', String(prod.id));
+      const left = document.createElement('div'); left.className = 'left';
+      const cb = document.createElement('input'); cb.type='checkbox'; cb.dataset.id = String(prod.id); cb.id = 'consumo-p-' + prod.id; cb.checked = true;
+      const lbl = document.createElement('label'); lbl.htmlFor = cb.id; lbl.innerText = (prod.name || prod.nombre || '') + (prod.category ? ' — '+prod.category : '');
+      left.appendChild(cb); left.appendChild(lbl);
+      const right = document.createElement('div'); right.className = 'right';
+      const inpDiscount = document.createElement('input'); inpDiscount.type='number'; inpDiscount.className='discount-input'; inpDiscount.min=0; inpDiscount.max=100; inpDiscount.placeholder='Descuento %'; inpDiscount.value = (discount != null) ? String(discount) : '';
+      inpDiscount.dataset.id = String(prod.id);
+      const inpQty = document.createElement('input'); inpQty.type='number'; inpQty.className='qty-input'; inpQty.min=0; inpQty.placeholder='Cant. venc.'; inpQty.value = (qty != null) ? String(qty) : '';
+      const stockSpan = document.createElement('small'); stockSpan.style.color = '#666'; stockSpan.style.marginLeft = '8px'; stockSpan.textContent = (prod.stock != null) ? (Number(prod.stock) > 0 ? 'Stock: ' + Number(prod.stock) : 'Sin stock') : '';
+      const removeBtn = document.createElement('button'); removeBtn.type='button'; removeBtn.className='btn small danger remove-consumo'; removeBtn.dataset.id = String(prod.id); removeBtn.textContent = 'Eliminar';
+      right.appendChild(inpDiscount); right.appendChild(inpQty); right.appendChild(stockSpan); right.appendChild(removeBtn);
+      row.appendChild(left); row.appendChild(right); consumosList.appendChild(row);
+      // attach handler to new remove button
+      removeBtn.addEventListener('click', async (ev)=>{
+        ev.preventDefault(); if(!confirm('¿Eliminar este consumo?')) return; try{ await safeFetch(API_BASE + '/api/consumos/' + prod.id, { method: 'DELETE' }); showToast('Consumo eliminado', 'info'); }catch(e){ showToast('No se pudo eliminar','error'); } await loadConsumos();
+      });
+    }catch(e){ console.warn('addOrUpdateConsumoRow failed', e); }
+  }
+
   if(!addConsumosModal) return;
   try{
     // Fetch products and existing consumos to prefill values
@@ -1813,6 +1852,8 @@ async function openAddConsumosModal(){
     if(!products || !products.length){ try{ const resp = await fetch('../catalogo/products.json'); if(resp.ok) products = await resp.json(); }catch(e){} }
     let existing = [];
     try{ const r = await safeFetch(API_BASE + '/api/consumos').catch(()=>[]); existing = Array.isArray(r) ? r : []; }catch(e){ existing = []; }
+    // store products globally so modal actions can add products directly to admin list
+    _lastAddConsumosProducts = products || [];
     renderAddConsumosList(products, existing);
     addConsumosModal.classList.remove('hidden'); addConsumosModal.setAttribute('aria-hidden','false');
     if(addConsumosSearch) setTimeout(()=> addConsumosSearch.focus(), 80);
@@ -1837,8 +1878,21 @@ function renderAddConsumosList(products, existing){
         const cb = document.createElement('input'); cb.type = 'checkbox'; cb.dataset.id = String(p.id); cb.id = 'addc_' + String(p.id);
         const inpDiscount = document.createElement('input'); inpDiscount.type = 'number'; inpDiscount.className = 'discount-input'; inpDiscount.min = 0; inpDiscount.max = 100; inpDiscount.placeholder = 'Descuento %'; inpDiscount.style.width = '88px'; inpDiscount.dataset.id = String(p.id);
         const inpQty = document.createElement('input'); inpQty.type = 'number'; inpQty.className = 'qty-input'; inpQty.min = 0; inpQty.placeholder = 'Cant. venc.'; inpQty.style.width = '88px'; inpQty.dataset.id = String(p.id);
+        const addBtn = document.createElement('button'); addBtn.type = 'button'; addBtn.className = 'btn small'; addBtn.textContent = 'Añadir'; addBtn.dataset.id = String(p.id);
+        addBtn.addEventListener('click', (ev)=>{
+          ev.preventDefault();
+          const id = Number(addBtn.dataset.id);
+          const discount = Number(inpDiscount && inpDiscount.value ? inpDiscount.value : 0);
+          const qty = Number(inpQty && inpQty.value ? inpQty.value : 0);
+          if(isNaN(discount) || discount <= 0){ showToast('Ingrese un descuento válido para añadir','warn'); return; }
+          if(isNaN(qty) || qty < 0){ showToast('Ingrese una cantidad válida para añadir','warn'); return; }
+          // find product object and add to admin consumos list
+          const prod = products.find(x => String(x.id) === String(id));
+          if(!prod){ showToast('Producto no encontrado','error'); return; }
+          addOrUpdateConsumoRow(prod, discount, qty);
+        });
         if(map[String(p.id)]){ cb.checked = true; inpDiscount.value = String(map[String(p.id)].discount); inpQty.value = String(map[String(p.id)].qty || ''); }
-        right.appendChild(inpDiscount); right.appendChild(inpQty); right.appendChild(cb);
+        right.appendChild(inpDiscount); right.appendChild(inpQty); right.appendChild(addBtn); right.appendChild(cb);
         row.appendChild(left); row.appendChild(right); frag.appendChild(row);
       }catch(e){ /* ignore individual row errors */ }
     }
@@ -1872,14 +1926,14 @@ async function confirmAddConsumos(){
     (existing || []).forEach(e => { try{ existingMap[String(e.id)] = { id: e.id, discount: Number(e.discount || e.value || 0), qty: Number(e.qty || e.cantidad || 0) }; }catch(_){ } });
     selected.forEach(s => { try{ existingMap[String(s.id)] = { id: s.id, discount: Number(s.discount || 0), qty: Number(s.qty || 0) }; }catch(_){ } });
     const merged = Object.values(existingMap);
-    // Save merged consumos
-    const resp = await safeFetch(API_BASE + '/api/consumos', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(merged) });
-    showToast('Consumiciones agregadas', 'info');
-    // Broadcast update so catalog refreshes
-    try{ if(window.BroadcastChannel){ const bc = new BroadcastChannel('consumos_channel'); bc.postMessage({ action: 'consumos-updated', consumos: merged }); bc.close(); } }catch(e){}
+
+    // Instead of saving immediately, add these to the admin consumos list so user can review and then click 'Guardar consumos'
+    try{
+      renderConsumosList(_lastAddConsumosProducts, merged);
+      showToast('Productos agregados a la lista. Haga clic en Guardar para persistir los cambios.', 'info');
+    }catch(e){ console.warn('Failed to update consumos list locally', e); showToast('No se pudo añadir a la lista localmente','error'); }
+
     closeAddConsumosModal();
-    // reload admin view
-    await loadConsumos();
   }catch(e){ console.error('confirmAddConsumos failed', e); showToast('Error agregando consumos','error'); }
 }
 
@@ -1907,13 +1961,31 @@ function renderConsumosList(products, consumos){
     const inpDiscount = document.createElement('input'); inpDiscount.type='number'; inpDiscount.className='discount-input'; inpDiscount.min=0; inpDiscount.max=100; inpDiscount.placeholder='Descuento %'; inpDiscount.value = (map[String(p.id)] && map[String(p.id)].discount != null) ? String(map[String(p.id)].discount) : '';
     inpDiscount.dataset.id = String(p.id);
     const inpQty = document.createElement('input'); inpQty.type='number'; inpQty.className='qty-input'; inpQty.min=0; inpQty.placeholder='Cant. venc.'; inpQty.value = (map[String(p.id)] && map[String(p.id)].qty != null) ? String(map[String(p.id)].qty) : '';
-    const stockSpan = document.createElement('small'); stockSpan.style.color = '#666'; stockSpan.style.marginLeft = '8px'; stockSpan.textContent = (p.stock != null) ? (Number(p.stock) > 0 ? 'Stock: ' + Number(p.stock) : 'Sin stock') : '';
+    const stockSpan = document.createElement('small'); stockSpan.style.color = '#666'; stockSpan.style.marginLeft = '8px';
+    const reservedQty = map[String(p.id)] ? Number(map[String(p.id)].qty || 0) : 0;
+    if(p.stock != null){ const avail = Math.max(0, Number(p.stock) - reservedQty); stockSpan.textContent = (avail > 0 ? 'Stock: ' + avail : 'Sin stock') + (reservedQty ? ' • reserva: ' + reservedQty : ''); } else { stockSpan.textContent = '' }
+    const removeBtn = document.createElement('button'); removeBtn.type='button'; removeBtn.className = 'btn small danger remove-consumo'; removeBtn.dataset.id = String(p.id); removeBtn.textContent = 'Eliminar';
+
     right.appendChild(inpDiscount);
     right.appendChild(inpQty);
     right.appendChild(stockSpan);
+    right.appendChild(removeBtn);
     row.appendChild(left); row.appendChild(right);
     consumosList.appendChild(row);
   }
+  // wire remove buttons
+  Array.from(consumosList.querySelectorAll('.remove-consumo')).forEach(b=>{
+    b.addEventListener('click', async (ev)=>{
+      ev.preventDefault();
+      const pid = b.dataset.id;
+      if(!confirm('¿Eliminar este consumo?')) return;
+      try{
+        const resp = await safeFetch(API_BASE + '/api/consumos/' + pid, { method: 'DELETE' }).catch(()=>({}));
+        showToast('Consumo eliminado', 'info');
+      }catch(e){ console.warn('delete consumo failed', e); showToast('No se pudo eliminar','error'); }
+      await loadConsumos();
+    });
+  });
 }
 
 async function saveConsumos(){
@@ -1936,6 +2008,8 @@ async function saveConsumos(){
     }
     const resp = await safeFetch(API_BASE + '/api/consumos', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
     showToast('Consumiciones guardadas', 'info');
+    // reload admin view to reflect persisted state
+    try{ await loadConsumos(); }catch(_){ }
     // broadcast to frontend so catalog refreshes live
     try{ if(window.BroadcastChannel){ const bc = new BroadcastChannel('consumos_channel'); bc.postMessage({ action: 'consumos-updated', consumos: data }); bc.close(); } }catch(e){}
   }catch(e){ console.error('saveConsumos failed', e); showToast('Error guardando consumos','error'); }
