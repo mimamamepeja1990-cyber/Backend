@@ -487,6 +487,55 @@ import json as _json
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import DatabaseError
 
+def prealloc_consumos(items_list_input, catalog_dir_override=None):
+    """Best-effort pre-allocation of consumos from catalogo/consumos.json.
+    Returns (items_list, pre_alloc_flag, consumos_map)
+    """
+    try:
+        root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        catalog_dir_local = catalog_dir_override or os.environ.get('CATALOG_DIR') or os.path.join(root_dir, 'catalogo')
+        consumos_path_local = os.path.join(catalog_dir_local, 'consumos.json')
+        consumos_map_local = {}
+        if os.path.exists(consumos_path_local):
+            with open(consumos_path_local, 'r', encoding='utf-8') as f:
+                c_list = _json.load(f) or []
+                for c in c_list:
+                    try:
+                        cid = int(c.get('id'))
+                        qty_c = int(c.get('qty', 0) or 0)
+                        consumos_map_local[cid] = qty_c
+                    except Exception:
+                        continue
+        pre_alloc = False
+        try:
+            alloc_map_local = {}
+            for it in items_list_input:
+                try:
+                    pid = int(it.get('id'))
+                    qty_req = int(it.get('qty', 1) or 1)
+                except Exception:
+                    continue
+                avail = int(consumos_map_local.get(pid, 0) or 0)
+                take = min(avail, qty_req)
+                if take > 0:
+                    alloc_map_local[pid] = alloc_map_local.get(pid, 0) + take
+                    consumos_map_local[pid] = max(0, avail - take)
+                    try:
+                        if not isinstance(it.get('meta'), dict):
+                            it['meta'] = {}
+                        it['meta']['consumo_consumed'] = take
+                        it['meta']['consumo'] = True
+                    except Exception:
+                        pass
+            if alloc_map_local:
+                pre_alloc = True
+        except Exception:
+            pass
+        return items_list_input, pre_alloc, consumos_map_local
+    except Exception:
+        return items_list_input, False, {}
+
+
 def create_order(db: Session, payload: schemas.OrderCreate, current_user: Optional[dict]=None) -> models.Order:
     # Defensive serialization: coerce items to plain JSON-serializable shapes and validate types
     items_list = []
@@ -518,23 +567,59 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
     # Validate stock availability: consider near-expiry consumos and total stock.
     # Read consumos.json to get available near-expiry quantities (best-effort, file may not exist).
     try:
-        root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-        catalog_dir = os.environ.get('CATALOG_DIR') or os.path.join(root_dir, 'catalogo')
-        consumos_path = os.path.join(catalog_dir, 'consumos.json')
-        consumos_map = {}
-        try:
-            if os.path.exists(consumos_path):
-                with open(consumos_path, 'r', encoding='utf-8') as f:
-                    c_list = _json.load(f) or []
-                    for c in c_list:
+        # Extracted to helper for testability
+        def _prealloc_consumos(items_list_input, catalog_dir_override=None):
+            try:
+                root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+                catalog_dir_local = catalog_dir_override or os.environ.get('CATALOG_DIR') or os.path.join(root_dir, 'catalogo')
+                consumos_path_local = os.path.join(catalog_dir_local, 'consumos.json')
+                consumos_map_local = {}
+                if os.path.exists(consumos_path_local):
+                    with open(consumos_path_local, 'r', encoding='utf-8') as f:
+                        c_list = _json.load(f) or []
+                        for c in c_list:
+                            try:
+                                cid = int(c.get('id'))
+                                qty_c = int(c.get('qty', 0) or 0)
+                                consumos_map_local[cid] = qty_c
+                            except Exception:
+                                continue
+                pre_alloc = False
+                try:
+                    alloc_map_local = {}
+                    for it in items_list_input:
                         try:
-                            cid = int(c.get('id'))
-                            qty_c = int(c.get('qty', 0) or 0)
-                            consumos_map[cid] = qty_c
+                            pid = int(it.get('id'))
+                            qty_req = int(it.get('qty', 1) or 1)
                         except Exception:
                             continue
+                        avail = int(consumos_map_local.get(pid, 0) or 0)
+                        take = min(avail, qty_req)
+                        if take > 0:
+                            alloc_map_local[pid] = alloc_map_local.get(pid, 0) + take
+                            consumos_map_local[pid] = max(0, avail - take)
+                            try:
+                                if not isinstance(it.get('meta'), dict):
+                                    it['meta'] = {}
+                                it['meta']['consumo_consumed'] = take
+                                it['meta']['consumo'] = True
+                            except Exception:
+                                pass
+                    if alloc_map_local:
+                        pre_alloc = True
+                except Exception:
+                    pass
+                return items_list_input, pre_alloc, consumos_map_local
+            except Exception:
+                return items_list_input, False, {}
+
+        items_list, pre_alloc_consumos, _ = _prealloc_consumos(items_list)
+        try:
+            items_json = _json.dumps(items_list, ensure_ascii=False)
         except Exception:
-            consumos_map = {}
+            pass
+    except Exception:
+        pass
         for it in items_list:
             try:
                 pid = int(it.get('id'))
@@ -609,6 +694,12 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
         'status': 'nuevo',
         'source': src
     }
+    # Mark that this order included pre-allocated consumos (best-effort flag)
+    try:
+        if 'pre_alloc_consumos' in locals() and pre_alloc_consumos:
+            kwargs['contains_consumos'] = True
+    except Exception:
+        pass
     optional = ['user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion', '_token_received', '_token_preview']
     try:
         bind = db.get_bind()
