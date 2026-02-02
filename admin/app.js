@@ -1794,6 +1794,48 @@ const addConsumosCancelBtn = document.getElementById('addConsumosCancelBtn');
 // keep reference to last fetched products for add-modal interactions
 let _lastAddConsumosProducts = [];
 
+// Public helper: add or update a consumo row in the admin consumos list
+function addOrUpdateConsumoRow(prod, discount, qty){
+  if(!consumosList) return;
+  try{
+    // Accept either a product object or an id; if id is given try to resolve against last products fetch
+    let product = prod;
+    try{ if(!product && prod != null){ product = _lastAddConsumosProducts.find(x=>String(x.id) === String(prod)) || null; } }catch(_){ }
+    if(!product && prod && typeof prod === 'string'){
+      try{ product = _lastAddConsumosProducts.find(x=>String(x.id) === String(prod) || String(x.nombre||x.name) === String(prod)) || null; }catch(_){ }
+    }
+    if(!product) return;
+    // find existing row
+    const existing = consumosList.querySelector('[data-id="' + String(product.id) + '"]');
+    if(existing){
+      const inpDisc = existing.querySelector('.discount-input');
+      const inpQty = existing.querySelector('.qty-input');
+      const cb = existing.querySelector('input[type=checkbox]');
+      if(inpDisc) inpDisc.value = String(discount);
+      if(inpQty) inpQty.value = String(qty);
+      if(cb) cb.checked = true;
+      return;
+    }
+    const row = document.createElement('div'); row.className = 'consumo-row'; row.setAttribute('data-id', String(product.id));
+    const left = document.createElement('div'); left.className = 'left';
+    const cb = document.createElement('input'); cb.type='checkbox'; cb.dataset.id = String(product.id); cb.id = 'consumo-p-' + product.id; cb.checked = true;
+    const lbl = document.createElement('label'); lbl.htmlFor = cb.id; lbl.innerText = (product.name || product.nombre || '') + (product.category ? ' — '+product.category : '');
+    left.appendChild(cb); left.appendChild(lbl);
+    const right = document.createElement('div'); right.className = 'right';
+    const inpDiscount = document.createElement('input'); inpDiscount.type='number'; inpDiscount.className='discount-input'; inpDiscount.min=0; inpDiscount.max=100; inpDiscount.placeholder='Descuento %'; inpDiscount.value = (discount != null) ? String(discount) : '';
+    inpDiscount.dataset.id = String(product.id);
+    const inpQty = document.createElement('input'); inpQty.type='number'; inpQty.className='qty-input'; inpQty.min=0; inpQty.placeholder='Cant. venc.'; inpQty.value = (qty != null) ? String(qty) : '';
+    const stockSpan = document.createElement('small'); stockSpan.style.color = '#666'; stockSpan.style.marginLeft = '8px'; stockSpan.textContent = (product.stock != null) ? (Number(product.stock) > 0 ? 'Stock: ' + Number(product.stock) : 'Sin stock') : '';
+    const removeBtn = document.createElement('button'); removeBtn.type='button'; removeBtn.className='btn small danger remove-consumo'; removeBtn.dataset.id = String(product.id); removeBtn.textContent = 'Eliminar';
+    right.appendChild(inpDiscount); right.appendChild(inpQty); right.appendChild(stockSpan); right.appendChild(removeBtn);
+    row.appendChild(left); row.appendChild(right); consumosList.appendChild(row);
+    // attach handler to new remove button
+    removeBtn.addEventListener('click', async (ev)=>{
+      ev.preventDefault(); if(!confirm('¿Eliminar este consumo?')) return; try{ await safeFetch(API_BASE + '/api/consumos/' + product.id, { method: 'DELETE' }); showToast('Consumo eliminado', 'info'); }catch(e){ showToast('No se pudo eliminar','error'); } await loadConsumos();
+    });
+  }catch(e){ console.warn('addOrUpdateConsumoRow failed', e); }
+}
+
 async function loadConsumos(){
   try{
     let products = [];
@@ -1808,41 +1850,7 @@ async function loadConsumos(){
 
 // --- Add Consumptions modal behaviors ---
 async function openAddConsumosModal(){
-  // helper to add/update a single producto into admin consumos list
-  function addOrUpdateConsumoRow(prod, discount, qty){
-    if(!consumosList) return;
-    try{
-      // find existing
-      const existing = consumosList.querySelector('[data-id="' + String(prod.id) + '"]');
-      if(existing){
-        // update inputs
-        const inpDisc = existing.querySelector('.discount-input');
-        const inpQty = existing.querySelector('.qty-input');
-        const cb = existing.querySelector('input[type=checkbox]');
-        if(inpDisc) inpDisc.value = String(discount);
-        if(inpQty) inpQty.value = String(qty);
-        if(cb) cb.checked = true;
-        return;
-      }
-      const row = document.createElement('div'); row.className = 'consumo-row'; row.setAttribute('data-id', String(prod.id));
-      const left = document.createElement('div'); left.className = 'left';
-      const cb = document.createElement('input'); cb.type='checkbox'; cb.dataset.id = String(prod.id); cb.id = 'consumo-p-' + prod.id; cb.checked = true;
-      const lbl = document.createElement('label'); lbl.htmlFor = cb.id; lbl.innerText = (prod.name || prod.nombre || '') + (prod.category ? ' — '+prod.category : '');
-      left.appendChild(cb); left.appendChild(lbl);
-      const right = document.createElement('div'); right.className = 'right';
-      const inpDiscount = document.createElement('input'); inpDiscount.type='number'; inpDiscount.className='discount-input'; inpDiscount.min=0; inpDiscount.max=100; inpDiscount.placeholder='Descuento %'; inpDiscount.value = (discount != null) ? String(discount) : '';
-      inpDiscount.dataset.id = String(prod.id);
-      const inpQty = document.createElement('input'); inpQty.type='number'; inpQty.className='qty-input'; inpQty.min=0; inpQty.placeholder='Cant. venc.'; inpQty.value = (qty != null) ? String(qty) : '';
-      const stockSpan = document.createElement('small'); stockSpan.style.color = '#666'; stockSpan.style.marginLeft = '8px'; stockSpan.textContent = (prod.stock != null) ? (Number(prod.stock) > 0 ? 'Stock: ' + Number(prod.stock) : 'Sin stock') : '';
-      const removeBtn = document.createElement('button'); removeBtn.type='button'; removeBtn.className='btn small danger remove-consumo'; removeBtn.dataset.id = String(prod.id); removeBtn.textContent = 'Eliminar';
-      right.appendChild(inpDiscount); right.appendChild(inpQty); right.appendChild(stockSpan); right.appendChild(removeBtn);
-      row.appendChild(left); row.appendChild(right); consumosList.appendChild(row);
-      // attach handler to new remove button
-      removeBtn.addEventListener('click', async (ev)=>{
-        ev.preventDefault(); if(!confirm('¿Eliminar este consumo?')) return; try{ await safeFetch(API_BASE + '/api/consumos/' + prod.id, { method: 'DELETE' }); showToast('Consumo eliminado', 'info'); }catch(e){ showToast('No se pudo eliminar','error'); } await loadConsumos();
-      });
-    }catch(e){ console.warn('addOrUpdateConsumoRow failed', e); }
-  }
+  // (function removed — moved to module scope to fix ReferenceError when clicking 'Añadir')
 
   if(!addConsumosModal) return;
   try{
@@ -1890,6 +1898,8 @@ function renderAddConsumosList(products, existing){
           const prod = products.find(x => String(x.id) === String(id));
           if(!prod){ showToast('Producto no encontrado','error'); return; }
           addOrUpdateConsumoRow(prod, discount, qty);
+          showToast('Añadido a la lista. Haga clic en Guardar para publicar', 'info');
+          try{ if(consumosList){ const el = consumosList.querySelector('[data-id="' + String(prod.id) + '"]'); if(el) el.scrollIntoView({ block: 'center', behavior: 'smooth' }); } }catch(_){ }
         });
         if(map[String(p.id)]){ cb.checked = true; inpDiscount.value = String(map[String(p.id)].discount); inpQty.value = String(map[String(p.id)].qty || ''); }
         right.appendChild(inpDiscount); right.appendChild(inpQty); right.appendChild(addBtn); right.appendChild(cb);
