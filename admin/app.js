@@ -1100,8 +1100,11 @@ function showOrderDetail(order){
     const price = Number(it.meta && it.meta.price ? it.meta.price : 0).toFixed(2);
     const isConsumo = !!(it && it.meta && it.meta.consumo);
     const consumed = it && it.meta && it.meta.consumo_consumed ? Number(it.meta.consumo_consumed) : null;
+    const discountLabel = it && it.meta && it.meta.discount_label ? String(it.meta.discount_label) : null;
+    const saved = it && (typeof it.meta?.discount_savings === 'number') ? Number(it.meta.discount_savings) : null;
     const badge = isConsumo ? (`<span class="badge-pill" style="margin-left:8px; background:#ffdede; color:#a00; padding:2px 6px; border-radius:10px; font-size:12px;">Consumo inmediato</span>` + (consumed ? ` <small class="muted">(${consumed} consumido)</small>` : '')) : '';
-    return `<li><strong>${name}</strong> ${badge} — ${qty} × $${price}</li>`;
+    const extra = (saved && saved > 0) ? ` <small style="color:#a00; margin-left:6px">Ahorra $${Number(saved).toFixed(2)}${discountLabel ? ' (' + escapeHtml(discountLabel) + ')' : ''}</small>` : '';
+    return `<li><strong>${name}</strong> ${badge} — ${qty} × $${price}${extra}</li>`;
   }).join('') || '<li>(sin ítems)</li>';
   const address = [order.user_barrio, order.user_calle, order.user_numeracion].filter(Boolean).join(', ');
   // prefer user_* fields, otherwise display token preview when available
