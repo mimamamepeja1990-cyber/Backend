@@ -1571,7 +1571,35 @@ async def save_consumos(request: Request):
             data = []
         if not isinstance(data, list):
             raise HTTPException(status_code=400, detail='expected list')
+        # If client attempts to save an empty list, require explicit confirmation to avoid accidental wipes
+        if len(data) == 0 and not request.query_params.get('confirm'):
+            raise HTTPException(status_code=400, detail='empty-list-requires-confirm')
+        # Normalize and validate incoming entries (coerce id and numeric fields). Invalid entries are rejected.
+        cleaned = []
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                pid = int(entry.get('id'))
+            except Exception:
+                continue
+            try:
+                discount = float(entry.get('discount') if entry.get('discount') is not None else entry.get('value', 0))
+            except Exception:
+                discount = 0.0
+            try:
+                qty = int(entry.get('qty') if entry.get('qty') is not None else entry.get('cantidad', 0))
+            except Exception:
+                qty = 0
+            # keep entries with a positive discount and non-negative qty
+            if discount <= 0 or qty < 0:
+                continue
+            cleaned.append({'id': pid, 'discount': float(discount), 'qty': int(qty)})
+        # If after cleaning there is nothing to save but the original data wasn't empty, reject to avoid accidental clears
+        if len(cleaned) == 0 and len(data) > 0:
+            raise HTTPException(status_code=400, detail='no-valid-consumos')
         consumos_path = os.path.join(CATALOG_DIR, 'consumos.json')
+        data = cleaned
         # write and verify success; if writing fails return 500 so client knows
         try:
             os.makedirs(CATALOG_DIR, exist_ok=True)

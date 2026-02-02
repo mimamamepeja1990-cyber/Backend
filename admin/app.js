@@ -183,6 +183,10 @@ const newBtn = document.getElementById('newBtn');
 const modal = document.getElementById('modal');
 const productForm = document.getElementById('productForm');
 const cancelBtn = document.getElementById('cancelBtn');
+const creatorFilter = document.getElementById('creatorFilter');
+const onlyMyProducts = document.getElementById('onlyMyProducts');
+if(creatorFilter) creatorFilter.addEventListener('input', ()=>{ try{ loadConsumos(); }catch(_){ } });
+if(onlyMyProducts) onlyMyProducts.addEventListener('change', ()=>{ try{ loadConsumos(); }catch(_){ } });
 const uploadImageBtn = document.getElementById('uploadImageBtn');
 const imageInput = document.getElementById('imageInput');
 const imagePreview = document.getElementById('imagePreview');
@@ -1842,6 +1846,21 @@ async function loadConsumos(){
     try{ products = await fetchProducts(); }catch(e){ console.warn('fetchProducts failed for consumos', e); }
     // try snapshot fallback
     if(!products || !products.length){ try{ const resp = await fetch('../catalogo/products.json'); if(resp.ok) products = await resp.json(); }catch(e){} }
+    // apply client-side creator filter if requested
+    try{
+      const onlyMyEl = document.getElementById('onlyMyProducts');
+      const creatorFilterEl = document.getElementById('creatorFilter');
+      const onlyMy = !!(onlyMyEl && onlyMyEl.checked);
+      const creatorTxt = (creatorFilterEl && String(creatorFilterEl.value || '').trim()) || '';
+      if(onlyMy || creatorTxt){
+        products = (products || []).filter(p => {
+          const owner = String(p.created_by || p.creator || p.owner || p.created_by_email || '').toLowerCase();
+          if(onlyMy && creatorTxt) return owner && owner === creatorTxt.toLowerCase();
+          if(creatorTxt) return owner && owner.includes(creatorTxt.toLowerCase());
+          return !!owner;
+        });
+      }
+    }catch(_){ }
     const resp = await safeFetch(API_BASE + '/api/consumos').catch(()=>[]);
     const consumos = Array.isArray(resp) ? resp : [];
     renderConsumosList(products, consumos);
@@ -1875,8 +1894,31 @@ function renderAddConsumosList(products, existing){
     const map = {};
     (existing || []).forEach(c => { try{ map[String(c.id)] = { discount: Number(c.discount || c.value || 0), qty: Number(c.qty || c.cantidad || 0) }; }catch(_){ } });
     addConsumosList.innerHTML = '';
+
+    // Optional client-side filter: only show products created by the current user (if they provide an identity)
+    const onlyMyEl = document.getElementById('onlyMyProducts');
+    const creatorFilterEl = document.getElementById('creatorFilter');
+    let filteredProducts = Array.isArray(products) ? products.slice() : [];
+    try{
+      const onlyMy = !!(onlyMyEl && onlyMyEl.checked);
+      const creatorTxt = (creatorFilterEl && String(creatorFilterEl.value || '').trim()) || '';
+      if (onlyMy && creatorTxt) {
+        filteredProducts = filteredProducts.filter(p => {
+          const owner = String(p.created_by || p.creator || p.owner || p.created_by_email || '').toLowerCase();
+          return owner && owner === creatorTxt.toLowerCase();
+        });
+        if (!filteredProducts.length) {
+          const note = document.createElement('div'); note.style.color = '#666'; note.style.padding = '8px'; note.textContent = 'No se encontraron productos con el creador indicado. Para habilitar este filtro, asegúrese de que los productos incluyan la propiedad "created_by" (email o id).';
+          addConsumosList.appendChild(note);
+          return;
+        }
+      } else if (creatorTxt) {
+        filteredProducts = filteredProducts.filter(p => (String(p.created_by || p.creator || p.owner || p.created_by_email || '').toLowerCase()).includes(creatorTxt.toLowerCase()));
+      }
+    }catch(_){ }
+
     const frag = document.createDocumentFragment();
-    for(const p of (products || [])){
+    for(const p of (filteredProducts || [])){
       try{
         const row = document.createElement('div'); row.className = 'add-consumo-row'; row.style.display = 'flex'; row.style.justifyContent = 'space-between'; row.style.alignItems = 'center'; row.style.padding = '6px 8px'; row.style.borderBottom = '1px solid rgba(0,0,0,0.04)';
         const left = document.createElement('div'); left.style.flex = '1';
@@ -1897,6 +1939,8 @@ function renderAddConsumosList(products, existing){
           // find product object and add to admin consumos list
           const prod = products.find(x => String(x.id) === String(id));
           if(!prod){ showToast('Producto no encontrado','error'); return; }
+          // ensure modal checkbox is marked so it will be included if user clicks "Agregar seleccionados"
+          try{ cb.checked = true; }catch(_){ }
           addOrUpdateConsumoRow(prod, discount, qty);
           showToast('Añadido a la lista. Haga clic en Guardar para publicar', 'info');
           try{ if(consumosList){ const el = consumosList.querySelector('[data-id="' + String(prod.id) + '"]'); if(el) el.scrollIntoView({ block: 'center', behavior: 'smooth' }); } }catch(_){ }
@@ -1956,7 +2000,9 @@ async function confirmAddConsumos(){
 }
 
 // Wire add-consumos modal controls
-if(addConsumosBtn) addConsumosBtn.addEventListener('click', (e)=>{ e.preventDefault(); openAddConsumosModal(); });
+if(addConsumosBtn) addConsumosBtn.addEventListener('click', (e)=>{ e.preventDefault(); // when opening the selector, default to showing "Sólo mis productos" if the current user is known in the UI
+  try{ const onlyMyEl = document.getElementById('onlyMyProducts'); if(onlyMyEl) onlyMyEl.checked = true; }catch(_){ }
+  openAddConsumosModal(); });
 if(addConsumosCloseBtn) addConsumosCloseBtn.addEventListener('click', (e)=>{ e.preventDefault(); closeAddConsumosModal(); });
 if(addConsumosCancelBtn) addConsumosCancelBtn.addEventListener('click', (e)=>{ e.preventDefault(); closeAddConsumosModal(); });
 if(addConsumosConfirmBtn) addConsumosConfirmBtn.addEventListener('click', (e)=>{ e.preventDefault(); confirmAddConsumos(); });
@@ -2024,12 +2070,40 @@ async function saveConsumos(){
         data.push({ id, discount, qty });
       }
     }
-    const resp = await safeFetch(API_BASE + '/api/consumos', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
-    showToast('Consumiciones guardadas', 'info');
-    // reload admin view to reflect persisted state
-    try{ await loadConsumos(); }catch(_){ }
-    // broadcast to frontend so catalog refreshes live
-    try{ if(window.BroadcastChannel){ const bc = new BroadcastChannel('consumos_channel'); bc.postMessage({ action: 'consumos-updated', consumos: data }); bc.close(); } }catch(e){}
+    if (data.length === 0) {
+      // avoid accidental wipes: ask for confirmation before sending empty list
+      if (!confirm('La lista de consumos está vacía. Esto eliminará todos los consumos publicados. ¿Desea continuar?')){
+        showToast('Guardar cancelado', 'info');
+        return;
+      }
+    }
+    const url = API_BASE + '/api/consumos' + (data.length === 0 ? '?confirm=true' : '');
+    try{
+      const resp = await safeFetch(url, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
+      showToast('Consumiciones guardadas', 'info');
+      // reload admin view to reflect persisted state
+      try{ await loadConsumos(); }catch(_){ }
+      // broadcast to frontend so catalog refreshes live
+      try{ if(window.BroadcastChannel){ const bc = new BroadcastChannel('consumos_channel'); bc.postMessage({ action: 'consumos-updated', consumos: data }); bc.close(); } }catch(e){}
+    }catch(e){
+      console.warn('saveConsumos server error', e, e.payload || null);
+      if(e && e.status === 400 && e.payload && e.payload.detail){
+        if(e.payload.detail === 'empty-list-requires-confirm'){
+          // server requires explicit confirmation if attempting to clear list
+          if(confirm('El servidor requiere confirmación para borrar todos los consumos. ¿Desea continuar?')){
+            try{ const resp2 = await safeFetch(url + (url.indexOf('?') === -1 ? '?confirm=true' : '&confirm=true'), { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) }); showToast('Consumiciones guardadas', 'info'); try{ await loadConsumos(); }catch(_){ } }catch(err2){ showToast('No se pudo guardar (confirmación fallida)','error'); }
+          } else {
+            showToast('Guardar cancelado', 'info');
+          }
+          return;
+        }
+        if(e.payload.detail === 'no-valid-consumos'){
+          showToast('No se encontraron consumos válidos para guardar. Revise los descuentos y cantidades.', 'warn');
+          return;
+        }
+      }
+      showToast('Error guardando consumos','error');
+    }
   }catch(e){ console.error('saveConsumos failed', e); showToast('Error guardando consumos','error'); }
 }
 

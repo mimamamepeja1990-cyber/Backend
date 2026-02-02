@@ -137,10 +137,12 @@
 
       <section id="consumos" class="section hidden">
         <h2>Consumición inmediata <small id="consumosCount" style="color:#666; font-weight:normal; margin-left:8px"></small></h2>
-        <p>Seleccione productos próximos a vencerse y asigne un descuento (%) que se aplicará en el catálogo público.</p>
-        <p style="color:#555; margin-top:6px; font-size:14px">Flujo: <strong>Agregar consumos</strong> → en la ventana haga clic en <em>Añadir</em> junto al producto (ingrese descuento y cantidad), luego revise la lista y haga <strong>Guardar consumos</strong> para publicar los cambios.</p>
+        <p>Seleccionar productos próximos a vencerse y asigne un descuento (%) que se aplicará en el catálogo.</p>
+        <p style="color:#555; margin-top:6px; font-size:14px">Como funciona: <strong>Agregar consumos</strong> → en la ventana haga clic en <em>Añadir</em> junto al producto (poner descuento y cantidad), luego revise la lista y haga <strong>Guardar consumos</strong> para publicar los cambios.</p>
         <div class="controls">
           <input id="consumoSearch" placeholder="Buscar producto..." />
+          <input id="creatorFilter" placeholder="Filtrar por creador (email o id)" style="width:220px;margin-left:8px" />
+          <label style="margin-left:8px"><input id="onlyMyProducts" type="checkbox"> Solo mis productos</label>
           <button id="loadConsumosBtn" class="btn">Cargar consumos</button>
           <button id="addConsumosBtn" class="btn primary">Agregar consumos</button>
           <button id="saveConsumosBtn" class="btn primary">Guardar consumos</button>
