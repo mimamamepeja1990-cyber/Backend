@@ -1937,11 +1937,19 @@ async function confirmAddConsumos(){
     selected.forEach(s => { try{ existingMap[String(s.id)] = { id: s.id, discount: Number(s.discount || 0), qty: Number(s.qty || 0) }; }catch(_){ } });
     const merged = Object.values(existingMap);
 
-    // Instead of saving immediately, add these to the admin consumos list so user can review and then click 'Guardar consumos'
+    // Instead of saving immediately, add each selected item to the admin consumos list (for review) using addOrUpdateConsumoRow
     try{
-      renderConsumosList(_lastAddConsumosProducts, merged);
+      for (const s of selected){
+        try{
+          const prod = _lastAddConsumosProducts.find(x => String(x.id) === String(s.id));
+          if (prod) { addOrUpdateConsumoRow(prod, Number(s.discount || 0), Number(s.qty || 0)); }
+          else {
+            try{ const p = await safeFetch(API_BASE + '/api/products/' + String(s.id)).catch(()=>null); if(p && p.id) addOrUpdateConsumoRow(p, Number(s.discount || 0), Number(s.qty || 0)); }catch(_){ }
+          }
+        }catch(_){ }
+      }
       showToast('Productos agregados a la lista. Haga clic en Guardar para persistir los cambios.', 'info');
-    }catch(e){ console.warn('Failed to update consumos list locally', e); showToast('No se pudo añadir a la lista localmente','error'); }
+    }catch(e){ console.warn('Failed to add selected items locally', e); showToast('No se pudo añadir a la lista localmente','error'); }
 
     closeAddConsumosModal();
   }catch(e){ console.error('confirmAddConsumos failed', e); showToast('Error agregando consumos','error'); }
