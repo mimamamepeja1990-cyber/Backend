@@ -427,6 +427,7 @@ function renderProducts(products){
       <td>${p.name}</td>
       <td>${catsDisplay}</td>
       <td>$${parseFloat(p.price).toFixed(2)}</td>
+      <td>${(p.stock != null) ? String(p.stock) : '0'}</td>
       <td>${p.active ? 'Sí' : 'No'}</td>
       <td>
         <button data-id="${p.id}" class="editBtn btn">Editar</button>
