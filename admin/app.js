@@ -1789,17 +1789,20 @@ function renderConsumosList(products, consumos){
   if(!consumosList) return;
   consumosList.innerHTML = '';
   const map = {};
-  (consumos || []).forEach(c => { map[String(c.id)] = c.discount; });
+  (consumos || []).forEach(c => { map[String(c.id)] = { discount: c.discount, qty: c.qty }; });
   for(const p of (products || [])){
     const row = document.createElement('div'); row.className = 'consumo-row';
     const left = document.createElement('div'); left.className = 'left';
-    const cb = document.createElement('input'); cb.type='checkbox'; cb.dataset.id = String(p.id); cb.id = 'consumo-p-' + p.id; if(map[String(p.id)]) cb.checked = true;
+    const cb = document.createElement('input'); cb.type='checkbox'; cb.dataset.id = String(p.id); cb.id = 'consumo-p-' + p.id; if(map[String(p.id)] && map[String(p.id)].discount) cb.checked = true;
     const lbl = document.createElement('label'); lbl.htmlFor = cb.id; lbl.innerText = p.name + (p.category ? ' — '+p.category : '');
     left.appendChild(cb); left.appendChild(lbl);
     const right = document.createElement('div'); right.className = 'right';
-    const inp = document.createElement('input'); inp.type='number'; inp.min=0; inp.max=100; inp.placeholder='Descuento %'; inp.value = map[String(p.id)] != null ? String(map[String(p.id)]) : '';
+    const inp = document.createElement('input'); inp.type='number'; inp.min=0; inp.max=100; inp.placeholder='Descuento %'; inp.value = (map[String(p.id)] && map[String(p.id)].discount != null) ? String(map[String(p.id)].discount) : '';
     inp.dataset.id = String(p.id);
+    const inpQty = document.createElement('input'); inpQty.type='number'; inpQty.className='qty-input'; inpQty.min=0; inpQty.placeholder='Cant. venc.'; inpQty.value = (map[String(p.id)] && map[String(p.id)].qty != null) ? String(map[String(p.id)].qty) : '';
+    inpQty.dataset.id = String(p.id);
     right.appendChild(inp);
+    right.appendChild(inpQty);
     row.appendChild(left); row.appendChild(right);
     consumosList.appendChild(row);
   }
@@ -1813,13 +1816,15 @@ async function saveConsumos(){
     for(const r of rows){
       const cb = r.querySelector('input[type=checkbox]');
       const inp = r.querySelector('input[type=number]');
+      const qtyInp = r.querySelector('input.qty-input') || r.querySelectorAll('input[type=number]')[1];
       const id = Number(cb?.dataset?.id);
       const discount = Number(inp && inp.value ? inp.value : 0);
+      const qty = Number(qtyInp && qtyInp.value ? qtyInp.value : 0);
       const shouldInclude = (cb && cb.checked) || (discount > 0);
       if(!shouldInclude) continue;
       if(isNaN(discount) || discount <= 0) continue;
-      // default qty=1 for legacy admin UI (no qty input)
-      data.push({ id, discount, qty: 1 });
+      if(isNaN(qty) || qty < 0) continue;
+      data.push({ id, discount, qty });
     }
     if (data.length === 0) {
       if (!confirm('La lista de consumos está vacía. Esto eliminará todos los consumos publicados. ¿Desea continuar?')){
