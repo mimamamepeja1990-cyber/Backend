@@ -515,6 +515,16 @@ def prealloc_consumos(items_list_input, catalog_dir_override=None):
                     qty_req = int(it.get('qty', 1) or 1)
                 except Exception:
                     continue
+                # Respect explicit flags: if item is marked regular, skip consumo allocation
+                try:
+                    meta = it.get('meta') if isinstance(it, dict) else None
+                    if isinstance(meta, dict):
+                        if meta.get('force_regular') is True:
+                            continue
+                        if meta.get('consumo') is False:
+                            continue
+                except Exception:
+                    pass
                 avail = int(consumos_map_local.get(pid, 0) or 0)
                 take = min(avail, qty_req)
                 if take > 0:
@@ -587,15 +597,25 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                 pre_alloc = False
                 try:
                     alloc_map_local = {}
-                    for it in items_list_input:
-                        try:
-                            pid = int(it.get('id'))
-                            qty_req = int(it.get('qty', 1) or 1)
-                        except Exception:
-                            continue
-                        avail = int(consumos_map_local.get(pid, 0) or 0)
-                        take = min(avail, qty_req)
-                        if take > 0:
+                for it in items_list_input:
+                    try:
+                        pid = int(it.get('id'))
+                        qty_req = int(it.get('qty', 1) or 1)
+                    except Exception:
+                        continue
+                    # Respect explicit flags: if item is marked regular, skip consumo allocation
+                    try:
+                        meta = it.get('meta') if isinstance(it, dict) else None
+                        if isinstance(meta, dict):
+                            if meta.get('force_regular') is True:
+                                continue
+                            if meta.get('consumo') is False:
+                                continue
+                    except Exception:
+                        pass
+                    avail = int(consumos_map_local.get(pid, 0) or 0)
+                    take = min(avail, qty_req)
+                    if take > 0:
                             alloc_map_local[pid] = alloc_map_local.get(pid, 0) + take
                             consumos_map_local[pid] = max(0, avail - take)
                             try:
@@ -854,8 +874,20 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                 qty = int(it.get('qty', 1) or 1)
                 if qty <= 0:
                     continue
-                # First: take from consumos (near-expiry) if available
-                take_from_consumos = min(consumos_disk.get(pid, 0), qty)
+                # First: take from consumos (near-expiry) only when item is flagged as consumo
+                try:
+                    meta = it.get('meta') if isinstance(it, dict) else None
+                    if isinstance(meta, dict):
+                        if meta.get('force_regular') is True:
+                            take_from_consumos = 0
+                        elif meta.get('consumo') is False:
+                            take_from_consumos = 0
+                        else:
+                            take_from_consumos = min(consumos_disk.get(pid, 0), qty)
+                    else:
+                        take_from_consumos = min(consumos_disk.get(pid, 0), qty)
+                except Exception:
+                    take_from_consumos = min(consumos_disk.get(pid, 0), qty)
                 if take_from_consumos > 0:
                     consumed_map[pid] = consumed_map.get(pid, 0) + take_from_consumos
                 remaining = qty - take_from_consumos
@@ -1437,4 +1469,3 @@ def set_setting(db: Session, key: str, value):
             pass
         logger.exception('set_setting failed for key %s', key)
         return False
-

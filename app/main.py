@@ -199,6 +199,7 @@ async def lifespan(app: FastAPI):
         conn = engine.connect()
         try:
             needed = {
+                'status': "VARCHAR(50) DEFAULT 'nuevo'",
                 'user_id': 'INTEGER',
                 'user_full_name': 'VARCHAR(200)',
                 'user_email': 'VARCHAR(320)',
@@ -797,6 +798,7 @@ def _run_add_user_columns() -> dict:
     """Run the same migration logic as `add_user_columns.py` and return a report dict."""
     results = { 'added': [], 'skipped': [], 'failed': [] }
     needed = [
+        ('status', "VARCHAR(50) DEFAULT 'nuevo'"),
         ('user_id', 'INTEGER'),
         ('user_full_name', 'VARCHAR(200)'),
         ('user_email', 'VARCHAR(320)'),
@@ -1594,7 +1596,11 @@ async def save_consumos(request: Request):
             # keep entries with a positive discount and non-negative qty
             if discount <= 0 or qty < 0:
                 continue
-            cleaned.append({'id': pid, 'discount': float(discount), 'qty': int(qty)})
+            # Default consumos to percent-type discounts unless caller specifies otherwise
+            ctype = entry.get('type') if isinstance(entry, dict) else None
+            if not ctype and discount > 0:
+                ctype = 'percent'
+            cleaned.append({'id': pid, 'discount': float(discount), 'qty': int(qty), 'type': ctype})
         # If after cleaning there is nothing to save but the original data wasn't empty, reject to avoid accidental clears
         if len(cleaned) == 0 and len(data) > 0:
             raise HTTPException(status_code=400, detail='no-valid-consumos')

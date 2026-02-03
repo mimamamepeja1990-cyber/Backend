@@ -183,10 +183,6 @@ const newBtn = document.getElementById('newBtn');
 const modal = document.getElementById('modal');
 const productForm = document.getElementById('productForm');
 const cancelBtn = document.getElementById('cancelBtn');
-const creatorFilter = document.getElementById('creatorFilter');
-const onlyMyProducts = document.getElementById('onlyMyProducts');
-if(creatorFilter) creatorFilter.addEventListener('input', ()=>{ try{ loadConsumos(); }catch(_){ } });
-if(onlyMyProducts) onlyMyProducts.addEventListener('change', ()=>{ try{ loadConsumos(); }catch(_){ } });
 const uploadImageBtn = document.getElementById('uploadImageBtn');
 const imageInput = document.getElementById('imageInput');
 const imagePreview = document.getElementById('imagePreview');
@@ -431,7 +427,6 @@ function renderProducts(products){
       <td>${p.name}</td>
       <td>${catsDisplay}</td>
       <td>$${parseFloat(p.price).toFixed(2)}</td>
-      <td>${(p.stock != null) ? (Number(p.stock) > 0 ? Number(p.stock) : 'Sin stock') : '—'}</td>
       <td>${p.active ? 'Sí' : 'No'}</td>
       <td>
         <button data-id="${p.id}" class="editBtn btn">Editar</button>
@@ -536,17 +531,7 @@ async function handleSave(ev){
     try{
       const key = String((created && created.id) ? created.id : payload.name);
       const mapping = loadProductCategories() || {};
-      // Only overwrite mapping when we have checkboxes loaded (admin explicitly made a choice).
-      // If checkboxes did not exist (filters not loaded), preserve any existing mapping to avoid accidental deletion.
-      const anyCheckboxes = !!document.querySelector('#categoryCheckboxes input[type=checkbox]');
-      if (selectedCats && selectedCats.length) {
-        mapping[key] = selectedCats;
-      } else if (anyCheckboxes) {
-        // If checkboxes exist and none are checked, user intentionally cleared categories -> delete mapping
-        delete mapping[key];
-      } else {
-        // No checkboxes present: do not modify existing mapping (preserve)
-      }
+      if(selectedCats && selectedCats.length) mapping[key] = selectedCats; else delete mapping[key];
       await saveProductCategories(mapping);
     }catch(e){ console.warn('Failed to save product categories', e); }
 
@@ -907,10 +892,7 @@ function orderRowFor(o){
   const itemsList = (itemsArr || []).map(it => {
     const name = (it && it.meta && it.meta.name) ? it.meta.name : (it && it.id) ? it.id : '';
     const qty = it && it.qty ? it.qty : 1;
-    const isConsumo = !!(it && it.meta && it.meta.consumo);
-    const consumed = it && it.meta && it.meta.consumo_consumed ? Number(it.meta.consumo_consumed) : null;
-    const badge = isConsumo ? (` <span class="badge-pill" style="margin-left:8px; background:#ffdede; color:#a00; padding:2px 6px; border-radius:10px; font-size:12px;">Consumo inmediato</span>` + (consumed ? ` <small class="muted">(${consumed} consumido)</small>` : '')) : '';
-    return `<li>${escapeHtml(name)}${badge} <span class="muted">×${qty}</span></li>`;
+    return `<li>${escapeHtml(name)} <span class="muted">×${qty}</span></li>`;
   }).join('');
   const tr = document.createElement('tr');
   const previewName = o._token_preview && (o._token_preview.name || o._token_preview.email) ? (o._token_preview.name || o._token_preview.email) : null;
@@ -1094,18 +1076,7 @@ function showOrderDetail(order){
   if(!modal || !body || !title) return;
   title.textContent = `Pedido #${order.id}`;
   const itemsArr = safeParseItems(order.items || []);
-  const itemsHtml = (itemsArr || []).map(it => {
-    const name = escapeHtml((it && it.meta && it.meta.name) ? it.meta.name : (it && it.id) ? it.id : '');
-    const qty = it.qty || 1;
-    const price = Number(it.meta && it.meta.price ? it.meta.price : 0).toFixed(2);
-    const isConsumo = !!(it && it.meta && it.meta.consumo);
-    const consumed = it && it.meta && it.meta.consumo_consumed ? Number(it.meta.consumo_consumed) : null;
-    const discountLabel = it && it.meta && it.meta.discount_label ? String(it.meta.discount_label) : null;
-    const saved = it && (typeof it.meta?.discount_savings === 'number') ? Number(it.meta.discount_savings) : null;
-    const badge = isConsumo ? (`<span class="badge-pill" style="margin-left:8px; background:#ffdede; color:#a00; padding:2px 6px; border-radius:10px; font-size:12px;">Consumo inmediato</span>` + (consumed ? ` <small class="muted">(${consumed} consumido)</small>` : '')) : '';
-    const extra = (saved && saved > 0) ? ` <small style="color:#a00; margin-left:6px">Ahorra $${Number(saved).toFixed(2)}${discountLabel ? ' (' + escapeHtml(discountLabel) + ')' : ''}</small>` : '';
-    return `<li><strong>${name}</strong> ${badge} — ${qty} × $${price}${extra}</li>`;
-  }).join('') || '<li>(sin ítems)</li>';
+  const itemsHtml = (itemsArr || []).map(it=>`<li><strong>${escapeHtml((it && it.meta && it.meta.name) ? it.meta.name : (it && it.id) ? it.id : '')}</strong> — ${it.qty} × $${Number(it.meta?.price||0).toFixed(2)}</li>`).join('') || '<li>(sin ítems)</li>';
   const address = [order.user_barrio, order.user_calle, order.user_numeracion].filter(Boolean).join(', ');
   // prefer user_* fields, otherwise display token preview when available
   const previewName = order._token_preview && (order._token_preview.name || order._token_preview.email) ? (order._token_preview.name || order._token_preview.email) : null;
@@ -1801,58 +1772,6 @@ const loadConsumosBtn = document.getElementById('loadConsumosBtn');
 const saveConsumosBtn = document.getElementById('saveConsumosBtn');
 const consumosList = document.getElementById('consumosList');
 const consumoSearch = document.getElementById('consumoSearch');
-const addConsumosBtn = document.getElementById('addConsumosBtn');
-const addConsumosModal = document.getElementById('addConsumoModal');
-const addConsumosList = document.getElementById('addConsumosList');
-const addConsumosSearch = document.getElementById('addConsumosSearch');
-const addConsumosConfirmBtn = document.getElementById('addConsumosConfirmBtn');
-const addConsumosCloseBtn = document.getElementById('addConsumosCloseBtn');
-const addConsumosCancelBtn = document.getElementById('addConsumosCancelBtn');
-
-// keep reference to last fetched products for add-modal interactions
-let _lastAddConsumosProducts = [];
-
-// Public helper: add or update a consumo row in the admin consumos list
-function addOrUpdateConsumoRow(prod, discount, qty){
-  if(!consumosList) return;
-  try{
-    // Accept either a product object or an id; if id is given try to resolve against last products fetch
-    let product = prod;
-    try{ if(!product && prod != null){ product = _lastAddConsumosProducts.find(x=>String(x.id) === String(prod)) || null; } }catch(_){ }
-    if(!product && prod && typeof prod === 'string'){
-      try{ product = _lastAddConsumosProducts.find(x=>String(x.id) === String(prod) || String(x.nombre||x.name) === String(prod)) || null; }catch(_){ }
-    }
-    if(!product) return;
-    // find existing row
-    const existing = consumosList.querySelector('[data-id="' + String(product.id) + '"]');
-    if(existing){
-      const inpDisc = existing.querySelector('.discount-input');
-      const inpQty = existing.querySelector('.qty-input');
-      const cb = existing.querySelector('input[type=checkbox]');
-      if(inpDisc) inpDisc.value = String(discount);
-      if(inpQty) inpQty.value = String(qty);
-      if(cb) cb.checked = true;
-      return;
-    }
-    const row = document.createElement('div'); row.className = 'consumo-row'; row.setAttribute('data-id', String(product.id));
-    const left = document.createElement('div'); left.className = 'left';
-    const cb = document.createElement('input'); cb.type='checkbox'; cb.dataset.id = String(product.id); cb.id = 'consumo-p-' + product.id; cb.checked = true;
-    const lbl = document.createElement('label'); lbl.htmlFor = cb.id; lbl.innerText = (product.name || product.nombre || '') + (product.category ? ' — '+product.category : '');
-    left.appendChild(cb); left.appendChild(lbl);
-    const right = document.createElement('div'); right.className = 'right';
-    const inpDiscount = document.createElement('input'); inpDiscount.type='number'; inpDiscount.className='discount-input'; inpDiscount.min=0; inpDiscount.max=100; inpDiscount.placeholder='Descuento %'; inpDiscount.value = (discount != null) ? String(discount) : '';
-    inpDiscount.dataset.id = String(product.id);
-    const inpQty = document.createElement('input'); inpQty.type='number'; inpQty.className='qty-input'; inpQty.min=0; inpQty.placeholder='Cant. venc.'; inpQty.value = (qty != null) ? String(qty) : '';
-    const stockSpan = document.createElement('small'); stockSpan.style.color = '#666'; stockSpan.style.marginLeft = '8px'; stockSpan.textContent = (product.stock != null) ? (Number(product.stock) > 0 ? 'Stock: ' + Number(product.stock) : 'Sin stock') : '';
-    const removeBtn = document.createElement('button'); removeBtn.type='button'; removeBtn.className='btn small danger remove-consumo'; removeBtn.dataset.id = String(product.id); removeBtn.textContent = 'Eliminar';
-    right.appendChild(inpDiscount); right.appendChild(inpQty); right.appendChild(stockSpan); right.appendChild(removeBtn);
-    row.appendChild(left); row.appendChild(right); consumosList.appendChild(row);
-    // attach handler to new remove button
-    removeBtn.addEventListener('click', async (ev)=>{
-      ev.preventDefault(); if(!confirm('¿Eliminar este consumo?')) return; try{ await safeFetch(API_BASE + '/api/consumos/' + product.id, { method: 'DELETE' }); showToast('Consumo eliminado', 'info'); }catch(e){ showToast('No se pudo eliminar','error'); } await loadConsumos();
-    });
-  }catch(e){ console.warn('addOrUpdateConsumoRow failed', e); }
-}
 
 async function loadConsumos(){
   try{
@@ -1860,210 +1779,30 @@ async function loadConsumos(){
     try{ products = await fetchProducts(); }catch(e){ console.warn('fetchProducts failed for consumos', e); }
     // try snapshot fallback
     if(!products || !products.length){ try{ const resp = await fetch('../catalogo/products.json'); if(resp.ok) products = await resp.json(); }catch(e){} }
-    // apply client-side creator filter if requested
-    try{
-      const onlyMyEl = document.getElementById('onlyMyProducts');
-      const creatorFilterEl = document.getElementById('creatorFilter');
-      const onlyMy = !!(onlyMyEl && onlyMyEl.checked);
-      const creatorTxt = (creatorFilterEl && String(creatorFilterEl.value || '').trim()) || '';
-      if(onlyMy || creatorTxt){
-        products = (products || []).filter(p => {
-          const owner = String(p.created_by || p.creator || p.owner || p.created_by_email || '').toLowerCase();
-          if(onlyMy && creatorTxt) return owner && owner === creatorTxt.toLowerCase();
-          if(creatorTxt) return owner && owner.includes(creatorTxt.toLowerCase());
-          return !!owner;
-        });
-      }
-    }catch(_){ }
     const resp = await safeFetch(API_BASE + '/api/consumos').catch(()=>[]);
     const consumos = Array.isArray(resp) ? resp : [];
     renderConsumosList(products, consumos);
   }catch(e){ console.error('loadConsumos failed', e); showToast('No se pudieron cargar consumos','error'); }
 }
 
-// --- Add Consumptions modal behaviors ---
-async function openAddConsumosModal(){
-  // (function removed — moved to module scope to fix ReferenceError when clicking 'Añadir')
-
-  if(!addConsumosModal) return;
-  try{
-    // Fetch products and existing consumos to prefill values
-    let products = [];
-    try{ products = await fetchProducts(); }catch(e){ console.warn('openAddConsumosModal: fetchProducts failed', e); }
-    if(!products || !products.length){ try{ const resp = await fetch('../catalogo/products.json'); if(resp.ok) products = await resp.json(); }catch(e){} }
-    let existing = [];
-    try{ const r = await safeFetch(API_BASE + '/api/consumos').catch(()=>[]); existing = Array.isArray(r) ? r : []; }catch(e){ existing = []; }
-    // store products globally so modal actions can add products directly to admin list
-    _lastAddConsumosProducts = products || [];
-    renderAddConsumosList(products, existing);
-    addConsumosModal.classList.remove('hidden'); addConsumosModal.setAttribute('aria-hidden','false');
-    if(addConsumosSearch) setTimeout(()=> addConsumosSearch.focus(), 80);
-  }catch(e){ console.error('openAddConsumosModal failed', e); showToast('No se pudo abrir el selector de consumos','error'); }
-}
-function closeAddConsumosModal(){ if(!addConsumosModal) return; addConsumosModal.classList.add('hidden'); addConsumosModal.setAttribute('aria-hidden','true'); if(addConsumosList) addConsumosList.innerHTML = ''; }
-
-function renderAddConsumosList(products, existing){
-  if(!addConsumosList) return;
-  try{
-    const map = {};
-    (existing || []).forEach(c => { try{ map[String(c.id)] = { discount: Number(c.discount || c.value || 0), qty: Number(c.qty || c.cantidad || 0) }; }catch(_){ } });
-    addConsumosList.innerHTML = '';
-
-    // Optional client-side filter: only show products created by the current user (if they provide an identity)
-    const onlyMyEl = document.getElementById('onlyMyProducts');
-    const creatorFilterEl = document.getElementById('creatorFilter');
-    let filteredProducts = Array.isArray(products) ? products.slice() : [];
-    try{
-      const onlyMy = !!(onlyMyEl && onlyMyEl.checked);
-      const creatorTxt = (creatorFilterEl && String(creatorFilterEl.value || '').trim()) || '';
-      if (onlyMy && creatorTxt) {
-        filteredProducts = filteredProducts.filter(p => {
-          const owner = String(p.created_by || p.creator || p.owner || p.created_by_email || '').toLowerCase();
-          return owner && owner === creatorTxt.toLowerCase();
-        });
-        if (!filteredProducts.length) {
-          const note = document.createElement('div'); note.style.color = '#666'; note.style.padding = '8px'; note.textContent = 'No se encontraron productos con el creador indicado. Para habilitar este filtro, asegúrese de que los productos incluyan la propiedad "created_by" (email o id).';
-          addConsumosList.appendChild(note);
-          return;
-        }
-      } else if (creatorTxt) {
-        filteredProducts = filteredProducts.filter(p => (String(p.created_by || p.creator || p.owner || p.created_by_email || '').toLowerCase()).includes(creatorTxt.toLowerCase()));
-      }
-    }catch(_){ }
-
-    const frag = document.createDocumentFragment();
-    for(const p of (filteredProducts || [])){
-      try{
-        const row = document.createElement('div'); row.className = 'add-consumo-row'; row.style.display = 'flex'; row.style.justifyContent = 'space-between'; row.style.alignItems = 'center'; row.style.padding = '6px 8px'; row.style.borderBottom = '1px solid rgba(0,0,0,0.04)';
-        const left = document.createElement('div'); left.style.flex = '1';
-        const stockText = (p.stock != null) ? (Number(p.stock) > 0 ? ('Stock: ' + Number(p.stock)) : 'Sin stock') : '';
-        left.innerHTML = `${escapeHtml(p.name || p.nombre || '')} <small style="color:#666; display:block">${escapeHtml(p.category || p.categoria || '')}${stockText ? ' — ' + escapeHtml(String(stockText)) : ''}</small>`;
-        const right = document.createElement('div'); right.style.display = 'flex'; right.style.gap = '8px';
-        const cb = document.createElement('input'); cb.type = 'checkbox'; cb.dataset.id = String(p.id); cb.id = 'addc_' + String(p.id);
-        const inpDiscount = document.createElement('input'); inpDiscount.type = 'number'; inpDiscount.className = 'discount-input'; inpDiscount.min = 0; inpDiscount.max = 100; inpDiscount.placeholder = 'Descuento %'; inpDiscount.style.width = '88px'; inpDiscount.dataset.id = String(p.id);
-        const inpQty = document.createElement('input'); inpQty.type = 'number'; inpQty.className = 'qty-input'; inpQty.min = 0; inpQty.placeholder = 'Cant. venc.'; inpQty.style.width = '88px'; inpQty.dataset.id = String(p.id);
-        const addBtn = document.createElement('button'); addBtn.type = 'button'; addBtn.className = 'btn small'; addBtn.textContent = 'Añadir'; addBtn.dataset.id = String(p.id);
-        addBtn.addEventListener('click', (ev)=>{
-          ev.preventDefault();
-          const id = Number(addBtn.dataset.id);
-          const discount = Number(inpDiscount && inpDiscount.value ? inpDiscount.value : 0);
-          const qty = Number(inpQty && inpQty.value ? inpQty.value : 0);
-          if(isNaN(discount) || discount <= 0){ showToast('Ingrese un descuento válido para añadir','warn'); return; }
-          if(isNaN(qty) || qty < 0){ showToast('Ingrese una cantidad válida para añadir','warn'); return; }
-          // find product object and add to admin consumos list
-          const prod = products.find(x => String(x.id) === String(id));
-          if(!prod){ showToast('Producto no encontrado','error'); return; }
-          // ensure modal checkbox is marked so it will be included if user clicks "Agregar seleccionados"
-          try{ cb.checked = true; }catch(_){ }
-          addOrUpdateConsumoRow(prod, discount, qty);
-          showToast('Añadido a la lista. Haga clic en Guardar para publicar', 'info');
-          try{ if(consumosList){ const el = consumosList.querySelector('[data-id="' + String(prod.id) + '"]'); if(el) el.scrollIntoView({ block: 'center', behavior: 'smooth' }); } }catch(_){ }
-        });
-        if(map[String(p.id)]){ cb.checked = true; inpDiscount.value = String(map[String(p.id)].discount); inpQty.value = String(map[String(p.id)].qty || ''); }
-        right.appendChild(inpDiscount); right.appendChild(inpQty); right.appendChild(addBtn); right.appendChild(cb);
-        row.appendChild(left); row.appendChild(right); frag.appendChild(row);
-      }catch(e){ /* ignore individual row errors */ }
-    }
-    addConsumosList.appendChild(frag);
-  }catch(e){ console.warn('renderAddConsumosList failed', e); }
-}
-
-async function confirmAddConsumos(){
-  try{
-    if(!addConsumosList) return;
-    const rows = Array.from(addConsumosList.querySelectorAll('.add-consumo-row'));
-    const selected = [];
-    for(const r of rows){
-      try{
-        const cb = r.querySelector('input[type=checkbox]');
-        const inpDiscount = r.querySelector('.discount-input');
-        const inpQty = r.querySelector('.qty-input');
-        if(cb && cb.checked){
-          const id = Number(cb.dataset.id);
-          const discount = Number(inpDiscount && inpDiscount.value ? inpDiscount.value : 0);
-          const qty = Number(inpQty && inpQty.value ? inpQty.value : 0);
-          if(!isNaN(discount) && discount > 0 && !isNaN(qty) && qty >= 0){ selected.push({ id, discount, qty }); }
-        }
-      }catch(_){ }
-    }
-    // Merge with existing consumos: fetch current, replace per selected, preserve others not touched
-    let existing = [];
-    try{ const r = await safeFetch(API_BASE + '/api/consumos').catch(()=>[]); existing = Array.isArray(r) ? r : []; }catch(e){ existing = []; }
-    // build existing map and overwrite with selected values (preserve discount + qty)
-    const existingMap = {};
-    (existing || []).forEach(e => { try{ existingMap[String(e.id)] = { id: e.id, discount: Number(e.discount || e.value || 0), qty: Number(e.qty || e.cantidad || 0) }; }catch(_){ } });
-    selected.forEach(s => { try{ existingMap[String(s.id)] = { id: s.id, discount: Number(s.discount || 0), qty: Number(s.qty || 0) }; }catch(_){ } });
-    const merged = Object.values(existingMap);
-
-    // Instead of saving immediately, add each selected item to the admin consumos list (for review) using addOrUpdateConsumoRow
-    try{
-      for (const s of selected){
-        try{
-          const prod = _lastAddConsumosProducts.find(x => String(x.id) === String(s.id));
-          if (prod) { addOrUpdateConsumoRow(prod, Number(s.discount || 0), Number(s.qty || 0)); }
-          else {
-            try{ const p = await safeFetch(API_BASE + '/api/products/' + String(s.id)).catch(()=>null); if(p && p.id) addOrUpdateConsumoRow(p, Number(s.discount || 0), Number(s.qty || 0)); }catch(_){ }
-          }
-        }catch(_){ }
-      }
-      showToast('Productos agregados a la lista. Haga clic en Guardar para persistir los cambios.', 'info');
-    }catch(e){ console.warn('Failed to add selected items locally', e); showToast('No se pudo añadir a la lista localmente','error'); }
-
-    closeAddConsumosModal();
-  }catch(e){ console.error('confirmAddConsumos failed', e); showToast('Error agregando consumos','error'); }
-}
-
-// Wire add-consumos modal controls
-if(addConsumosBtn) addConsumosBtn.addEventListener('click', (e)=>{ e.preventDefault(); // when opening the selector, default to showing "Sólo mis productos" if the current user is known in the UI
-  try{ const onlyMyEl = document.getElementById('onlyMyProducts'); if(onlyMyEl) onlyMyEl.checked = true; }catch(_){ }
-  openAddConsumosModal(); });
-if(addConsumosCloseBtn) addConsumosCloseBtn.addEventListener('click', (e)=>{ e.preventDefault(); closeAddConsumosModal(); });
-if(addConsumosCancelBtn) addConsumosCancelBtn.addEventListener('click', (e)=>{ e.preventDefault(); closeAddConsumosModal(); });
-if(addConsumosConfirmBtn) addConsumosConfirmBtn.addEventListener('click', (e)=>{ e.preventDefault(); confirmAddConsumos(); });
-if(addConsumosSearch) addConsumosSearch.addEventListener('input', (e)=>{ const q = (e.target.value||'').toLowerCase(); if(!addConsumosList) return; Array.from(addConsumosList.children).forEach(r=>{ const txt = (r.textContent||'').toLowerCase(); r.style.display = (!q || txt.includes(q)) ? 'flex' : 'none'; }); });
-
 function renderConsumosList(products, consumos){
   if(!consumosList) return;
   consumosList.innerHTML = '';
   const map = {};
-  (consumos || []).forEach(c => { map[String(c.id)] = { discount: c.discount, qty: c.qty }; });
-  // update count indicator
-  try{ const count = Object.keys(map).length; const el = document.getElementById('consumosCount'); if(el) el.textContent = count + ' producto' + (count === 1 ? '' : 's'); }catch(_){ }
+  (consumos || []).forEach(c => { map[String(c.id)] = c.discount; });
   for(const p of (products || [])){
     const row = document.createElement('div'); row.className = 'consumo-row';
     const left = document.createElement('div'); left.className = 'left';
-    const cb = document.createElement('input'); cb.type='checkbox'; cb.dataset.id = String(p.id); cb.id = 'consumo-p-' + p.id; if(map[String(p.id)] && map[String(p.id)].discount) cb.checked = true;
+    const cb = document.createElement('input'); cb.type='checkbox'; cb.dataset.id = String(p.id); cb.id = 'consumo-p-' + p.id; if(map[String(p.id)]) cb.checked = true;
     const lbl = document.createElement('label'); lbl.htmlFor = cb.id; lbl.innerText = p.name + (p.category ? ' — '+p.category : '');
     left.appendChild(cb); left.appendChild(lbl);
     const right = document.createElement('div'); right.className = 'right';
-    const inpDiscount = document.createElement('input'); inpDiscount.type='number'; inpDiscount.className='discount-input'; inpDiscount.min=0; inpDiscount.max=100; inpDiscount.placeholder='Descuento %'; inpDiscount.value = (map[String(p.id)] && map[String(p.id)].discount != null) ? String(map[String(p.id)].discount) : '';
-    inpDiscount.dataset.id = String(p.id);
-    const inpQty = document.createElement('input'); inpQty.type='number'; inpQty.className='qty-input'; inpQty.min=0; inpQty.placeholder='Cant. venc.'; inpQty.value = (map[String(p.id)] && map[String(p.id)].qty != null) ? String(map[String(p.id)].qty) : '';
-    const stockSpan = document.createElement('small'); stockSpan.style.color = '#666'; stockSpan.style.marginLeft = '8px';
-    const reservedQty = map[String(p.id)] ? Number(map[String(p.id)].qty || 0) : 0;
-    if(p.stock != null){ const avail = Math.max(0, Number(p.stock) - reservedQty); stockSpan.textContent = (avail > 0 ? 'Stock: ' + avail : 'Sin stock') + (reservedQty ? ' • reserva: ' + reservedQty : ''); } else { stockSpan.textContent = '' }
-    const removeBtn = document.createElement('button'); removeBtn.type='button'; removeBtn.className = 'btn small danger remove-consumo'; removeBtn.dataset.id = String(p.id); removeBtn.textContent = 'Eliminar';
-
-    right.appendChild(inpDiscount);
-    right.appendChild(inpQty);
-    right.appendChild(stockSpan);
-    right.appendChild(removeBtn);
+    const inp = document.createElement('input'); inp.type='number'; inp.min=0; inp.max=100; inp.placeholder='Descuento %'; inp.value = map[String(p.id)] != null ? String(map[String(p.id)]) : '';
+    inp.dataset.id = String(p.id);
+    right.appendChild(inp);
     row.appendChild(left); row.appendChild(right);
     consumosList.appendChild(row);
   }
-  // wire remove buttons
-  Array.from(consumosList.querySelectorAll('.remove-consumo')).forEach(b=>{
-    b.addEventListener('click', async (ev)=>{
-      ev.preventDefault();
-      const pid = b.dataset.id;
-      if(!confirm('¿Eliminar este consumo?')) return;
-      try{
-        const resp = await safeFetch(API_BASE + '/api/consumos/' + pid, { method: 'DELETE' }).catch(()=>({}));
-        showToast('Consumo eliminado', 'info');
-      }catch(e){ console.warn('delete consumo failed', e); showToast('No se pudo eliminar','error'); }
-      await loadConsumos();
-    });
-  });
 }
 
 async function saveConsumos(){
@@ -2073,51 +1812,16 @@ async function saveConsumos(){
     const data = [];
     for(const r of rows){
       const cb = r.querySelector('input[type=checkbox]');
-      const inpDiscount = r.querySelector('.discount-input');
-      const inpQty = r.querySelector('.qty-input');
+      const inp = r.querySelector('input[type=number]');
       if(cb && cb.checked){
         const id = Number(cb.dataset.id);
-        const discount = Number(inpDiscount && inpDiscount.value ? inpDiscount.value : 0);
-        const qty = Number(inpQty && inpQty.value ? inpQty.value : 0);
+        const discount = Number(inp && inp.value ? inp.value : 0);
         if(isNaN(discount) || discount <= 0) continue;
-        if(isNaN(qty) || qty < 0) continue;
-        data.push({ id, discount, qty });
+        data.push({ id, discount });
       }
     }
-    if (data.length === 0) {
-      // avoid accidental wipes: ask for confirmation before sending empty list
-      if (!confirm('La lista de consumos está vacía. Esto eliminará todos los consumos publicados. ¿Desea continuar?')){
-        showToast('Guardar cancelado', 'info');
-        return;
-      }
-    }
-    const url = API_BASE + '/api/consumos' + (data.length === 0 ? '?confirm=true' : '');
-    try{
-      const resp = await safeFetch(url, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
-      showToast('Consumiciones guardadas', 'info');
-      // reload admin view to reflect persisted state
-      try{ await loadConsumos(); }catch(_){ }
-      // broadcast to frontend so catalog refreshes live
-      try{ if(window.BroadcastChannel){ const bc = new BroadcastChannel('consumos_channel'); bc.postMessage({ action: 'consumos-updated', consumos: data }); bc.close(); } }catch(e){}
-    }catch(e){
-      console.warn('saveConsumos server error', e, e.payload || null);
-      if(e && e.status === 400 && e.payload && e.payload.detail){
-        if(e.payload.detail === 'empty-list-requires-confirm'){
-          // server requires explicit confirmation if attempting to clear list
-          if(confirm('El servidor requiere confirmación para borrar todos los consumos. ¿Desea continuar?')){
-            try{ const resp2 = await safeFetch(url + (url.indexOf('?') === -1 ? '?confirm=true' : '&confirm=true'), { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) }); showToast('Consumiciones guardadas', 'info'); try{ await loadConsumos(); }catch(_){ } }catch(err2){ showToast('No se pudo guardar (confirmación fallida)','error'); }
-          } else {
-            showToast('Guardar cancelado', 'info');
-          }
-          return;
-        }
-        if(e.payload.detail === 'no-valid-consumos'){
-          showToast('No se encontraron consumos válidos para guardar. Revise los descuentos y cantidades.', 'warn');
-          return;
-        }
-      }
-      showToast('Error guardando consumos','error');
-    }
+    const resp = await safeFetch(API_BASE + '/api/consumos', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
+    showToast('Consumiciones guardadas', 'info');
   }catch(e){ console.error('saveConsumos failed', e); showToast('Error guardando consumos','error'); }
 }
 
