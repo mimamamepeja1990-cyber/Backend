@@ -1543,17 +1543,31 @@ def deselect_promo(filename: str, request: Request, db: Session = Depends(get_db
 
 # --- Consumición inmediata API (admin) ---
 @app.get('/api/consumos')
-def list_consumos(request: Request):
-    """Return consumos config: list of { id: product_id, discount: percent }"""
+def list_consumos(request: Request, db: Session = Depends(get_db)):
+    """Return consumos config: list of { id: product_id, discount: percent }.
+    Prefer DB-backed settings when available; fall back to consumos.json.
+    """
     try:
-        consumos_path = os.path.join(CATALOG_DIR, 'consumos.json')
         items = []
-        if os.path.exists(consumos_path):
-            try:
-                with open(consumos_path, 'r', encoding='utf-8') as f:
-                    items = json.load(f) or []
-            except Exception:
-                items = []
+        # Prefer DB-backed setting if present
+        try:
+            rec = db.query(models.Setting).filter(models.Setting.key == 'consumos').first()
+            if rec and rec.value:
+                try:
+                    items = json.loads(rec.value) or []
+                except Exception:
+                    items = []
+        except Exception:
+            items = []
+        # Fallback to file if DB empty
+        if not items:
+            consumos_path = os.path.join(CATALOG_DIR, 'consumos.json')
+            if os.path.exists(consumos_path):
+                try:
+                    with open(consumos_path, 'r', encoding='utf-8') as f:
+                        items = json.load(f) or []
+                except Exception:
+                    items = []
         headers = _cors_headers_for_request(request)
         return JSONResponse(status_code=200, content=items, headers=headers)
     except Exception as e:
@@ -1563,7 +1577,7 @@ def list_consumos(request: Request):
 
 
 @app.post('/api/consumos')
-async def save_consumos(request: Request):
+async def save_consumos(request: Request, db: Session = Depends(get_db)):
     """Replace the consumos list. Accepts JSON array in body."""
     try:
         body = await request.body()
@@ -1604,13 +1618,28 @@ async def save_consumos(request: Request):
         # If after cleaning there is nothing to save but the original data wasn't empty, reject to avoid accidental clears
         if len(cleaned) == 0 and len(data) > 0:
             raise HTTPException(status_code=400, detail='no-valid-consumos')
-        consumos_path = os.path.join(CATALOG_DIR, 'consumos.json')
         data = cleaned
+        consumos_path = os.path.join(CATALOG_DIR, 'consumos.json')
         # write and verify success; if writing fails return 500 so client knows
         try:
             os.makedirs(CATALOG_DIR, exist_ok=True)
             with open(consumos_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+            # Persist to DB settings so consumos survive deploys
+            try:
+                rec = db.query(models.Setting).filter(models.Setting.key == 'consumos').first()
+                if rec:
+                    rec.value = json.dumps(data, ensure_ascii=False)
+                else:
+                    rec = models.Setting(key='consumos', value=json.dumps(data, ensure_ascii=False))
+                    db.add(rec)
+                db.commit()
+            except Exception as db_err:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                logger.exception('save_consumos db write failed: %s', db_err)
             # Update static snapshot with consumos reflected (best-effort) and notify WS clients
             try:
                 await anyio.to_thread.run_sync(write_catalog_snapshot)
