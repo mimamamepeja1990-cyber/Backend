@@ -1599,12 +1599,19 @@ async def save_consumos(request: Request, db: Session = Depends(get_db)):
                 pid = int(entry.get('id'))
             except Exception:
                 continue
+            # tolerate strings with comma decimal (e.g. "10,5") and percent signs
             try:
-                discount = float(entry.get('discount') if entry.get('discount') is not None else entry.get('value', 0))
+                raw_disc = entry.get('discount') if entry.get('discount') is not None else entry.get('value', 0)
+                if isinstance(raw_disc, str):
+                    raw_disc = raw_disc.replace('%', '').strip().replace(',', '.')
+                discount = float(raw_disc) if raw_disc is not None else 0.0
             except Exception:
                 discount = 0.0
             try:
-                qty = int(entry.get('qty') if entry.get('qty') is not None else entry.get('cantidad', 0))
+                raw_qty = entry.get('qty') if entry.get('qty') is not None else entry.get('cantidad', 0)
+                if isinstance(raw_qty, str):
+                    raw_qty = raw_qty.strip().replace(',', '.')
+                qty = int(float(raw_qty)) if raw_qty is not None else 0
             except Exception:
                 qty = 0
             # keep entries with a positive discount and non-negative qty
