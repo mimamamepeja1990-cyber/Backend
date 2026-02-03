@@ -597,25 +597,25 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                 pre_alloc = False
                 try:
                     alloc_map_local = {}
-                for it in items_list_input:
-                    try:
-                        pid = int(it.get('id'))
-                        qty_req = int(it.get('qty', 1) or 1)
-                    except Exception:
-                        continue
-                    # Respect explicit flags: if item is marked regular, skip consumo allocation
-                    try:
-                        meta = it.get('meta') if isinstance(it, dict) else None
-                        if isinstance(meta, dict):
-                            if meta.get('force_regular') is True:
-                                continue
-                            if meta.get('consumo') is False:
-                                continue
-                    except Exception:
-                        pass
-                    avail = int(consumos_map_local.get(pid, 0) or 0)
-                    take = min(avail, qty_req)
-                    if take > 0:
+                    for it in items_list_input:
+                        try:
+                            pid = int(it.get('id'))
+                            qty_req = int(it.get('qty', 1) or 1)
+                        except Exception:
+                            continue
+                        # Respect explicit flags: if item is marked regular, skip consumo allocation
+                        try:
+                            meta = it.get('meta') if isinstance(it, dict) else None
+                            if isinstance(meta, dict):
+                                if meta.get('force_regular') is True:
+                                    continue
+                                if meta.get('consumo') is False:
+                                    continue
+                        except Exception:
+                            pass
+                        avail = int(consumos_map_local.get(pid, 0) or 0)
+                        take = min(avail, qty_req)
+                        if take > 0:
                             alloc_map_local[pid] = alloc_map_local.get(pid, 0) + take
                             consumos_map_local[pid] = max(0, avail - take)
                             try:
@@ -633,13 +633,16 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
             except Exception:
                 return items_list_input, False, {}
 
-        items_list, pre_alloc_consumos, _ = _prealloc_consumos(items_list)
+        items_list, pre_alloc_consumos, consumos_map = _prealloc_consumos(items_list)
         try:
             items_json = _json.dumps(items_list, ensure_ascii=False)
         except Exception:
             pass
     except Exception:
-        pass
+        pre_alloc_consumos = False
+        consumos_map = {}
+
+    try:
         for it in items_list:
             try:
                 pid = int(it.get('id'))
@@ -652,7 +655,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
             if prod is None:
                 continue
             # nearest-expiry available
-            near_avail = int(consumos_map.get(pid, 0) or 0)
+            near_avail = int((consumos_map or {}).get(pid, 0) or 0)
             # stock may be None (unknown) or numeric
             stock_attr = getattr(prod, 'stock', None)
             if stock_attr is None:
