@@ -1813,14 +1813,22 @@ async function saveConsumos(){
     for(const r of rows){
       const cb = r.querySelector('input[type=checkbox]');
       const inp = r.querySelector('input[type=number]');
-      if(cb && cb.checked){
-        const id = Number(cb.dataset.id);
-        const discount = Number(inp && inp.value ? inp.value : 0);
-        if(isNaN(discount) || discount <= 0) continue;
-        data.push({ id, discount });
+      const id = Number(cb?.dataset?.id);
+      const discount = Number(inp && inp.value ? inp.value : 0);
+      const shouldInclude = (cb && cb.checked) || (discount > 0);
+      if(!shouldInclude) continue;
+      if(isNaN(discount) || discount <= 0) continue;
+      // default qty=1 for legacy admin UI (no qty input)
+      data.push({ id, discount, qty: 1 });
+    }
+    if (data.length === 0) {
+      if (!confirm('La lista de consumos está vacía. Esto eliminará todos los consumos publicados. ¿Desea continuar?')){
+        showToast('Guardar cancelado', 'info');
+        return;
       }
     }
-    const resp = await safeFetch(API_BASE + '/api/consumos', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
+    const url = API_BASE + '/api/consumos' + (data.length === 0 ? '?confirm=true' : '');
+    const resp = await safeFetch(url, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
     showToast('Consumiciones guardadas', 'info');
   }catch(e){ console.error('saveConsumos failed', e); showToast('Error guardando consumos','error'); }
 }
