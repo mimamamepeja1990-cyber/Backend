@@ -890,6 +890,7 @@ function renderOrders(list, source, dateFilter){
 
 function orderRowFor(o){
   const itemsArr = safeParseItems(o.items || []);
+  const hasConsumo = (itemsArr || []).some(it => !!(it && it.meta && it.meta.consumo));
   const itemsList = (itemsArr || []).map(it => {
     const name = (it && it.meta && it.meta.name) ? it.meta.name : (it && it.id) ? it.id : '';
     const qty = it && it.qty ? it.qty : 1;
@@ -918,6 +919,7 @@ function orderRowFor(o){
           <span class="order-id">#${o.id}</span>
           <span class="order-date">${fecha}</span>
         </div>
+        ${hasConsumo ? '<div class="order-row-banner" style="margin:6px 0 10px;padding:8px 10px;border-radius:10px;background:#fff7ed;border:1px solid rgba(242,107,56,0.25);color:#9a3412;font-weight:800">Pedido con consumo inmediato</div>' : ''}
         <div class="order-row-items"><strong>Artículos:</strong><ul class="order-items-list">${itemsList}</ul></div>
         <div class="order-row-user"><strong>Cliente:</strong> ${escapeHtml(userDisplay)}</div>
         <div class="order-row-address"><strong>Dirección:</strong> ${escapeHtml(address || '—')}</div>
@@ -1077,6 +1079,7 @@ function showOrderDetail(order){
   if(!modal || !body || !title) return;
   title.textContent = `Pedido #${order.id}`;
   const itemsArr = safeParseItems(order.items || []);
+  const hasConsumo = (itemsArr || []).some(it => !!(it && it.meta && it.meta.consumo));
   const itemsHtml = (itemsArr || []).map(it=>`<li><strong>${escapeHtml((it && it.meta && it.meta.name) ? it.meta.name : (it && it.id) ? it.id : '')}</strong> — ${it.qty} × $${Number(it.meta?.price||0).toFixed(2)}</li>`).join('') || '<li>(sin ítems)</li>';
   const address = [order.user_barrio, order.user_calle, order.user_numeracion].filter(Boolean).join(', ');
   // prefer user_* fields, otherwise display token preview when available
@@ -1088,6 +1091,7 @@ function showOrderDetail(order){
       <div><strong>Dirección:</strong> ${escapeHtml(address || '—')}</div>
       <div><strong>Total:</strong> $${Number(order.total||0).toFixed(2)}</div>
       <div><strong>Estado:</strong> ${escapeHtml(order.status||'')}</div>
+      ${hasConsumo ? '<div style="margin-top:8px;padding:8px 10px;border-radius:10px;background:#fff7ed;border:1px solid rgba(242,107,56,0.25);color:#9a3412;font-weight:800">Pedido con consumo inmediato</div>' : ''}
       <div class="mt-8"><strong>Items:</strong><ul class="order-items-list">${itemsHtml}</ul></div>
     </div>
   `;
