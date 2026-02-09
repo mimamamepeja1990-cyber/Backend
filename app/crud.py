@@ -568,6 +568,17 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                 od['qty'] = 1
             if 'meta' not in od or od['meta'] is None:
                 od['meta'] = {}
+            # If the client sent a consumo key, ensure the meta flag is preserved
+            try:
+                meta_obj = od.get('meta')
+                if isinstance(meta_obj, dict):
+                    key_val = meta_obj.get('key') or od.get('key')
+                    if key_val and ':consumo' in str(key_val):
+                        if meta_obj.get('force_regular') is not True and meta_obj.get('consumo') is not False:
+                            meta_obj['consumo'] = True
+                    od['meta'] = meta_obj
+            except Exception:
+                pass
             items_list.append(od)
     except Exception:
         items_list = []

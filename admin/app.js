@@ -778,9 +778,7 @@ function renderOrderItemLabel(it){
     if(it === null || typeof it === 'undefined') return '';
     if(typeof it === 'string') return escapeHtml(it);
     const name = (it && it.meta && it.meta.name) ? it.meta.name : (it && it.id) ? it.id : '';
-    const key = String(it && (it.key || (it.meta && it.meta.key) || '') || '');
-    const forceRegular = !!(it && it.meta && it.meta.force_regular);
-    const isConsumo = (!forceRegular) && ( !!(it && it.meta && it.meta.consumo) || key.includes(':consumo') );
+    const isConsumo = isOrderItemConsumo(it);
     const badge = isConsumo ? ' <span style="margin-left:6px;padding:2px 6px;border-radius:999px;background:#fff1e6;border:1px solid rgba(242,107,56,0.25);color:#b45309;font-weight:700;font-size:11px;vertical-align:middle">Consumo inmediato</span>' : '';
     return `${escapeHtml(name)}${badge}`;
   }catch(_){
@@ -793,8 +791,12 @@ function isOrderItemConsumo(it){
     if(!it || typeof it !== 'object') return false;
     const forceRegular = !!(it && it.meta && it.meta.force_regular);
     if(forceRegular) return false;
-    const key = String(it && (it.key || (it.meta && it.meta.key) || '') || '');
-    return !!(it && it.meta && it.meta.consumo) || key.includes(':consumo');
+    const meta = it.meta && typeof it.meta === 'object' ? it.meta : {};
+    const key = String((it && it.key) || (meta && meta.key) || '');
+    if (meta && (meta.consumo === true || meta.consumo_consumed > 0 || meta.consumo_id || meta.discount_type || meta.discount_value || meta.discount_label)) return true;
+    if (typeof it.consumo !== 'undefined') return !!it.consumo;
+    if (typeof it.consumo_id !== 'undefined') return !!it.consumo_id;
+    return key.includes(':consumo');
   }catch(_){
     return false;
   }
