@@ -773,6 +773,33 @@ function safeParseItems(items){
   }
 }
 
+function renderOrderItemLabel(it){
+  try{
+    if(it === null || typeof it === 'undefined') return '';
+    if(typeof it === 'string') return escapeHtml(it);
+    const name = (it && it.meta && it.meta.name) ? it.meta.name : (it && it.id) ? it.id : '';
+    const key = String(it && (it.key || (it.meta && it.meta.key) || '') || '');
+    const forceRegular = !!(it && it.meta && it.meta.force_regular);
+    const isConsumo = (!forceRegular) && ( !!(it && it.meta && it.meta.consumo) || key.includes(':consumo') );
+    const badge = isConsumo ? ' <span style="margin-left:6px;padding:2px 6px;border-radius:999px;background:#fff1e6;border:1px solid rgba(242,107,56,0.25);color:#b45309;font-weight:700;font-size:11px;vertical-align:middle">Consumo inmediato</span>' : '';
+    return `${escapeHtml(name)}${badge}`;
+  }catch(_){
+    return '';
+  }
+}
+
+function isOrderItemConsumo(it){
+  try{
+    if(!it || typeof it !== 'object') return false;
+    const forceRegular = !!(it && it.meta && it.meta.force_regular);
+    if(forceRegular) return false;
+    const key = String(it && (it.key || (it.meta && it.meta.key) || '') || '');
+    return !!(it && it.meta && it.meta.consumo) || key.includes(':consumo');
+  }catch(_){
+    return false;
+  }
+}
+
 function findOrderRowById(id){
   try{ return Array.from(document.querySelectorAll('table[id^="ordersTable"] tbody tr')).find(r => String((r.children && r.children[0] && r.children[0].textContent) || '').trim() === String(id)); }catch(e){ return null; }
 }
@@ -890,11 +917,10 @@ function renderOrders(list, source, dateFilter){
 
 function orderRowFor(o){
   const itemsArr = safeParseItems(o.items || []);
-  const hasConsumo = (itemsArr || []).some(it => !!(it && it.meta && it.meta.consumo));
+  const hasConsumo = (itemsArr || []).some(it => isOrderItemConsumo(it));
   const itemsList = (itemsArr || []).map(it => {
-    const name = (it && it.meta && it.meta.name) ? it.meta.name : (it && it.id) ? it.id : '';
     const qty = it && it.qty ? it.qty : 1;
-    return `<li>${escapeHtml(name)} <span class="muted">×${qty}</span></li>`;
+    return `<li>${renderOrderItemLabel(it)} <span class="muted">×${qty}</span></li>`;
   }).join('');
   const tr = document.createElement('tr');
   const previewName = o._token_preview && (o._token_preview.name || o._token_preview.email) ? (o._token_preview.name || o._token_preview.email) : null;
@@ -1079,8 +1105,8 @@ function showOrderDetail(order){
   if(!modal || !body || !title) return;
   title.textContent = `Pedido #${order.id}`;
   const itemsArr = safeParseItems(order.items || []);
-  const hasConsumo = (itemsArr || []).some(it => !!(it && it.meta && it.meta.consumo));
-  const itemsHtml = (itemsArr || []).map(it=>`<li><strong>${escapeHtml((it && it.meta && it.meta.name) ? it.meta.name : (it && it.id) ? it.id : '')}</strong> — ${it.qty} × $${Number(it.meta?.price||0).toFixed(2)}</li>`).join('') || '<li>(sin ítems)</li>';
+  const hasConsumo = (itemsArr || []).some(it => isOrderItemConsumo(it));
+  const itemsHtml = (itemsArr || []).map(it=>`<li><strong>${renderOrderItemLabel(it)}</strong> — ${it.qty} × $${Number(it.meta?.price||0).toFixed(2)}</li>`).join('') || '<li>(sin ítems)</li>';
   const address = [order.user_barrio, order.user_calle, order.user_numeracion].filter(Boolean).join(', ');
   // prefer user_* fields, otherwise display token preview when available
   const previewName = order._token_preview && (order._token_preview.name || order._token_preview.email) ? (order._token_preview.name || order._token_preview.email) : null;
