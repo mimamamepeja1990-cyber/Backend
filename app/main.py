@@ -2918,6 +2918,35 @@ def list_orders(skip: int = 0, limit: int = 200, source: Optional[str] = None, d
 async def update_order_status(order_id: str, request: Request):
     """Update the `status` field for an order and broadcast the change via WS.
     Accepts numeric or non-numeric IDs (debug events may use string IDs)."""
+    def _ensure_status_column():
+        try:
+            insp_local = inspect(engine)
+            existing_local = {c['name'] for c in insp_local.get_columns('orders')}
+        except Exception:
+            existing_local = set()
+        if 'status' in existing_local:
+            return True, existing_local
+        try:
+            dialect_local = getattr(engine, 'dialect', None)
+            dialect_name_local = getattr(dialect_local, 'name', '') if dialect_local else ''
+            with engine.begin() as conn_local:
+                if 'postgres' in dialect_name_local:
+                    try:
+                        conn_local.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'nuevo'"))
+                    except Exception:
+                        conn_local.execute(text("ALTER TABLE orders ADD COLUMN status VARCHAR(50) DEFAULT 'nuevo'"))
+                else:
+                    conn_local.execute(text("ALTER TABLE orders ADD COLUMN status VARCHAR(50) DEFAULT 'nuevo'"))
+            try:
+                insp_local = inspect(engine)
+                existing_local = {c['name'] for c in insp_local.get_columns('orders')}
+            except Exception:
+                existing_local.add('status')
+            return True, existing_local
+        except Exception as e_local:
+            logger.exception('ensure status column failed: %s', e_local)
+            return False, existing_local
+
     try:
         body = await request.json()
     except Exception:
@@ -2938,6 +2967,8 @@ async def update_order_status(order_id: str, request: Request):
         use_id_int = False
         id_param = str(order_id)
 
+    # Best-effort: ensure status column exists before updating
+    ok_status_col, existing_cols = _ensure_status_column()
     try:
         # Use a transactional context so the UPDATE is committed immediately
         try:
@@ -2948,9 +2979,29 @@ async def update_order_status(order_id: str, request: Request):
                     # Fall back to text comparison; CAST to TEXT works on SQLite/Postgres
                     conn.execute(text('UPDATE orders SET status = :status WHERE CAST(id AS TEXT) = :id'), {'status': status, 'id': id_param})
         except Exception as inner_e:
-            logger.exception('update_order_status DB execute failed: %s', inner_e)
-            headers = _cors_headers_for_request(request)
-            return JSONResponse(status_code=500, content={'error': str(inner_e)}, headers=headers)
+            # If status column was missing, attempt to add and retry once.
+            msg = str(inner_e).lower()
+            if (('status' in msg) and ('does not exist' in msg or 'no such column' in msg)):
+                ok_status_col, existing_cols = _ensure_status_column()
+                if ok_status_col:
+                    try:
+                        with engine.begin() as conn2:
+                            if use_id_int:
+                                conn2.execute(text('UPDATE orders SET status = :status WHERE id = :id'), {'status': status, 'id': id_param})
+                            else:
+                                conn2.execute(text('UPDATE orders SET status = :status WHERE CAST(id AS TEXT) = :id'), {'status': status, 'id': id_param})
+                    except Exception as inner_e2:
+                        logger.exception('update_order_status retry failed: %s', inner_e2)
+                        headers = _cors_headers_for_request(request)
+                        return JSONResponse(status_code=500, content={'error': str(inner_e2)}, headers=headers)
+                else:
+                    logger.exception('update_order_status DB execute failed: %s', inner_e)
+                    headers = _cors_headers_for_request(request)
+                    return JSONResponse(status_code=500, content={'error': str(inner_e)}, headers=headers)
+            else:
+                logger.exception('update_order_status DB execute failed: %s', inner_e)
+                headers = _cors_headers_for_request(request)
+                return JSONResponse(status_code=500, content={'error': str(inner_e)}, headers=headers)
     except Exception as e:
         logger.exception('update_order_status failed: %s', e)
         headers = _cors_headers_for_request(request)
@@ -2963,7 +3014,9 @@ async def update_order_status(order_id: str, request: Request):
     except Exception:
         existing = set()
 
-    cols = ['id','items','total','status','created_at']
+    cols = ['id','items','total','created_at']
+    if 'status' in existing:
+        cols.insert(3, 'status')
     optional = ['user_id','user_full_name','user_email','user_barrio','user_calle','user_numeracion','_token_received','_token_preview']
     for c in optional:
         if c in existing:
@@ -2988,6 +3041,8 @@ async def update_order_status(order_id: str, request: Request):
         return JSONResponse(status_code=404, content={'error': 'not_found'}, headers=headers)
 
     od = {k: row[idx] for idx, k in enumerate(cols)}
+    if 'status' not in od:
+        od['status'] = status
     # parse items and token_preview if present
     try:
         if isinstance(od.get('items'), str):
