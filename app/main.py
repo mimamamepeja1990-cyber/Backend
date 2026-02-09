@@ -417,6 +417,11 @@ app = FastAPI(title="Catálogo API", lifespan=lifespan)
 ORDER_PAYLOAD_CACHE = {}
 ORDER_PAYLOAD_CACHE_MAX_AGE = 60 * 60 * 2  # keep for 2 hours
 
+# In-memory cache for order status overrides (id -> { status, ts })
+# Used as a fallback if DB status column is missing or update fails.
+ORDER_STATUS_CACHE = {}
+ORDER_STATUS_CACHE_MAX_AGE = 60 * 60 * 24  # keep for 24 hours
+
 def _prune_order_cache():
     try:
         now = time.time()
@@ -424,6 +429,18 @@ def _prune_order_cache():
             try:
                 if ORDER_PAYLOAD_CACHE[k] and (now - ORDER_PAYLOAD_CACHE[k].get('ts', 0) > ORDER_PAYLOAD_CACHE_MAX_AGE):
                     del ORDER_PAYLOAD_CACHE[k]
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+def _prune_status_cache():
+    try:
+        now = time.time()
+        for k in list(ORDER_STATUS_CACHE.keys()):
+            try:
+                if ORDER_STATUS_CACHE[k] and (now - ORDER_STATUS_CACHE[k].get('ts', 0) > ORDER_STATUS_CACHE_MAX_AGE):
+                    del ORDER_STATUS_CACHE[k]
             except Exception:
                 pass
     except Exception:
@@ -2835,6 +2852,16 @@ def list_orders(skip: int = 0, limit: int = 200, source: Optional[str] = None, d
     except Exception:
         pass
     out = []
+    # Load status overrides (best-effort) so admin can show "visto" even if DB column is missing.
+    status_overrides = {}
+    try:
+        status_overrides = crud.get_setting(db, 'order_status_overrides') or {}
+    except Exception:
+        status_overrides = {}
+    try:
+        _prune_status_cache()
+    except Exception:
+        pass
     cached_any = 0
     for r in (rows or []):
         try:
@@ -2897,6 +2924,21 @@ def list_orders(skip: int = 0, limit: int = 200, source: Optional[str] = None, d
                                 pass
                     except Exception:
                         pass
+            # Apply status override if present
+            try:
+                oid = od.get('id')
+                if oid is not None:
+                    ov = None
+                    try:
+                        ov = (status_overrides or {}).get(str(oid))
+                    except Exception:
+                        ov = None
+                    if ov is None:
+                        ov = (ORDER_STATUS_CACHE.get(str(oid)) or {}).get('status')
+                    if ov:
+                        od['status'] = ov
+            except Exception:
+                pass
             # log per-row diagnostics for debugging clarity
             try:
                 logger.debug('list_orders row id=%s user_full_name=%s user_email=%s cached_used=%s', od.get('id'), od.get('user_full_name'), od.get('user_email'), cached_used)
@@ -2947,6 +2989,27 @@ async def update_order_status(order_id: str, request: Request):
             logger.exception('ensure status column failed: %s', e_local)
             return False, existing_local
 
+    def _persist_status_override(order_id_value, status_value):
+        try:
+            db_local = SessionLocal()
+            try:
+                overrides = crud.get_setting(db_local, 'order_status_overrides') or {}
+                overrides[str(order_id_value)] = status_value
+                crud.set_setting(db_local, 'order_status_overrides', overrides)
+            finally:
+                try:
+                    db_local.close()
+                except Exception:
+                    pass
+            return True
+        except Exception:
+            # fall back to in-memory cache
+            try:
+                ORDER_STATUS_CACHE[str(order_id_value)] = { 'status': status_value, 'ts': time.time() }
+                return True
+            except Exception:
+                return False
+
     try:
         body = await request.json()
     except Exception:
@@ -2969,6 +3032,7 @@ async def update_order_status(order_id: str, request: Request):
 
     # Best-effort: ensure status column exists before updating
     ok_status_col, existing_cols = _ensure_status_column()
+    db_update_ok = False
     try:
         # Use a transactional context so the UPDATE is committed immediately
         try:
@@ -2978,6 +3042,7 @@ async def update_order_status(order_id: str, request: Request):
                 else:
                     # Fall back to text comparison; CAST to TEXT works on SQLite/Postgres
                     conn.execute(text('UPDATE orders SET status = :status WHERE CAST(id AS TEXT) = :id'), {'status': status, 'id': id_param})
+            db_update_ok = True
         except Exception as inner_e:
             # If status column was missing, attempt to add and retry once.
             msg = str(inner_e).lower()
@@ -2990,22 +3055,27 @@ async def update_order_status(order_id: str, request: Request):
                                 conn2.execute(text('UPDATE orders SET status = :status WHERE id = :id'), {'status': status, 'id': id_param})
                             else:
                                 conn2.execute(text('UPDATE orders SET status = :status WHERE CAST(id AS TEXT) = :id'), {'status': status, 'id': id_param})
+                        db_update_ok = True
                     except Exception as inner_e2:
                         logger.exception('update_order_status retry failed: %s', inner_e2)
                         headers = _cors_headers_for_request(request)
-                        return JSONResponse(status_code=500, content={'error': str(inner_e2)}, headers=headers)
+                        # fall through to override persistence below
+                        db_update_ok = False
                 else:
                     logger.exception('update_order_status DB execute failed: %s', inner_e)
                     headers = _cors_headers_for_request(request)
-                    return JSONResponse(status_code=500, content={'error': str(inner_e)}, headers=headers)
+                    db_update_ok = False
             else:
                 logger.exception('update_order_status DB execute failed: %s', inner_e)
                 headers = _cors_headers_for_request(request)
-                return JSONResponse(status_code=500, content={'error': str(inner_e)}, headers=headers)
+                db_update_ok = False
     except Exception as e:
         logger.exception('update_order_status failed: %s', e)
         headers = _cors_headers_for_request(request)
-        return JSONResponse(status_code=500, content={'error': str(e)}, headers=headers)
+        db_update_ok = False
+
+    # Always persist an override so the admin UI can reflect the change even if DB update failed.
+    override_ok = _persist_status_override(order_id, status)
 
     # Fetch updated row safely (only request existing columns)
     try:
@@ -3037,6 +3107,10 @@ async def update_order_status(order_id: str, request: Request):
         return JSONResponse(status_code=500, content={'error': str(e)}, headers=headers)
 
     if not row:
+        # If update failed but we could persist override, return a minimal response.
+        if override_ok:
+            headers = _cors_headers_for_request(request)
+            return JSONResponse(status_code=200, content={'id': id_param, 'status': status, 'status_fallback': True}, headers=headers)
         headers = _cors_headers_for_request(request)
         return JSONResponse(status_code=404, content={'error': 'not_found'}, headers=headers)
 
@@ -3063,6 +3137,14 @@ async def update_order_status(order_id: str, request: Request):
     # Broadcast the updated order to connected admin clients
     try:
         await push_event({"action": "order_updated", "order": od})
+    except Exception:
+        pass
+
+    # Ensure status is present in response
+    try:
+        od['status'] = od.get('status') or status
+        if override_ok and not db_update_ok:
+            od['status_fallback'] = True
     except Exception:
         pass
 
