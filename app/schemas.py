@@ -11,6 +11,7 @@ class ProductBase(BaseModel):
     active: Optional[bool] = True
     stock: Optional[int] = 0
     discount: Optional[float] = 0.0
+    sale_unit: Optional[str] = 'unit'
 
 class ProductCreate(ProductBase):
     pass
@@ -24,6 +25,7 @@ class ProductUpdate(BaseModel):
     active: Optional[bool] = None
     stock: Optional[int] = None
     discount: Optional[float] = None
+    sale_unit: Optional[str] = None
 
 class ProductResponse(ProductBase):
     id: int
@@ -77,7 +79,7 @@ class LoginRequest(BaseModel):
 # Orders
 class OrderItem(BaseModel):
     id: Union[str, int]
-    qty: int
+    qty: float
     meta: Optional[dict] = None
 
 class OrderCreate(BaseModel):

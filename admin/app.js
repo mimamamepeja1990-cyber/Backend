@@ -9,6 +9,16 @@ document.querySelectorAll('.sidebar nav a[data-section]').forEach(link => {
     document.querySelectorAll('.sidebar nav a').forEach(a => a.classList.remove('active'));
     this.classList.add('active');
     if (this.getAttribute('data-section') === 'promo-images') fetchPromoImages();
+    // On mobile, close the sidebar after navigation
+    try{
+      const sidebar = document.querySelector('.sidebar');
+      if (sidebar && window.innerWidth <= 900) {
+        sidebar.classList.remove('open');
+        document.body.classList.remove('sidebar-open');
+        const btn = document.getElementById('mobileMenuBtn');
+        if (btn) btn.setAttribute('aria-expanded', 'false');
+      }
+    }catch(e){}
   });
 });
 // Admin JS — UI principal sin modo oscuro ni botón de tarjeta (card)
@@ -422,12 +432,15 @@ function renderProducts(products){
       else if(p.image_url.startsWith('/')) imgSrc = API_BASE + p.image_url;
       else imgSrc = API_BASE + '/' + p.image_url.replace(/^\//, '');
     }
+    const unit = String(p.sale_unit || p.unit_type || p.unit || '').toLowerCase();
+    const unitSuffix = unit === 'kg' ? ' / kg' : '';
+    const stockSuffix = unit === 'kg' ? ' kg' : '';
     tr.innerHTML = `
       <td>${imgSrc ? `<img src="${imgSrc}" alt="${p.name}" width="60" onerror="this.onerror=null;this.src='../images/default.png'">` : ''}</td>
       <td>${p.name}</td>
       <td>${catsDisplay}</td>
-      <td>$${parseFloat(p.price).toFixed(2)}</td>
-      <td>${(p.stock != null) ? String(p.stock) : '0'}</td>
+      <td>$${parseFloat(p.price).toFixed(2)}${unitSuffix}</td>
+      <td>${(p.stock != null) ? String(p.stock) + stockSuffix : '0'}</td>
       <td>${p.active ? 'Sí' : 'No'}</td>
       <td>
         <button data-id="${p.id}" class="editBtn btn">Editar</button>
@@ -518,6 +531,10 @@ async function handleSave(ev){
   productForm.category.value = (selectedCats && selectedCats.length) ? String(selectedCats[0]) : (productForm.category.value || '');
 
   const payload = { name: productForm.name.value.trim(), price: Number(productForm.price.value), description: productForm.description.value.trim(), category: productForm.category.value.trim() || null, image_url: imageUrl, active: true, stock: Number(productForm.stock?.value || 0) };
+  try{
+    const su = (productForm.sale_unit && productForm.sale_unit.value) ? String(productForm.sale_unit.value) : 'unit';
+    payload.sale_unit = su || 'unit';
+  }catch(_){ }
   // Only include discount when provided so it's optional
   try{
     const discVal = productForm.discount && productForm.discount.value !== '' ? Number(productForm.discount.value) : undefined;
@@ -591,6 +608,7 @@ async function onEdit(id){
     productForm.description.value = p.description;
     try{ productForm.stock.value = (p.stock != null) ? String(p.stock) : '0'; }catch(_){ }
     try{ productForm.discount.value = (p.discount != null) ? String(p.discount) : ''; }catch(_){ }
+    try{ if(productForm.sale_unit){ productForm.sale_unit.value = String(p.sale_unit || p.unit_type || p.unit || 'unit'); } }catch(_){ }
     let previewSrc = '';
     if(p.image_url){
       if(p.image_url.startsWith('http://') || p.image_url.startsWith('https://') || p.image_url.startsWith('//')) previewSrc = p.image_url;
@@ -786,6 +804,37 @@ function renderOrderItemLabel(it){
   }
 }
 
+function formatKgQtyLabel(qty){
+  try{
+    const num = Number(qty);
+    if (Number.isNaN(num)) return String(qty || '');
+    const opts = [
+      { value: 1, label: '1 kg' },
+      { value: 0.5, label: '1/2 kg' },
+      { value: 1/3, label: '1/3 kg' },
+      { value: 0.25, label: '1/4 kg' }
+    ];
+    const match = opts.find(o => Math.abs(o.value - num) < 0.0001);
+    if (match) return match.label;
+    return `${num} kg`;
+  }catch(_){ return String(qty || ''); }
+}
+
+function formatOrderQty(it){
+  try{
+    const qty = (it && typeof it.qty !== 'undefined') ? it.qty : 1;
+    const meta = (it && it.meta && typeof it.meta === 'object') ? it.meta : {};
+    const unit = String(meta.unit_type || meta.sale_unit || meta.unit || '').toLowerCase();
+    if (unit === 'kg' || unit === 'kilo' || unit === 'kilos' || unit === 'kilogram' || unit === 'kilograms' || unit === 'kilogramo' || unit === 'kilogramos'){
+      if (meta.qty_label) return String(meta.qty_label);
+      return formatKgQtyLabel(qty);
+    }
+    return String(qty);
+  }catch(_){
+    return '1';
+  }
+}
+
 function isOrderItemConsumo(it){
   try{
     if(!it || typeof it !== 'object') return false;
@@ -921,8 +970,8 @@ function orderRowFor(o){
   const itemsArr = safeParseItems(o.items || []);
   const hasConsumo = (itemsArr || []).some(it => isOrderItemConsumo(it));
   const itemsList = (itemsArr || []).map(it => {
-    const qty = it && it.qty ? it.qty : 1;
-    return `<li>${renderOrderItemLabel(it)} <span class="muted">×${qty}</span></li>`;
+    const qtyLabel = formatOrderQty(it);
+    return `<li>${renderOrderItemLabel(it)} <span class="muted">× ${escapeHtml(qtyLabel)}</span></li>`;
   }).join('');
   const tr = document.createElement('tr');
   const previewName = o._token_preview && (o._token_preview.name || o._token_preview.email) ? (o._token_preview.name || o._token_preview.email) : null;
@@ -1108,7 +1157,7 @@ function showOrderDetail(order){
   title.textContent = `Pedido #${order.id}`;
   const itemsArr = safeParseItems(order.items || []);
   const hasConsumo = (itemsArr || []).some(it => isOrderItemConsumo(it));
-  const itemsHtml = (itemsArr || []).map(it=>`<li><strong>${renderOrderItemLabel(it)}</strong> — ${it.qty} × $${Number(it.meta?.price||0).toFixed(2)}</li>`).join('') || '<li>(sin ítems)</li>';
+  const itemsHtml = (itemsArr || []).map(it=>`<li><strong>${renderOrderItemLabel(it)}</strong> — ${escapeHtml(formatOrderQty(it))} × $${Number(it.meta?.price||0).toFixed(2)}</li>`).join('') || '<li>(sin ítems)</li>';
   const address = [order.user_barrio, order.user_calle, order.user_numeracion].filter(Boolean).join(', ');
   // prefer user_* fields, otherwise display token preview when available
   const previewName = order._token_preview && (order._token_preview.name || order._token_preview.email) ? (order._token_preview.name || order._token_preview.email) : null;
@@ -1884,6 +1933,7 @@ try{
     mobileBtn.addEventListener('click', (ev)=>{
       const open = sidebar.classList.toggle('open');
       mobileBtn.setAttribute('aria-expanded', String(open));
+      document.body.classList.toggle('sidebar-open', open);
     });
     // close when clicking outside sidebar on mobile
     document.addEventListener('pointerdown', (ev)=>{
@@ -1892,8 +1942,18 @@ try{
       if(ev.target.closest && (ev.target.closest('.sidebar') || ev.target.closest('#mobileMenuBtn'))) return;
       sidebar.classList.remove('open');
       const btn = document.getElementById('mobileMenuBtn'); if(btn) btn.setAttribute('aria-expanded','false');
+      document.body.classList.remove('sidebar-open');
     });
     // close with Escape
-    window.addEventListener('keydown', (ev)=>{ if(ev.key === 'Escape' && sidebar.classList.contains('open')) { sidebar.classList.remove('open'); const btn = document.getElementById('mobileMenuBtn'); if(btn) btn.setAttribute('aria-expanded','false'); } });
+    window.addEventListener('keydown', (ev)=>{ if(ev.key === 'Escape' && sidebar.classList.contains('open')) { sidebar.classList.remove('open'); const btn = document.getElementById('mobileMenuBtn'); if(btn) btn.setAttribute('aria-expanded','false'); document.body.classList.remove('sidebar-open'); } });
+    // ensure sidebar state resets on desktop
+    window.addEventListener('resize', ()=> {
+      if (window.innerWidth > 900) {
+        sidebar.classList.remove('open');
+        const btn = document.getElementById('mobileMenuBtn');
+        if (btn) btn.setAttribute('aria-expanded','false');
+        document.body.classList.remove('sidebar-open');
+      }
+    });
   }
 }catch(e){console.warn('mobile menu wiring failed', e)}

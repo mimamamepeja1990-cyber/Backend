@@ -252,7 +252,8 @@ async def lifespan(app: FastAPI):
             discount_type = 'REAL DEFAULT 0' if 'postgres' in dialect_name else 'FLOAT DEFAULT 0'
             prod_needed = {
                 'stock': 'INTEGER DEFAULT 0',
-                'discount': discount_type
+                'discount': discount_type,
+                "sale_unit": "VARCHAR(20) DEFAULT 'unit'"
             }
             try:
                 insp = inspect(engine)
@@ -553,7 +554,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
                                 image_url=body_json.get('image_url') or '',
                                 active=bool(body_json.get('active', True)),
                                 stock=int(body_json.get('stock') or 0),
-                                discount=float(body_json.get('discount') or 0.0)
+                                discount=float(body_json.get('discount') or 0.0),
+                                sale_unit=str(body_json.get('sale_unit') or 'unit')
                             )
                             db = SessionLocal()
                             try:
@@ -563,7 +565,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
                                     if isinstance(created, dict):
                                         res = created
                                     else:
-                                        res = {k: getattr(created, k) for k in ('id','name','price','description','category','image_url','active','stock','discount') if hasattr(created, k)}
+                                        res = {k: getattr(created, k) for k in ('id','name','price','description','category','image_url','active','stock','discount','sale_unit') if hasattr(created, k)}
                                     # log the fallback usage
                                     try:
                                         base = os.path.dirname(os.path.dirname(__file__))
@@ -594,7 +596,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
                         if pid is not None:
                             # Build permissive updates dict
                             updates = {}
-                            for k in ('name','price','description','category','image_url','active','stock','discount'):
+                            for k in ('name','price','description','category','image_url','active','stock','discount','sale_unit'):
                                 if k in body_json:
                                     updates[k] = body_json[k]
                             if 'price' in updates:
@@ -612,6 +614,11 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
                                     updates['discount'] = float(updates['discount'])
                                 except Exception:
                                     updates.pop('discount', None)
+                            if 'sale_unit' in updates:
+                                try:
+                                    updates['sale_unit'] = str(updates['sale_unit'] or 'unit')
+                                except Exception:
+                                    updates.pop('sale_unit', None)
                             if updates:
                                 # Create a small payload object with dict() method used by crud.update_product
                                 upd_dict = updates.copy()
@@ -627,7 +634,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
                                     updated = crud.update_product(db, int(pid), upd_obj)
                                     if updated:
                                         # Normalize to dict
-                                        res = updated if isinstance(updated, dict) else {k: getattr(updated, k) for k in ('id','name','price','description','category','image_url','active','stock','discount') if hasattr(updated,k)}
+                                        res = updated if isinstance(updated, dict) else {k: getattr(updated, k) for k in ('id','name','price','description','category','image_url','active','stock','discount','sale_unit') if hasattr(updated,k)}
                                         try:
                                             base = os.path.dirname(os.path.dirname(__file__))
                                             with open(os.path.join(base, 'server_log.txt'), 'a', encoding='utf-8') as f:
@@ -1973,6 +1980,7 @@ def list_products(
             cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
             if 'stock' in existing: cols.append('stock')
             if 'discount' in existing: cols.append('discount')
+            if 'sale_unit' in existing: cols.append('sale_unit')
             where = []
             params = {'skip': skip, 'limit': limit}
             if q:
@@ -2015,6 +2023,7 @@ def get_product(product_id: int, db: Session = Depends(get_db)):
         cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
         if 'stock' in existing: cols.append('stock')
         if 'discount' in existing: cols.append('discount')
+        if 'sale_unit' in existing: cols.append('sale_unit')
         cols_sql = ', '.join(cols)
         row = crud._safe_execute_fetchone(db, f"SELECT {cols_sql} FROM products WHERE id = :id LIMIT 1", {'id': product_id})
         if not row:
@@ -2102,7 +2111,7 @@ def debug_products_info(db: Session = Depends(get_db)):
             # fallback: try ORM
             orm_rows = db.query(models.Product).order_by(models.Product.created_at.desc()).limit(10).all()
             for r in orm_rows:
-                d = {c: getattr(r, c, None) for c in ('id','name','price','description','category','image_url','created_at','updated_at','active','stock','discount')}
+                d = {c: getattr(r, c, None) for c in ('id','name','price','description','category','image_url','created_at','updated_at','active','stock','discount','sale_unit')}
                 sample.append(d)
         except Exception:
             pass
@@ -2165,6 +2174,7 @@ def write_catalog_snapshot():
             "active": p.active,
             "stock": adjusted_stock,
             "discount": int(p.discount) if getattr(p, 'discount', None) is not None else None,
+            "sale_unit": getattr(p, 'sale_unit', 'unit') or 'unit',
             "consumo_qty": int(reserved) if reserved else None,
             "consumo_discount": int(discount_for_consumo) if discount_for_consumo is not None else None,
         })

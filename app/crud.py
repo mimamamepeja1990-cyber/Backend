@@ -230,6 +230,8 @@ def get_products(db: Session, skip: int = 0, limit: int = 100, q: Optional[str]=
             cols.append('stock')
         if 'discount' in existing:
             cols.append('discount')
+        if 'sale_unit' in existing:
+            cols.append('sale_unit')
         cols_sql = ', '.join(cols)
         where = []
         params = {'skip': skip, 'limit': limit}
@@ -268,7 +270,7 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
         insp = inspect(bind)
         existing_cols = {c['name'] for c in insp.get_columns('products')}
     except Exception:
-        existing_cols = {'id', 'name', 'price', 'description', 'category', 'image_url', 'active', 'created_at', 'updated_at', 'stock', 'discount'}
+        existing_cols = {'id', 'name', 'price', 'description', 'category', 'image_url', 'active', 'created_at', 'updated_at', 'stock', 'discount', 'sale_unit'}
     
     logger.info('Existing columns: %s', existing_cols)
     
@@ -276,13 +278,18 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
     dialect = getattr(bind, 'dialect', None) if 'bind' in locals() else None
     dialect_name = getattr(dialect, 'name', '') if dialect else 'sqlite'
     
-    for col in ['stock', 'discount']:
+    col_defs = {
+        'stock': 'INTEGER DEFAULT 0',
+        'discount': 'REAL DEFAULT 0',
+        'sale_unit': "VARCHAR(20) DEFAULT 'unit'"
+    }
+    for col, coltype in col_defs.items():
         if col not in existing_cols:
             try:
                 if 'postgres' in dialect_name:
-                    _safe_execute(db, f"ALTER TABLE products ADD COLUMN IF NOT EXISTS {col} {'REAL' if col == 'discount' else 'INTEGER'} DEFAULT 0")
+                    _safe_execute(db, f"ALTER TABLE products ADD COLUMN IF NOT EXISTS {col} {coltype}")
                 else:
-                    _safe_execute(db, f"ALTER TABLE products ADD COLUMN {col} {'REAL' if col == 'discount' else 'INTEGER'} DEFAULT 0")
+                    _safe_execute(db, f"ALTER TABLE products ADD COLUMN {col} {coltype}")
                 db.commit()
                 existing_cols.add(col)
                 logger.info('Created column: %s', col)
@@ -302,7 +309,8 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
         'image_url': payload.image_url or '',
         'active': payload.active,
         'stock': getattr(payload, 'stock', 0),
-        'discount': getattr(payload, 'discount', 0.0)
+        'discount': getattr(payload, 'discount', 0.0),
+        'sale_unit': getattr(payload, 'sale_unit', None) or 'unit'
     }
     
     # Filter to only existing columns
@@ -347,6 +355,8 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
             cols.append('stock')
         if 'discount' in existing:
             cols.append('discount')
+        if 'sale_unit' in existing:
+            cols.append('sale_unit')
         cols_sql = ', '.join(cols)
         result = _safe_execute_fetchone(db, f'SELECT {cols_sql} FROM products WHERE name = :name ORDER BY created_at DESC LIMIT 1', {'name': payload.name})
 
@@ -358,6 +368,8 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
             obj['price'] = float(obj.get('price') or 0.0)
             obj['stock'] = int(obj.get('stock') or 0)
             obj['discount'] = float(obj.get('discount') or 0.0)
+            if 'sale_unit' in obj:
+                obj['sale_unit'] = obj.get('sale_unit') or 'unit'
             obj['active'] = bool(obj.get('active')) if 'active' in obj else False
             return obj
     except Exception as e:
@@ -373,7 +385,8 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
         'description': payload.description,
         'category': payload.category,
         'image_url': payload.image_url,
-        'active': bool(getattr(payload, 'active', True))
+        'active': bool(getattr(payload, 'active', True)),
+        'sale_unit': getattr(payload, 'sale_unit', None) or 'unit'
     }
 
 def get_product(db: Session, product_id: int) -> Optional[models.Product]:
@@ -392,6 +405,8 @@ def get_product(db: Session, product_id: int) -> Optional[models.Product]:
             cols.append('stock')
         if 'discount' in existing:
             cols.append('discount')
+        if 'sale_unit' in existing:
+            cols.append('sale_unit')
         cols_sql = ', '.join(cols)
         row = _safe_execute_fetchone(db, f"SELECT {cols_sql} FROM products WHERE id = :id LIMIT 1", {'id': product_id})
         if not row:
@@ -456,6 +471,8 @@ def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate)
         cols.append('stock')
     if 'discount' in existing:
         cols.append('discount')
+    if 'sale_unit' in existing:
+        cols.append('sale_unit')
     cols_sql = ', '.join(cols)
     row = _safe_execute_fetchone(db, f"SELECT {cols_sql} FROM products WHERE id = :id LIMIT 1", {'id': product_id})
     if not row:
@@ -487,6 +504,19 @@ import json as _json
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import DatabaseError
 
+def _get_item_unit(it):
+    try:
+        meta = it.get('meta') if isinstance(it, dict) else None
+        if isinstance(meta, dict):
+            return str(meta.get('unit_type') or meta.get('sale_unit') or meta.get('unit') or '').lower()
+    except Exception:
+        pass
+    return ''
+
+def _is_kg_item(it):
+    u = _get_item_unit(it)
+    return u in ('kg', 'kilo', 'kilos', 'kilogram', 'kilograms', 'kilogramo', 'kilogramos')
+
 def prealloc_consumos(items_list_input, catalog_dir_override=None):
     """Best-effort pre-allocation of consumos from catalogo/consumos.json.
     Returns (items_list, pre_alloc_flag, consumos_map)
@@ -512,7 +542,10 @@ def prealloc_consumos(items_list_input, catalog_dir_override=None):
             for it in items_list_input:
                 try:
                     pid = int(it.get('id'))
-                    qty_req = int(it.get('qty', 1) or 1)
+                    if _is_kg_item(it):
+                        continue
+                    raw_qty = it.get('qty', 1)
+                    qty_req = int(float(raw_qty)) if raw_qty is not None else 1
                 except Exception:
                     continue
                 # Respect explicit flags: if item is marked regular, skip consumo allocation
@@ -559,13 +592,17 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                     od = dict(o)
             except Exception:
                 # fallback: stringify minimal fields
-                od = {'id': str(getattr(o, 'id', o.get('id') if isinstance(o, dict) else None)), 'qty': int(getattr(o, 'qty', o.get('qty', 1) if isinstance(o, dict) else 1)), 'meta': getattr(o, 'meta', o.get('meta') if isinstance(o, dict) else {})}
+                od = {
+                    'id': str(getattr(o, 'id', o.get('id') if isinstance(o, dict) else None)),
+                    'qty': float(getattr(o, 'qty', o.get('qty', 1) if isinstance(o, dict) else 1)),
+                    'meta': getattr(o, 'meta', o.get('meta') if isinstance(o, dict) else {})
+                }
             # coerce types
             od['id'] = str(od.get('id', ''))
             try:
-                od['qty'] = int(od.get('qty', 1))
+                od['qty'] = float(od.get('qty', 1))
             except Exception:
-                od['qty'] = 1
+                od['qty'] = 1.0
             if 'meta' not in od or od['meta'] is None:
                 od['meta'] = {}
             # If the client sent a consumo key, ensure the meta flag is preserved
@@ -611,7 +648,10 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                     for it in items_list_input:
                         try:
                             pid = int(it.get('id'))
-                            qty_req = int(it.get('qty', 1) or 1)
+                            if _is_kg_item(it):
+                                continue
+                            raw_qty = it.get('qty', 1)
+                            qty_req = int(float(raw_qty)) if raw_qty is not None else 1
                         except Exception:
                             continue
                         # Respect explicit flags: if item is marked regular, skip consumo allocation
@@ -661,7 +701,17 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                 pid = None
             if pid is None:
                 continue
-            qty_req = int(it.get('qty', 1) or 1)
+            raw_qty = it.get('qty', 1)
+            try:
+                qty_req = float(raw_qty) if raw_qty is not None else 1.0
+            except Exception:
+                qty_req = 1.0
+            # For unit-based products keep integer semantics
+            if not _is_kg_item(it):
+                try:
+                    qty_req = int(qty_req)
+                except Exception:
+                    qty_req = 1
             prod = db.query(models.Product).filter(models.Product.id == pid).first()
             if prod is None:
                 continue
@@ -885,8 +935,20 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                     pid = None
                 if pid is None:
                     continue
-                qty = int(it.get('qty', 1) or 1)
+                raw_qty = it.get('qty', 1)
+                try:
+                    qty = float(raw_qty) if raw_qty is not None else 1.0
+                except Exception:
+                    qty = 1.0
+                if not _is_kg_item(it):
+                    try:
+                        qty = int(qty)
+                    except Exception:
+                        qty = 1
                 if qty <= 0:
+                    continue
+                # For kg-based items, skip consumos/stock decrements (only enforce stock elsewhere)
+                if _is_kg_item(it):
                     continue
                 # First: take from consumos (near-expiry) only when item is flagged as consumo
                 try:

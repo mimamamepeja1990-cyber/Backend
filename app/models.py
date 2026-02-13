@@ -17,6 +17,8 @@ class Product(Base):
     # Inventory and simple per-product discount (percentage, e.g. 10 == 10%)
     stock = Column(Integer, default=0)
     discount = Column(Float, default=0.0)
+    # Unit of sale: 'unit' or 'kg'
+    sale_unit = Column(String(50), nullable=True, default='unit')
 
 
 class Order(Base):

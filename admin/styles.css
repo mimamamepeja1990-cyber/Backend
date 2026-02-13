@@ -48,6 +48,7 @@
 *{box-sizing:border-box}
 html,body{height:100%}
 body{font-family:Inter,ui-sans-serif,system-ui,Arial;color:var(--text);background:var(--bg);margin:0}
+body.sidebar-open{overflow:hidden}
 .app{display:flex;min-height:100vh}
 .sidebar{width:220px;background:linear-gradient(180deg,var(--accent),var(--accent-2));color:#fff;padding:24px;display:flex;flex-direction:column}
 .brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:18px}
@@ -57,7 +58,7 @@ body{font-family:Inter,ui-sans-serif,system-ui,Arial;color:var(--text);backgroun
 .sidebar nav a.active{background:rgba(255,255,255,0.14);box-shadow:0 8px 24px rgba(12,10,60,0.12)}
 .footer-controls{margin-top:auto}
 .theme-toggle{display:flex;align-items:center;gap:8px;cursor:pointer}
-main{flex:1;padding:20px}
+main{flex:1;padding:20px;min-width:0}
 header{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px}
 .header-left{display:flex;gap:16px;align-items:center}
 .counter{background:#fff;padding:6px 12px;border-radius:999px;color:var(--text);font-weight:700;box-shadow:0 8px 20px rgba(11,15,28,0.04)}
@@ -205,7 +206,7 @@ th,td{padding:14px 12px;text-align:left;border-bottom:0}
 .product-form .row{display:flex;gap:12px;margin-bottom:12px}
 .field{flex:1}
 .field label{font-weight:700;display:block;margin-bottom:8px;color:var(--muted)}
-.field input, .field textarea{width:100%;padding:12px;border-radius:10px;border:1px solid #eef2f6;background:#fff}
+.field input, .field textarea, .field select{width:100%;padding:12px;border-radius:10px;border:1px solid #eef2f6;background:#fff}
 
 /* product categories checkboxes */
 .checkbox-grid{display:flex;flex-wrap:wrap;gap:8px}
@@ -308,4 +309,97 @@ tr.pending-sync td{ background:linear-gradient(90deg, rgba(255,249,230,0.5), rgb
 
 /* Make modal contents clearer */
 .modal-order-body div{ margin-bottom:6px }
+
+/* Mobile compatibility improvements */
+@media (max-width:900px){
+  header{flex-wrap:wrap;gap:12px}
+  .header-left{flex-wrap:wrap}
+  .top-actions{flex-wrap:wrap;width:100%;justify-content:flex-start}
+  .controls{flex-wrap:wrap}
+  #ordersTabs{flex-wrap:wrap}
+  .cards{flex-direction:column}
+  .charts{display:flex;flex-direction:column;gap:12px}
+  .chart-card{max-width:100%}
+}
+
+@media (max-width:700px){
+  main{padding:14px}
+  .sidebar{width:260px}
+  .controls{flex-direction:column;align-items:stretch}
+  .controls input, .controls select, .controls button, .controls .btn{width:100%}
+  #ordersTabs .btn{width:100%;justify-content:center}
+
+  .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+  .table-wrap table{display:block;width:100%}
+  .table-wrap thead{display:none}
+  .table-wrap tbody{display:block;width:100%}
+  .table-wrap tbody tr{display:block;padding:10px 12px;margin:10px 0;border-radius:12px;background:#fff;box-shadow:0 8px 22px rgba(2,6,23,0.06)}
+  .table-wrap tbody td{display:flex;width:100%;justify-content:space-between;align-items:flex-start;gap:12px;padding:8px 6px;text-align:left;word-break:break-word;flex-wrap:wrap;min-width:0}
+  .table-wrap tbody td::before{font-weight:700;font-size:12px;text-transform:uppercase;color:var(--muted);letter-spacing:0.04em;flex:0 0 42%;max-width:42%}
+  .table-wrap tbody td:last-child{justify-content:flex-start;flex-wrap:wrap;gap:8px}
+  .table-wrap tbody td img{max-width:120px;height:auto}
+  .table-wrap tbody td > *{max-width:58%}
+
+  /* Remove desktop order-card accent on mobile */
+  #ordersTable_todos tbody tr, #ordersTable_web tbody tr, #ordersTable_app tbody tr{display:block;padding-left:12px}
+  #ordersTable_todos tbody tr::before, #ordersTable_web tbody tr::before, #ordersTable_app tbody tr::before{display:none}
+
+  /* Responsive table labels */
+  #productsTable tbody td:nth-child(1)::before{content:"Imagen"}
+  #productsTable tbody td:nth-child(2)::before{content:"Nombre"}
+  #productsTable tbody td:nth-child(3)::before{content:"Categoria"}
+  #productsTable tbody td:nth-child(4)::before{content:"Precio"}
+  #productsTable tbody td:nth-child(5)::before{content:"Stock"}
+  #productsTable tbody td:nth-child(6)::before{content:"Activo"}
+  #productsTable tbody td:nth-child(7)::before{content:"Acciones"}
+
+  #promotionsTable tbody td:nth-child(1)::before{content:"Nombre"}
+  #promotionsTable tbody td:nth-child(2)::before{content:"Tipo"}
+  #promotionsTable tbody td:nth-child(3)::before{content:"Productos"}
+  #promotionsTable tbody td:nth-child(4)::before{content:"Acciones"}
+
+  #filtersTable tbody td:nth-child(1)::before{content:"Filtro"}
+  #filtersTable tbody td:nth-child(2)::before{content:"Valor"}
+  #filtersTable tbody td:nth-child(3)::before{content:"Acciones"}
+
+  #ordersTable_todos tbody td:nth-child(1)::before{content:"ID"}
+  #ordersTable_todos tbody td:nth-child(2)::before{content:"Items"}
+  #ordersTable_todos tbody td:nth-child(3)::before{content:"Total"}
+  #ordersTable_todos tbody td:nth-child(4)::before{content:"Usuario"}
+  #ordersTable_todos tbody td:nth-child(5)::before{content:"Direccion"}
+  #ordersTable_todos tbody td:nth-child(6)::before{content:"Estado"}
+  #ordersTable_todos tbody td:nth-child(7)::before{content:"Fecha"}
+  #ordersTable_todos tbody td:nth-child(8)::before{content:"Acciones"}
+
+  #ordersTable_web tbody td:nth-child(1)::before{content:"ID"}
+  #ordersTable_web tbody td:nth-child(2)::before{content:"Items"}
+  #ordersTable_web tbody td:nth-child(3)::before{content:"Total"}
+  #ordersTable_web tbody td:nth-child(4)::before{content:"Usuario"}
+  #ordersTable_web tbody td:nth-child(5)::before{content:"Contacto"}
+  #ordersTable_web tbody td:nth-child(6)::before{content:"Estado"}
+  #ordersTable_web tbody td:nth-child(7)::before{content:"Fecha"}
+  #ordersTable_web tbody td:nth-child(8)::before{content:"Acciones"}
+
+  #ordersTable_app tbody td:nth-child(1)::before{content:"ID"}
+  #ordersTable_app tbody td:nth-child(2)::before{content:"Items"}
+  #ordersTable_app tbody td:nth-child(3)::before{content:"Total"}
+  #ordersTable_app tbody td:nth-child(4)::before{content:"Usuario"}
+  #ordersTable_app tbody td:nth-child(5)::before{content:"Contacto"}
+  #ordersTable_app tbody td:nth-child(6)::before{content:"Estado"}
+  #ordersTable_app tbody td:nth-child(7)::before{content:"Fecha"}
+  #ordersTable_app tbody td:nth-child(8)::before{content:"Acciones"}
+
+  .modal{align-items:flex-start;padding:16px 0}
+  .modal-card{width:94vw;max-height:90vh;overflow:auto;padding:18px}
+  .product-form .row{flex-direction:column}
+  .file-field{flex-direction:column;align-items:stretch}
+  .file-field .btn, .file-field .file-label, .file-field .file-name{width:100%;text-align:center}
+  .preview img{max-width:100%}
+
+  .consumo-row{flex-direction:column;align-items:flex-start;gap:8px}
+  .consumo-row .left, .consumo-row .right{width:100%;justify-content:space-between;flex-wrap:wrap;gap:10px}
+  .consumo-row input[type="number"]{flex:1 1 140px}
+  #consumosList{max-height:50vh}
+  #addConsumosList{max-height:50vh}
+}
 
