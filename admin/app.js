@@ -1485,8 +1485,16 @@ function renderCategoryCheckboxes(filters, assignedList){
       const rawName = (typeof f === 'string') ? f : (f.name || f.label || f.value || f.id || '');
       const cleanVal = String(rawVal || '').replace(/[^a-z0-9_-]/gi,'_');
       const id = `pc_${String(rawVal)}_${cleanVal}`;
-      const div = document.createElement('div'); div.className = 'pc-item';
-      div.innerHTML = `<label for="${id}"><input id="${id}" type="checkbox" value="${escapeHtml(rawVal)}"> ${escapeHtml(rawName)}</label>`;
+      const div = document.createElement('label');
+      div.className = 'pc-item';
+      div.setAttribute('for', id);
+      div.innerHTML = `
+        <input id="${id}" type="checkbox" value="${escapeHtml(rawVal)}">
+        <span class="pc-pill">
+          <span class="pc-name">${escapeHtml(rawName)}</span>
+          <span class="pc-ind" aria-hidden="true"></span>
+        </span>
+      `;
       const input = div.querySelector('input[type=checkbox]');
       if(input && Array.isArray(assignedList) && assignedList.some(x => String(x).toLowerCase() === String(input.value).toLowerCase())) input.checked = true;
       container.appendChild(div);

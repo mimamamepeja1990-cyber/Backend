@@ -209,8 +209,18 @@ th,td{padding:14px 12px;text-align:left;border-bottom:0}
 .field input, .field textarea, .field select{width:100%;padding:12px;border-radius:10px;border:1px solid #eef2f6;background:#fff}
 
 /* product categories checkboxes */
-.checkbox-grid{display:flex;flex-wrap:wrap;gap:8px}
-.checkbox-grid .pc-item{background:#fbfbff;border:1px solid rgba(10,34,64,0.04);padding:6px 8px;border-radius:8px;font-weight:600}
+.checkbox-grid{display:grid;grid-template-columns:repeat(auto-fit, minmax(140px, 1fr));gap:10px}
+.checkbox-grid .pc-item{position:relative;cursor:pointer}
+.checkbox-grid .pc-item input{position:absolute;inset:0;opacity:0;cursor:pointer}
+.checkbox-grid .pc-pill{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:10px 12px;border-radius:12px;background:linear-gradient(180deg,#fff,#fbfbff);border:1px solid rgba(10,34,64,0.08);box-shadow:0 6px 16px rgba(2,6,23,0.04);transition:transform .15s ease, box-shadow .15s ease, border-color .15s ease, background .15s ease}
+.checkbox-grid .pc-name{font-weight:700;font-size:14px;color:var(--text)}
+.checkbox-grid .pc-ind{width:18px;height:18px;border-radius:6px;border:2px solid rgba(10,34,64,0.25);background:#fff;display:inline-flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 2px rgba(255,255,255,0.4)}
+.checkbox-grid .pc-item:hover .pc-pill{transform:translateY(-2px);box-shadow:0 10px 24px rgba(2,6,23,0.08)}
+.checkbox-grid .pc-item input:focus-visible + .pc-pill{outline:3px solid rgba(79,70,229,0.3);outline-offset:2px}
+.checkbox-grid .pc-item input:checked + .pc-pill{background:linear-gradient(90deg,var(--accent),var(--accent-2));border-color:transparent;box-shadow:0 14px 30px rgba(79,70,229,0.18)}
+.checkbox-grid .pc-item input:checked + .pc-pill .pc-name{color:#fff}
+.checkbox-grid .pc-item input:checked + .pc-pill .pc-ind{background:#fff;border-color:#fff}
+.checkbox-grid .pc-item input:checked + .pc-pill .pc-ind::after{content:'';width:8px;height:8px;border-radius:3px;background:var(--accent-2)}
 .pc-tag{display:inline-block;padding:4px 8px;border-radius:8px;background:rgba(79,70,229,0.06);color:var(--accent-2);font-weight:700;margin-right:6px;font-size:13px}
 .file-field{display:flex;gap:8px;align-items:center}
 .file-label{background:#eef2ff;color:var(--accent-2);padding:8px 12px;border-radius:8px;cursor:pointer;border:1px solid rgba(124,58,237,0.08)}
