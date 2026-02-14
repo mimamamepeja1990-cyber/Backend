@@ -319,6 +319,24 @@ function normalizeSaleUnit(val){
   return 'unit';
 }
 
+function getProductStockKg(p){
+  try{
+    const stockKg = Number(p?.stock_kg);
+    const fallback = Number(p?.stock ?? 0);
+    if (Number.isFinite(stockKg) && stockKg > 0) return stockKg;
+    if ((!Number.isFinite(stockKg) || stockKg <= 0) && Number.isFinite(fallback) && fallback > 0) return fallback;
+    if (Number.isFinite(stockKg)) return Math.max(0, stockKg);
+    return Number.isFinite(fallback) ? Math.max(0, fallback) : 0;
+  }catch(_){ return 0; }
+}
+
+function getProductKgPerUnit(p){
+  try{
+    const n = Number(p?.kg_per_unit);
+    return Number.isFinite(n) && n > 0 ? n : 1;
+  }catch(_){ return 1; }
+}
+
 function syncProductUnitFields(){
   try{
     const unit = normalizeSaleUnit((productForm && productForm.sale_unit && productForm.sale_unit.value) ? productForm.sale_unit.value : 'unit');
@@ -499,15 +517,15 @@ function renderProducts(products){
       else if(p.image_url.startsWith('/')) imgSrc = API_BASE + p.image_url;
       else imgSrc = API_BASE + '/' + p.image_url.replace(/^\//, '');
     }
-    const unit = String(p.sale_unit || p.unit_type || p.unit || '').toLowerCase();
+    const unit = normalizeSaleUnit(p.sale_unit || p.unit_type || p.unit || 'unit');
     const unitSuffix = unit === 'kg' ? ' / kg' : '';
     const stockSuffix = unit === 'kg' ? ' kg' : '';
-    const stockRaw = unit === 'kg' ? (p.stock_kg ?? p.stock ?? 0) : (p.stock ?? 0);
+    const stockRaw = unit === 'kg' ? getProductStockKg(p) : Number(p.stock ?? 0);
     const stockNum = Number(stockRaw || 0);
     const stockDisplay = unit === 'kg'
       ? (Number.isFinite(stockNum) ? String(parseFloat(stockNum.toFixed(3))) : '0')
       : String(Number.isFinite(stockNum) ? Math.max(0, Math.round(stockNum)) : 0);
-    const kgPerUnitNum = Number(p.kg_per_unit || 1);
+    const kgPerUnitNum = getProductKgPerUnit(p);
     const kgPerUnitHint = unit === 'kg'
       ? ` <small style="color:#6b7280;font-weight:600">(1 = ${Number.isFinite(kgPerUnitNum) ? parseFloat(kgPerUnitNum.toFixed(3)) : 1} kg)</small>`
       : '';
@@ -699,10 +717,10 @@ async function onEdit(id){
     try{ if(productForm.sale_unit){ productForm.sale_unit.value = normalizeSaleUnit(String(p.sale_unit || p.unit_type || p.unit || 'unit')); } }catch(_){ }
     try{
       const unit = normalizeSaleUnit(String(p.sale_unit || p.unit_type || p.unit || 'unit'));
-      if (unit === 'kg') productForm.stock.value = (p.stock_kg != null) ? String(p.stock_kg) : String(p.stock ?? 0);
-      else productForm.stock.value = (p.stock != null) ? String(p.stock) : '0';
+      if (unit === 'kg') productForm.stock.value = String(getProductStockKg(p));
+      else productForm.stock.value = (p.stock != null) ? String(Math.max(0, Math.round(Number(p.stock) || 0))) : '0';
     }catch(_){ }
-    try{ if(productForm.kg_per_unit){ productForm.kg_per_unit.value = (p.kg_per_unit != null) ? String(p.kg_per_unit) : '1'; } }catch(_){ }
+    try{ if(productForm.kg_per_unit){ productForm.kg_per_unit.value = String(getProductKgPerUnit(p)); } }catch(_){ }
     try{ productForm.discount.value = (p.discount != null) ? String(p.discount) : ''; }catch(_){ }
     try{ syncProductUnitFields(); }catch(_){ }
     let previewSrc = '';

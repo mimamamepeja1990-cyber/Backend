@@ -3148,9 +3148,10 @@ async def update_order_status(order_id: str, request: Request):
     except Exception:
         existing = set()
 
-    cols = ['id','items','total','created_at']
-    if 'status' in existing:
-        cols.insert(3, 'status')
+    cols = ['id']
+    for c in ('items', 'total', 'created_at', 'status'):
+        if c in existing:
+            cols.append(c)
     optional = ['user_id','user_full_name','user_email','user_barrio','user_calle','user_numeracion','_token_received','_token_preview']
     for c in optional:
         if c in existing:
@@ -3174,11 +3175,15 @@ async def update_order_status(order_id: str, request: Request):
         # If update failed but we could persist override, return a minimal response.
         if override_ok:
             headers = _cors_headers_for_request(request)
-            return JSONResponse(status_code=200, content={'id': id_param, 'status': status, 'status_fallback': True}, headers=headers)
+            return JSONResponse(status_code=200, content=jsonable_encoder({'id': id_param, 'status': status, 'status_fallback': True}), headers=headers)
         headers = _cors_headers_for_request(request)
         return JSONResponse(status_code=404, content={'error': 'not_found'}, headers=headers)
 
     od = {k: row[idx] for idx, k in enumerate(cols)}
+    if 'items' not in od:
+        od['items'] = []
+    if 'total' not in od:
+        od['total'] = 0
     if 'status' not in od:
         od['status'] = status
     # parse items and token_preview if present
@@ -3213,5 +3218,5 @@ async def update_order_status(order_id: str, request: Request):
         pass
 
     headers = _cors_headers_for_request(request)
-    return JSONResponse(status_code=200, content=od, headers=headers)
+    return JSONResponse(status_code=200, content=jsonable_encoder(od), headers=headers)
 
