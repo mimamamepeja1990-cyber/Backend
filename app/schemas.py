@@ -10,6 +10,8 @@ class ProductBase(BaseModel):
     image_url: Optional[str] = None
     active: Optional[bool] = True
     stock: Optional[int] = 0
+    stock_kg: Optional[float] = 0.0
+    kg_per_unit: Optional[float] = 1.0
     discount: Optional[float] = 0.0
     sale_unit: Optional[str] = 'unit'
 
@@ -24,6 +26,8 @@ class ProductUpdate(BaseModel):
     image_url: Optional[str] = None
     active: Optional[bool] = None
     stock: Optional[int] = None
+    stock_kg: Optional[float] = None
+    kg_per_unit: Optional[float] = None
     discount: Optional[float] = None
     sale_unit: Optional[str] = None
 
@@ -33,6 +37,8 @@ class ProductResponse(ProductBase):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     stock: Optional[int] = 0
+    stock_kg: Optional[float] = 0.0
+    kg_per_unit: Optional[float] = 1.0
     discount: Optional[float] = 0.0
 
     model_config = {

@@ -16,6 +16,10 @@ class Product(Base):
     active = Column(Boolean, default=True)
     # Inventory and simple per-product discount (percentage, e.g. 10 == 10%)
     stock = Column(Integer, default=0)
+    # Available weight (kg) for kg-based products
+    stock_kg = Column(Float, nullable=True, default=0.0)
+    # For kg-based products, how many kilograms represent one full unit ("1")
+    kg_per_unit = Column(Float, nullable=True, default=1.0)
     discount = Column(Float, default=0.0)
     # Unit of sale: 'unit' or 'kg'
     sale_unit = Column(String(50), nullable=True, default='unit')

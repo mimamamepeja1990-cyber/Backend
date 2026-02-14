@@ -311,8 +311,12 @@
               <option value="kg">Kg</option>
             </select>
           </div>
+          <div class="field" id="kgPerUnitField" style="display:none;">
+            <label for="kg_per_unit">Kg por unidad</label>
+            <input id="kg_per_unit" name="kg_per_unit" type="number" min="0.01" step="0.01" value="1" placeholder="Ej: 4" />
+          </div>
           <div class="field">
-            <label for="stock">Stock</label>
+            <label for="stock" id="stockLabel">Stock</label>
             <input id="stock" name="stock" type="number" min="0" step="1" value="0" placeholder="0" />
           </div>
           <div class="field">

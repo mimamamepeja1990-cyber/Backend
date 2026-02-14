@@ -200,6 +200,9 @@ const fileNameEl = document.getElementById('fileName');
 const toast = document.getElementById('toast');
 const modalClose = document.getElementById('modalClose');
 const saveBtn = document.getElementById('saveBtn');
+const saleUnitSelect = document.getElementById('sale_unit');
+const kgPerUnitField = document.getElementById('kgPerUnitField');
+const stockLabel = document.getElementById('stockLabel');
 let currentEditId = null;
 let imageUrl = null;
 let selectedFile = null;
@@ -280,13 +283,47 @@ function saveLocalOrderCache(){
   }catch(e){ console.warn('saveLocalOrderCache failed', e); }
 }
 
+function normalizeSaleUnit(val){
+  const v = String(val || '').trim().toLowerCase();
+  if (v === 'kg' || v === 'kilo' || v === 'kilos' || v === 'kilogram' || v === 'kilograms' || v === 'kilogramo' || v === 'kilogramos') return 'kg';
+  return 'unit';
+}
+
+function syncProductUnitFields(){
+  try{
+    const unit = normalizeSaleUnit((productForm && productForm.sale_unit && productForm.sale_unit.value) ? productForm.sale_unit.value : 'unit');
+    const isKg = unit === 'kg';
+    const stockInput = productForm && productForm.stock ? productForm.stock : null;
+    const kgInput = productForm && productForm.kg_per_unit ? productForm.kg_per_unit : null;
+
+    if (kgPerUnitField) kgPerUnitField.style.display = isKg ? '' : 'none';
+    if (stockLabel) stockLabel.textContent = isKg ? 'Stock disponible (kg)' : 'Stock';
+
+    if (stockInput){
+      stockInput.step = isKg ? '0.01' : '1';
+      stockInput.min = '0';
+      if (!isKg) {
+        const current = Number(stockInput.value);
+        if (!Number.isNaN(current)) stockInput.value = String(Math.max(0, Math.round(current)));
+      }
+    }
+    if (kgInput){
+      const cur = Number(kgInput.value);
+      if (Number.isNaN(cur) || cur <= 0) kgInput.value = '1';
+      kgInput.required = isKg;
+    }
+  }catch(e){ console.warn('syncProductUnitFields failed', e); }
+}
+
 function validateForm(){
   const name = productForm.name.value.trim();
   const price = productForm.price.value;
   const desc = productForm.description.value.trim();
+  const saleUnit = normalizeSaleUnit((productForm.sale_unit && productForm.sale_unit.value) ? productForm.sale_unit.value : 'unit');
+  const kgPerUnit = Number(productForm.kg_per_unit && productForm.kg_per_unit.value ? productForm.kg_per_unit.value : 1);
   // Basic form checks for product creation/update
   // Allow empty description (legacy products may not have descriptions)
-  const ok = name.length > 0 && price !== '' && !isNaN(Number(price));
+  const ok = name.length > 0 && price !== '' && !isNaN(Number(price)) && (saleUnit !== 'kg' || (!isNaN(kgPerUnit) && kgPerUnit > 0));
   // Log last product form change (do not pollute with promotion variables)
   try{
     const timestamp = new Date().toISOString();
@@ -435,12 +472,21 @@ function renderProducts(products){
     const unit = String(p.sale_unit || p.unit_type || p.unit || '').toLowerCase();
     const unitSuffix = unit === 'kg' ? ' / kg' : '';
     const stockSuffix = unit === 'kg' ? ' kg' : '';
+    const stockRaw = unit === 'kg' ? (p.stock_kg ?? p.stock ?? 0) : (p.stock ?? 0);
+    const stockNum = Number(stockRaw || 0);
+    const stockDisplay = unit === 'kg'
+      ? (Number.isFinite(stockNum) ? String(parseFloat(stockNum.toFixed(3))) : '0')
+      : String(Number.isFinite(stockNum) ? Math.max(0, Math.round(stockNum)) : 0);
+    const kgPerUnitNum = Number(p.kg_per_unit || 1);
+    const kgPerUnitHint = unit === 'kg'
+      ? ` <small style="color:#6b7280;font-weight:600">(1 = ${Number.isFinite(kgPerUnitNum) ? parseFloat(kgPerUnitNum.toFixed(3)) : 1} kg)</small>`
+      : '';
     tr.innerHTML = `
       <td>${imgSrc ? `<img src="${imgSrc}" alt="${p.name}" width="60" onerror="this.onerror=null;this.src='../images/default.png'">` : ''}</td>
       <td>${p.name}</td>
       <td>${catsDisplay}</td>
       <td>$${parseFloat(p.price).toFixed(2)}${unitSuffix}</td>
-      <td>${(p.stock != null) ? String(p.stock) + stockSuffix : '0'}</td>
+      <td>${stockDisplay}${stockSuffix}${kgPerUnitHint}</td>
       <td>${p.active ? 'Sí' : 'No'}</td>
       <td>
         <button data-id="${p.id}" class="editBtn btn">Editar</button>
@@ -530,11 +576,23 @@ async function handleSave(ev){
   // maintain compatibility: set hidden category to first selected or existing value
   productForm.category.value = (selectedCats && selectedCats.length) ? String(selectedCats[0]) : (productForm.category.value || '');
 
-  const payload = { name: productForm.name.value.trim(), price: Number(productForm.price.value), description: productForm.description.value.trim(), category: productForm.category.value.trim() || null, image_url: imageUrl, active: true, stock: Number(productForm.stock?.value || 0) };
+  const payload = { name: productForm.name.value.trim(), price: Number(productForm.price.value), description: productForm.description.value.trim(), category: productForm.category.value.trim() || null, image_url: imageUrl, active: true };
   try{
-    const su = (productForm.sale_unit && productForm.sale_unit.value) ? String(productForm.sale_unit.value) : 'unit';
-    payload.sale_unit = su || 'unit';
-  }catch(_){ }
+    const su = normalizeSaleUnit((productForm.sale_unit && productForm.sale_unit.value) ? productForm.sale_unit.value : 'unit');
+    payload.sale_unit = su;
+    if (su === 'kg') {
+      const stockKg = Number(productForm.stock?.value || 0);
+      const kgPerUnit = Number(productForm.kg_per_unit?.value || 1);
+      payload.stock_kg = !isNaN(stockKg) ? Math.max(0, stockKg) : 0;
+      payload.kg_per_unit = (!isNaN(kgPerUnit) && kgPerUnit > 0) ? kgPerUnit : 1;
+      payload.stock = Math.max(0, Math.round(payload.stock_kg));
+    } else {
+      const stockUnits = Number(productForm.stock?.value || 0);
+      payload.stock = !isNaN(stockUnits) ? Math.max(0, Math.round(stockUnits)) : 0;
+      payload.stock_kg = payload.stock;
+      payload.kg_per_unit = 1;
+    }
+  }catch(_){ payload.sale_unit = 'unit'; payload.stock = 0; payload.stock_kg = 0; payload.kg_per_unit = 1; }
   // Only include discount when provided so it's optional
   try{
     const discVal = productForm.discount && productForm.discount.value !== '' ? Number(productForm.discount.value) : undefined;
@@ -606,9 +664,15 @@ async function onEdit(id){
     productForm.price.value = p.price;
     productForm.category.value = p.category;
     productForm.description.value = p.description;
-    try{ productForm.stock.value = (p.stock != null) ? String(p.stock) : '0'; }catch(_){ }
+    try{ if(productForm.sale_unit){ productForm.sale_unit.value = normalizeSaleUnit(String(p.sale_unit || p.unit_type || p.unit || 'unit')); } }catch(_){ }
+    try{
+      const unit = normalizeSaleUnit(String(p.sale_unit || p.unit_type || p.unit || 'unit'));
+      if (unit === 'kg') productForm.stock.value = (p.stock_kg != null) ? String(p.stock_kg) : String(p.stock ?? 0);
+      else productForm.stock.value = (p.stock != null) ? String(p.stock) : '0';
+    }catch(_){ }
+    try{ if(productForm.kg_per_unit){ productForm.kg_per_unit.value = (p.kg_per_unit != null) ? String(p.kg_per_unit) : '1'; } }catch(_){ }
     try{ productForm.discount.value = (p.discount != null) ? String(p.discount) : ''; }catch(_){ }
-    try{ if(productForm.sale_unit){ productForm.sale_unit.value = String(p.sale_unit || p.unit_type || p.unit || 'unit'); } }catch(_){ }
+    try{ syncProductUnitFields(); }catch(_){ }
     let previewSrc = '';
     if(p.image_url){
       if(p.image_url.startsWith('http://') || p.image_url.startsWith('https://') || p.image_url.startsWith('//')) previewSrc = p.image_url;
@@ -809,14 +873,14 @@ function formatKgQtyLabel(qty){
     const num = Number(qty);
     if (Number.isNaN(num)) return String(qty || '');
     const opts = [
-      { value: 1, label: '1 kg' },
-      { value: 0.5, label: '1/2 kg' },
-      { value: 1/3, label: '1/3 kg' },
-      { value: 0.25, label: '1/4 kg' }
+      { value: 1, label: '1' },
+      { value: 0.5, label: '1/2' },
+      { value: 1/3, label: '1/3' },
+      { value: 0.25, label: '1/4' }
     ];
     const match = opts.find(o => Math.abs(o.value - num) < 0.0001);
     if (match) return match.label;
-    return `${num} kg`;
+    return String(parseFloat(num.toFixed(3)));
   }catch(_){ return String(qty || ''); }
 }
 
@@ -826,8 +890,14 @@ function formatOrderQty(it){
     const meta = (it && it.meta && typeof it.meta === 'object') ? it.meta : {};
     const unit = String(meta.unit_type || meta.sale_unit || meta.unit || '').toLowerCase();
     if (unit === 'kg' || unit === 'kilo' || unit === 'kilos' || unit === 'kilogram' || unit === 'kilograms' || unit === 'kilogramo' || unit === 'kilogramos'){
-      if (meta.qty_label) return String(meta.qty_label);
-      return formatKgQtyLabel(qty);
+      const base = meta.qty_label ? String(meta.qty_label) : formatKgQtyLabel(qty);
+      let weight = Number(meta.ordered_weight_kg);
+      if (!Number.isFinite(weight) || weight <= 0) {
+        const kpu = Number(meta.kg_per_unit || 0);
+        weight = (Number.isFinite(kpu) && kpu > 0) ? Number(qty || 0) * kpu : 0;
+      }
+      if (Number.isFinite(weight) && weight > 0) return `${base} (${parseFloat(weight.toFixed(3))} kg)`;
+      return base;
     }
     return String(qty);
   }catch(_){
@@ -1357,12 +1427,15 @@ async function openModal(){
     // Ensure filters are synced from server/local snapshot before rendering
     await fetchAndSyncProductCategories().catch(()=>null);
     const filters = loadFilters();
-    renderCategoryCheckboxes(filters, []);
+    if (!currentEditId) {
+      renderCategoryCheckboxes(filters, []);
+    }
   }catch(e){ console.warn('openModal: failed to populate categories', e); }
+  try{ syncProductUnitFields(); }catch(_){ }
   setTimeout(()=> productForm.name.focus(), 120);
 }
 function closeModal(){
-  modal.classList.add('hidden'); modal.setAttribute('aria-hidden', 'true'); currentEditId = null; imageUrl = null; selectedFile = null; fileNameEl.textContent = 'Ningún archivo seleccionado'; imagePreview.innerHTML = ''; productForm.reset(); validateForm();
+  modal.classList.add('hidden'); modal.setAttribute('aria-hidden', 'true'); currentEditId = null; imageUrl = null; selectedFile = null; fileNameEl.textContent = 'Ningun archivo seleccionado'; imagePreview.innerHTML = ''; productForm.reset(); try{ if(productForm.sale_unit) productForm.sale_unit.value = 'unit'; }catch(_){ } try{ if(productForm.kg_per_unit) productForm.kg_per_unit.value = '1'; }catch(_){ } try{ syncProductUnitFields(); }catch(_){ } validateForm();
 }
 // Close modal when clicking outside the modal card
 if(modal) modal.addEventListener('click', e => { if(e.target === modal) closeModal(); });
@@ -1371,6 +1444,8 @@ document.addEventListener('keydown', e => { if(e.key === 'Escape' && !modal.clas
 
 // Enable validation
 if(productForm) productForm.addEventListener('input', validateForm);
+if(saleUnitSelect) saleUnitSelect.addEventListener('change', ()=>{ syncProductUnitFields(); validateForm(); });
+try{ syncProductUnitFields(); }catch(_){ }
 
 // Promotions persistence helpers
 function loadPromotions(){

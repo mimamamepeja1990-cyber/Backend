@@ -228,6 +228,10 @@ def get_products(db: Session, skip: int = 0, limit: int = 100, q: Optional[str]=
         # only include optional columns if they exist
         if 'stock' in existing:
             cols.append('stock')
+        if 'stock_kg' in existing:
+            cols.append('stock_kg')
+        if 'kg_per_unit' in existing:
+            cols.append('kg_per_unit')
         if 'discount' in existing:
             cols.append('discount')
         if 'sale_unit' in existing:
@@ -270,7 +274,7 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
         insp = inspect(bind)
         existing_cols = {c['name'] for c in insp.get_columns('products')}
     except Exception:
-        existing_cols = {'id', 'name', 'price', 'description', 'category', 'image_url', 'active', 'created_at', 'updated_at', 'stock', 'discount', 'sale_unit'}
+        existing_cols = {'id', 'name', 'price', 'description', 'category', 'image_url', 'active', 'created_at', 'updated_at', 'stock', 'stock_kg', 'kg_per_unit', 'discount', 'sale_unit'}
     
     logger.info('Existing columns: %s', existing_cols)
     
@@ -280,6 +284,8 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
     
     col_defs = {
         'stock': 'INTEGER DEFAULT 0',
+        'stock_kg': 'REAL DEFAULT 0',
+        'kg_per_unit': 'REAL DEFAULT 1',
         'discount': 'REAL DEFAULT 0',
         'sale_unit': "VARCHAR(20) DEFAULT 'unit'"
     }
@@ -301,6 +307,27 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
                     pass
     
     # Build column list - only use columns that exist
+    sale_unit = str(getattr(payload, 'sale_unit', None) or 'unit').strip().lower()
+    if sale_unit not in ('kg', 'unit'):
+        sale_unit = 'unit'
+    raw_stock = getattr(payload, 'stock', 0)
+    raw_stock_kg = getattr(payload, 'stock_kg', None)
+    raw_kg_per_unit = getattr(payload, 'kg_per_unit', None)
+    try:
+        stock_int = int(float(raw_stock or 0))
+    except Exception:
+        stock_int = 0
+    try:
+        stock_kg = float(raw_stock_kg) if raw_stock_kg is not None else float(raw_stock or 0)
+    except Exception:
+        stock_kg = float(stock_int)
+    try:
+        kg_per_unit = float(raw_kg_per_unit) if raw_kg_per_unit is not None else 1.0
+    except Exception:
+        kg_per_unit = 1.0
+    if kg_per_unit <= 0:
+        kg_per_unit = 1.0
+
     data = {
         'name': payload.name,
         'price': payload.price,
@@ -308,9 +335,11 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
         'category': payload.category or '',
         'image_url': payload.image_url or '',
         'active': payload.active,
-        'stock': getattr(payload, 'stock', 0),
+        'stock': stock_int,
+        'stock_kg': stock_kg,
+        'kg_per_unit': kg_per_unit,
         'discount': getattr(payload, 'discount', 0.0),
-        'sale_unit': getattr(payload, 'sale_unit', None) or 'unit'
+        'sale_unit': sale_unit
     }
     
     # Filter to only existing columns
@@ -353,6 +382,10 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
             existing = set()
         if 'stock' in existing:
             cols.append('stock')
+        if 'stock_kg' in existing:
+            cols.append('stock_kg')
+        if 'kg_per_unit' in existing:
+            cols.append('kg_per_unit')
         if 'discount' in existing:
             cols.append('discount')
         if 'sale_unit' in existing:
@@ -367,6 +400,16 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
             # coerce numeric types
             obj['price'] = float(obj.get('price') or 0.0)
             obj['stock'] = int(obj.get('stock') or 0)
+            if 'stock_kg' in obj:
+                try:
+                    obj['stock_kg'] = float(obj.get('stock_kg') or 0.0)
+                except Exception:
+                    obj['stock_kg'] = 0.0
+            if 'kg_per_unit' in obj:
+                try:
+                    obj['kg_per_unit'] = float(obj.get('kg_per_unit') or 1.0)
+                except Exception:
+                    obj['kg_per_unit'] = 1.0
             obj['discount'] = float(obj.get('discount') or 0.0)
             if 'sale_unit' in obj:
                 obj['sale_unit'] = obj.get('sale_unit') or 'unit'
@@ -381,6 +424,8 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
         'name': payload.name,
         'price': float(payload.price) if getattr(payload, 'price', None) is not None else 0.0,
         'stock': int(getattr(payload, 'stock', 0) or 0),
+        'stock_kg': float(getattr(payload, 'stock_kg', getattr(payload, 'stock', 0)) or 0.0),
+        'kg_per_unit': float(getattr(payload, 'kg_per_unit', 1.0) or 1.0),
         'discount': float(getattr(payload, 'discount', 0.0) or 0.0),
         'description': payload.description,
         'category': payload.category,
@@ -403,6 +448,10 @@ def get_product(db: Session, product_id: int) -> Optional[models.Product]:
         cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
         if 'stock' in existing:
             cols.append('stock')
+        if 'stock_kg' in existing:
+            cols.append('stock_kg')
+        if 'kg_per_unit' in existing:
+            cols.append('kg_per_unit')
         if 'discount' in existing:
             cols.append('discount')
         if 'sale_unit' in existing:
@@ -469,6 +518,10 @@ def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate)
     cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
     if 'stock' in existing:
         cols.append('stock')
+    if 'stock_kg' in existing:
+        cols.append('stock_kg')
+    if 'kg_per_unit' in existing:
+        cols.append('kg_per_unit')
     if 'discount' in existing:
         cols.append('discount')
     if 'sale_unit' in existing:
@@ -516,6 +569,71 @@ def _get_item_unit(it):
 def _is_kg_item(it):
     u = _get_item_unit(it)
     return u in ('kg', 'kilo', 'kilos', 'kilogram', 'kilograms', 'kilogramo', 'kilogramos')
+
+
+def _to_float(value, default=0.0):
+    try:
+        v = float(value)
+        if v != v:  # NaN
+            return default
+        return v
+    except Exception:
+        return default
+
+
+def _product_kg_per_unit(prod):
+    try:
+        v = _to_float(getattr(prod, 'kg_per_unit', None), 1.0)
+        return v if v > 0 else 1.0
+    except Exception:
+        return 1.0
+
+
+def _item_kg_per_unit(it, prod=None):
+    try:
+        meta = it.get('meta') if isinstance(it, dict) else None
+        if isinstance(meta, dict):
+            v = _to_float(meta.get('kg_per_unit'), None)
+            if v is not None and v > 0:
+                return v
+    except Exception:
+        pass
+    if prod is not None:
+        return _product_kg_per_unit(prod)
+    return 1.0
+
+
+def _item_requested_weight_kg(it, prod=None):
+    try:
+        meta = it.get('meta') if isinstance(it, dict) else None
+        if isinstance(meta, dict):
+            explicit = _to_float(meta.get('ordered_weight_kg'), None)
+            if explicit is not None and explicit > 0:
+                return explicit
+    except Exception:
+        pass
+    qty = _to_float((it or {}).get('qty', 1), 1.0) if isinstance(it, dict) else 1.0
+    if qty < 0:
+        qty = 0.0
+    return qty * _item_kg_per_unit(it, prod)
+
+
+def _product_stock_kg(prod):
+    try:
+        v = _to_float(getattr(prod, 'stock_kg', None), None)
+        if v is not None and v > 0:
+            return v
+    except Exception:
+        pass
+    # Legacy/backfill fallback: if stock_kg is unavailable (or still zero) fallback to stock.
+    fallback = max(0.0, _to_float(getattr(prod, 'stock', 0), 0.0))
+    if fallback > 0:
+        return fallback
+    try:
+        v = _to_float(getattr(prod, 'stock_kg', 0), 0.0)
+        return max(0.0, v)
+    except Exception:
+        return 0.0
 
 def prealloc_consumos(items_list_input, catalog_dir_override=None):
     """Best-effort pre-allocation of consumos from catalogo/consumos.json.
@@ -715,6 +833,12 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
             prod = db.query(models.Product).filter(models.Product.id == pid).first()
             if prod is None:
                 continue
+            if _is_kg_item(it):
+                req_kg = _item_requested_weight_kg(it, prod)
+                avail_kg = _product_stock_kg(prod)
+                if req_kg > avail_kg + 1e-9:
+                    raise HTTPException(status_code=400, detail='actualmente no contamos con stock de este articulo')
+                continue
             # nearest-expiry available
             near_avail = int((consumos_map or {}).get(pid, 0) or 0)
             # stock may be None (unknown) or numeric
@@ -861,7 +985,6 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                         val = getattr(payload, col, None) or (getattr(u, attr, None) if u else None)
                         if val is not None:
                             kwargs[col] = val
-                            return SimpleNamespace(**objd)
                 if 'source' in existing_cols and getattr(payload, 'source', None):
                     kwargs['source'] = getattr(payload, 'source')
     except Exception:
@@ -940,16 +1063,41 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                     qty = float(raw_qty) if raw_qty is not None else 1.0
                 except Exception:
                     qty = 1.0
-                if not _is_kg_item(it):
-                    try:
-                        qty = int(qty)
-                    except Exception:
-                        qty = 1
                 if qty <= 0:
                     continue
-                # For kg-based items, skip consumos/stock decrements (only enforce stock elsewhere)
-                if _is_kg_item(it):
+                # Lock product row when possible so stock updates remain consistent.
+                try:
+                    prod_row = db.query(models.Product).filter(models.Product.id == pid).with_for_update().first()
+                except Exception:
+                    prod_row = db.query(models.Product).filter(models.Product.id == pid).first()
+                if not prod_row:
                     continue
+                # Kg-based stock is stored/decremented in kilograms.
+                if _is_kg_item(it):
+                    req_kg = _item_requested_weight_kg(it, prod_row)
+                    if req_kg <= 0:
+                        continue
+                    avail_kg = _product_stock_kg(prod_row)
+                    if avail_kg < req_kg - 1e-9:
+                        raise HTTPException(status_code=400, detail='actualmente no contamos con stock de este articulo')
+                    new_stock_kg = max(0.0, avail_kg - req_kg)
+                    try:
+                        setattr(prod_row, 'stock_kg', new_stock_kg)
+                    except Exception:
+                        pass
+                    # Keep legacy integer stock roughly in sync for old views.
+                    try:
+                        if getattr(prod_row, 'stock', None) is not None:
+                            prod_row.stock = int(round(new_stock_kg))
+                    except Exception:
+                        pass
+                    db.add(prod_row)
+                    updated_product_ids.add(pid)
+                    continue
+                try:
+                    qty = int(qty)
+                except Exception:
+                    qty = 1
                 # First: take from consumos (near-expiry) only when item is flagged as consumo
                 try:
                     meta = it.get('meta') if isinstance(it, dict) else None
@@ -970,13 +1118,6 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                 if remaining <= 0:
                     continue
                 # Then: decrement DB stock when available (row-lock when supported)
-                try:
-                    prod_row = db.query(models.Product).filter(models.Product.id == pid).with_for_update().first()
-                except Exception:
-                    prod_row = db.query(models.Product).filter(models.Product.id == pid).first()
-                if not prod_row:
-                    # no product row to decrement, allow (we cannot enforce)
-                    continue
                 stock_attr = getattr(prod_row, 'stock', None)
                 if stock_attr is None:
                     # stock unknown: allow remaining (do not block or decrement)
