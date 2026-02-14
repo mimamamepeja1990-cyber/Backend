@@ -263,6 +263,54 @@ def get_products(db: Session, skip: int = 0, limit: int = 100, q: Optional[str]=
             result.append(objd)
         return result
 
+def _ensure_product_columns(db: Session, existing_cols: Optional[set] = None) -> set:
+    """Best-effort runtime migration for product columns used by admin/catalog."""
+    try:
+        bind = db.get_bind()
+        insp = inspect(bind)
+        existing = set(existing_cols) if existing_cols else {c['name'] for c in insp.get_columns('products')}
+    except Exception:
+        existing = set(existing_cols) if existing_cols else set()
+    try:
+        bind = db.get_bind()
+        dialect = getattr(bind, 'dialect', None)
+        dialect_name = getattr(dialect, 'name', '') if dialect else 'sqlite'
+    except Exception:
+        dialect_name = 'sqlite'
+
+    col_defs = {
+        'stock': 'INTEGER DEFAULT 0',
+        'stock_kg': 'REAL DEFAULT 0',
+        'kg_per_unit': 'REAL DEFAULT 1',
+        'discount': 'REAL DEFAULT 0',
+        'sale_unit': "VARCHAR(20) DEFAULT 'unit'",
+    }
+
+    for col, coltype in col_defs.items():
+        if col in existing:
+            continue
+        try:
+            if 'postgres' in dialect_name:
+                try:
+                    _safe_execute(db, f"ALTER TABLE products ADD COLUMN IF NOT EXISTS {col} {coltype}")
+                except Exception:
+                    _safe_execute(db, f"ALTER TABLE products ADD COLUMN {col} {coltype}")
+            else:
+                _safe_execute(db, f"ALTER TABLE products ADD COLUMN {col} {coltype}")
+            try:
+                db.commit()
+            except Exception:
+                pass
+            existing.add(col)
+            logger.info('Created missing products column at runtime: %s', col)
+        except Exception as e:
+            logger.warning('Could not create missing products column %s: %s', col, e)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+    return existing
+
 def create_product(db: Session, payload: schemas.ProductCreate) -> models.Product:
     """Create product - ultra-simple and robust."""
     logger.info('CREATE_PRODUCT: Inserting %s', payload.name)
@@ -276,35 +324,8 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
     except Exception:
         existing_cols = {'id', 'name', 'price', 'description', 'category', 'image_url', 'active', 'created_at', 'updated_at', 'stock', 'stock_kg', 'kg_per_unit', 'discount', 'sale_unit'}
     
+    existing_cols = _ensure_product_columns(db, existing_cols)
     logger.info('Existing columns: %s', existing_cols)
-    
-    # Ensure stock and discount columns exist
-    dialect = getattr(bind, 'dialect', None) if 'bind' in locals() else None
-    dialect_name = getattr(dialect, 'name', '') if dialect else 'sqlite'
-    
-    col_defs = {
-        'stock': 'INTEGER DEFAULT 0',
-        'stock_kg': 'REAL DEFAULT 0',
-        'kg_per_unit': 'REAL DEFAULT 1',
-        'discount': 'REAL DEFAULT 0',
-        'sale_unit': "VARCHAR(20) DEFAULT 'unit'"
-    }
-    for col, coltype in col_defs.items():
-        if col not in existing_cols:
-            try:
-                if 'postgres' in dialect_name:
-                    _safe_execute(db, f"ALTER TABLE products ADD COLUMN IF NOT EXISTS {col} {coltype}")
-                else:
-                    _safe_execute(db, f"ALTER TABLE products ADD COLUMN {col} {coltype}")
-                db.commit()
-                existing_cols.add(col)
-                logger.info('Created column: %s', col)
-            except Exception as e:
-                logger.warning('Could not create column %s: %s', col, e)
-                try:
-                    db.rollback()
-                except:
-                    pass
     
     # Build column list - only use columns that exist
     sale_unit = str(getattr(payload, 'sale_unit', None) or 'unit').strip().lower()
@@ -489,6 +510,7 @@ def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate)
         existing = {c['name'] for c in insp.get_columns('products')}
     except Exception:
         existing = set()
+    existing = _ensure_product_columns(db, existing)
 
     set_cols = [k for k in updates.keys() if (not existing) or (k in existing)]
     if not set_cols:
