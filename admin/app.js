@@ -23,7 +23,8 @@ document.querySelectorAll('.sidebar nav a[data-section]').forEach(link => {
 });
 // Admin JS — UI principal sin modo oscuro ni botón de tarjeta (card)
 console.log('[admin] app.js loaded');
-const API_BASE = (location.protocol && location.protocol.startsWith('http')) ? location.origin : "http://127.0.0.1:8000";
+const REMOTE_API_BASE = 'https://backend-0lcs.onrender.com';
+let API_BASE = (location.protocol && location.protocol.startsWith('http')) ? location.origin : REMOTE_API_BASE;
 // Small helper to wrap fetch and provide consistent errors and JSON parsing
 async function safeFetch(url, opts) {
   const res = await fetch(url, opts || {});
@@ -43,6 +44,35 @@ async function safeFetch(url, opts) {
     throw err;
   }
   return payload;
+}
+
+async function ensureApiBase(){
+  const candidates = [];
+  const fileMode = !(location.protocol && location.protocol.startsWith('http'));
+  if (fileMode){
+    candidates.push('http://127.0.0.1:8000');
+    candidates.push(REMOTE_API_BASE);
+  } else {
+    try{ if (API_BASE) candidates.push(String(API_BASE)); }catch(_){ }
+  }
+  for (const c of ['http://127.0.0.1:8000', REMOTE_API_BASE]){
+    if (!candidates.includes(c)) candidates.push(c);
+  }
+  for (const base of candidates){
+    try{
+      const controller = new AbortController();
+      const t = setTimeout(()=> controller.abort(), 2500);
+      const res = await fetch(base + '/health', { cache: 'no-store', signal: controller.signal });
+      clearTimeout(t);
+      if (res && res.ok){
+        API_BASE = base;
+        if(apiBaseIndicator) apiBaseIndicator.textContent = API_BASE;
+        return API_BASE;
+      }
+    }catch(_){ }
+  }
+  if(apiBaseIndicator) apiBaseIndicator.textContent = API_BASE + ' (sin conexión)';
+  return API_BASE;
 }
 // --- Imágenes Promocionales (admin) ---
 const promoImagesList = document.getElementById('promoImagesList');
@@ -425,7 +455,7 @@ async function updateProduct(id, payload){
     return await safeFetch(url, {method:'PUT', headers:{'Content-Type':'application/json', 'Accept': 'application/json'}, body: JSON.stringify(payload)});
   }catch(e){
     console.error('updateProduct failed', e);
-    throw new Error(`update-failed ${e.message}`);
+    throw e;
   }
 }
 
@@ -620,6 +650,8 @@ async function handleSave(ev){
         const p = err.payload;
         const msg = (p && (p.detail || p.error || p.message)) ? (p.detail || p.error || p.message) : JSON.stringify(p);
         showToast('Error guardando producto: ' + String(msg), 'error');
+      } else if (err && (String(err.message || '').includes('Failed to fetch') || String(err).includes('NetworkError') || String(err).includes('TypeError'))) {
+        showToast('No se pudo conectar al API (' + API_BASE + ')', 'error');
       } else {
         showToast('Error guardando producto','error');
       }
@@ -1637,20 +1669,23 @@ if(importFiltersBtn) importFiltersBtn.addEventListener('click', async ()=>{ try{
 // Listen for product-categories broadcast updates
 try{ if(window.BroadcastChannel){ const bcpc = new BroadcastChannel('product_categories_channel'); bcpc.onmessage = (ev) => { try{ if(ev.data && ev.data.action === 'product-categories-updated'){ console.log('[admin] product-categories updated via BroadcastChannel'); fetchAndSyncProductCategories().then(()=>refresh()).catch(()=>refresh()); } }catch(e){} }; } }catch(e){}
 
-// ensure filters UI is initialized
-try{ renderFilters(); }catch(e){ console.warn('initial renderFilters failed', e); }
-// ensure server has current filters snapshot when admin loads
-try{ publishFilters(loadFilters()); }catch(e){ console.warn('initial publishFilters failed', e); }
-// fetch product-categories snapshot (best-effort)
-try{ fetchAndSyncProductCategories().then(()=>{ console.log('[admin] product-categories synced'); }).catch(e => console.warn('product-categories sync failed', e)); }catch(e){ console.warn('initial fetchAndSyncProductCategories failed', e); }
-
-// initial load
-refresh();
-renderPromotions();
-// restore any locally-inserted order previews (persisted across reloads)
-loadLocalOrderCache();
-refreshOrders('web');
-refreshOrders('app');
+async function bootstrapAdmin(){
+  try{ await ensureApiBase(); }catch(e){ console.warn('ensureApiBase failed', e); }
+  // ensure filters UI is initialized
+  try{ renderFilters(); }catch(e){ console.warn('initial renderFilters failed', e); }
+  // ensure server has current filters snapshot when admin loads
+  try{ await publishFilters(loadFilters()); }catch(e){ console.warn('initial publishFilters failed', e); }
+  // fetch product-categories snapshot (best-effort)
+  try{ await fetchAndSyncProductCategories(); console.log('[admin] product-categories synced'); }catch(e){ console.warn('initial fetchAndSyncProductCategories failed', e); }
+  // initial load
+  try{ await refresh(); }catch(e){ console.warn('initial refresh failed', e); }
+  try{ renderPromotions(); }catch(e){ console.warn('initial renderPromotions failed', e); }
+  // restore any locally-inserted order previews (persisted across reloads)
+  try{ loadLocalOrderCache(); }catch(e){ console.warn('loadLocalOrderCache failed', e); }
+  try{ await refreshOrders('web'); }catch(e){ console.warn('refreshOrders web failed', e); }
+  try{ await refreshOrders('app'); }catch(e){ console.warn('refreshOrders app failed', e); }
+}
+bootstrapAdmin();
 
 // Cleanup any duplicate rows that may already be present across tables.
 function dedupeDOMOrders(){
