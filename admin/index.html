@@ -301,7 +301,7 @@
             <input id="name" name="name" required placeholder="Nombre del producto" />
           </div>
           <div class="field">
-            <label for="price">Precio</label>
+            <label for="price" id="priceLabel">Precio</label>
             <input id="price" name="price" required type="number" step="0.01" placeholder="0.00" />
           </div>
           <div class="field">
@@ -422,6 +422,6 @@
     window.addEventListener('error', function(e){ try{ window.adminFallback('JS error: ' + (e && e.message ? e.message : e)); }catch(_){} });
     window.addEventListener('unhandledrejection', function(e){ try{ var r = e && e.reason ? (e.reason.message || JSON.stringify(e.reason)) : e; window.adminFallback('Unhandled promise rejection: ' + r); }catch(_){} });
   </script>
-  <script src="app.js"></script>
+  <script src="app.js?v=20260215"></script>
 </body>
 </html>

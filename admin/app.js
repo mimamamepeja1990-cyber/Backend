@@ -233,6 +233,7 @@ const saveBtn = document.getElementById('saveBtn');
 const saleUnitSelect = document.getElementById('sale_unit');
 const kgPerUnitField = document.getElementById('kgPerUnitField');
 const stockLabel = document.getElementById('stockLabel');
+const priceLabel = document.getElementById('priceLabel');
 let currentEditId = null;
 let imageUrl = null;
 let selectedFile = null;
@@ -346,6 +347,7 @@ function syncProductUnitFields(){
 
     if (kgPerUnitField) kgPerUnitField.style.display = isKg ? '' : 'none';
     if (stockLabel) stockLabel.textContent = isKg ? 'Stock disponible (kg)' : 'Stock';
+    if (priceLabel) priceLabel.textContent = isKg ? 'Precio (unidad completa)' : 'Precio';
 
     if (stockInput){
       stockInput.step = isKg ? '0.01' : '1';
@@ -518,7 +520,7 @@ function renderProducts(products){
       else imgSrc = API_BASE + '/' + p.image_url.replace(/^\//, '');
     }
     const unit = normalizeSaleUnit(p.sale_unit || p.unit_type || p.unit || 'unit');
-    const unitSuffix = unit === 'kg' ? ' / kg' : '';
+    const unitSuffix = unit === 'kg' ? ' / unidad' : '';
     const stockSuffix = unit === 'kg' ? ' kg' : '';
     const stockRaw = unit === 'kg' ? getProductStockKg(p) : Number(p.stock ?? 0);
     const stockNum = Number(stockRaw || 0);
