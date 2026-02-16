@@ -663,6 +663,7 @@ async def _send_order_confirmation_email(
     # RESEND_API_KEY=re_xxxxxxxxx  (replace re_xxxxxxxxx with your real API key)
     api_key = (os.environ.get('RESEND_API_KEY') or '').strip()
     if not api_key:
+        logger.warning('RESEND_API_KEY is not configured. Skipping confirmation email.')
         return False
     if api_key == 're_xxxxxxxxx':
         logger.warning("RESEND_API_KEY is still 're_xxxxxxxxx'. Replace it with your real API key.")
@@ -670,6 +671,7 @@ async def _send_order_confirmation_email(
 
     enabled_raw = (os.environ.get('RESEND_ORDER_CONFIRMATION_ENABLED') or 'true').strip().lower()
     if enabled_raw in ('0', 'false', 'no', 'off'):
+        logger.info('RESEND_ORDER_CONFIRMATION_ENABLED disabled. Skipping confirmation email.')
         return False
 
     order_payload = order_data if isinstance(order_data, dict) else {}
