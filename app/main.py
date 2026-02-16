@@ -20,6 +20,7 @@ import json
 import time
 import datetime
 from io import StringIO
+from html import escape as html_escape
 import anyio
 import sys
 import traceback
@@ -462,6 +463,280 @@ def _prune_status_cache():
                 pass
     except Exception:
         pass
+
+
+def _normalize_email(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        email = str(value).strip().lower()
+    except Exception:
+        return None
+    if not email or '@' not in email or ' ' in email:
+        return None
+    return email
+
+
+def _extract_customer_email_for_order(
+    order_data: Optional[Dict[str, Any]],
+    request_data: Optional[Dict[str, Any]] = None,
+    token_payload: Optional[Dict[str, Any]] = None,
+) -> Optional[str]:
+    candidates: List[Any] = []
+
+    if isinstance(order_data, dict):
+        candidates.append(order_data.get('user_email'))
+        token_preview = order_data.get('_token_preview')
+        if isinstance(token_preview, dict):
+            candidates.append(token_preview.get('email'))
+
+    if isinstance(request_data, dict):
+        candidates.append(request_data.get('user_email'))
+        token_preview = request_data.get('_token_preview')
+        if isinstance(token_preview, dict):
+            candidates.append(token_preview.get('email'))
+
+    if isinstance(token_payload, dict):
+        candidates.append(token_payload.get('email'))
+        candidates.append(token_payload.get('sub'))
+
+    for candidate in candidates:
+        normalized = _normalize_email(candidate)
+        if normalized:
+            return normalized
+    return None
+
+
+def _build_order_confirmation_subject(order_data: Dict[str, Any]) -> str:
+    order_id = order_data.get('id')
+    if order_id is None:
+        return 'Recibimos tu pedido'
+    return f'Recibimos tu pedido #{order_id}'
+
+
+def _build_order_confirmation_html(order_data: Dict[str, Any]) -> str:
+    brand_name = html_escape(str(os.environ.get('RESEND_BRAND_NAME') or 'DistriAr'))
+    logo_url = (os.environ.get('RESEND_BRAND_LOGO_URL') or '').strip()
+
+    order_id_raw = order_data.get('id')
+    order_id = html_escape(str(order_id_raw if order_id_raw is not None else 'sin-id'))
+
+    created_at_raw = order_data.get('created_at')
+    created_at_text = ''
+    if created_at_raw:
+        try:
+            parsed_dt = datetime.datetime.fromisoformat(str(created_at_raw).replace('Z', '+00:00'))
+            created_at_text = parsed_dt.strftime('%Y-%m-%d %H:%M')
+        except Exception:
+            created_at_text = str(created_at_raw)
+    created_at_text = html_escape(created_at_text) if created_at_text else ''
+
+    total_raw = order_data.get('total')
+    try:
+        total_text = f"${float(total_raw or 0):,.2f}"
+    except Exception:
+        total_text = f"${html_escape(str(total_raw or '0'))}"
+
+    customer_name = order_data.get('user_full_name')
+    if not customer_name:
+        token_preview = order_data.get('_token_preview')
+        if isinstance(token_preview, dict):
+            customer_name = token_preview.get('name')
+    customer_name = html_escape(str(customer_name or 'cliente'))
+
+    email_val = _normalize_email(order_data.get('user_email'))
+    email_text = html_escape(email_val) if email_val else '-'
+
+    address_parts: List[str] = []
+    calle = order_data.get('user_calle')
+    numeracion = order_data.get('user_numeracion')
+    barrio = order_data.get('user_barrio')
+    if calle:
+        address_parts.append(str(calle).strip())
+    if numeracion:
+        address_parts.append(str(numeracion).strip())
+    if barrio:
+        address_parts.append(f"Barrio {str(barrio).strip()}")
+    delivery_address = html_escape(', '.join([p for p in address_parts if p])) if address_parts else '-'
+
+    items = order_data.get('items') if isinstance(order_data.get('items'), list) else []
+    rows: List[str] = []
+    for idx, item in enumerate(items[:25], start=1):
+        if isinstance(item, dict):
+            prod_id_raw = item.get('id', '?')
+            qty_raw = item.get('qty', '?')
+            meta = item.get('meta') if isinstance(item.get('meta'), dict) else {}
+            item_name = meta.get('name') or meta.get('title') or meta.get('product_name')
+            qty_label = meta.get('qty_label')
+        else:
+            prod_id_raw = getattr(item, 'id', '?')
+            qty_raw = getattr(item, 'qty', '?')
+            meta = getattr(item, 'meta', None)
+            meta = meta if isinstance(meta, dict) else {}
+            item_name = meta.get('name') or meta.get('title') or meta.get('product_name')
+            qty_label = meta.get('qty_label')
+
+        try:
+            qty_text = f"{float(qty_raw):g}"
+        except Exception:
+            qty_text = str(qty_raw)
+        if qty_label:
+            qty_text = f"{qty_text} ({str(qty_label)})"
+
+        if not item_name:
+            item_name = f"Producto #{prod_id_raw}"
+
+        rows.append(
+            "<tr>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #edf1f5;color:#1f2937'>{idx}</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #edf1f5;color:#1f2937'>{html_escape(str(item_name))}</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #edf1f5;color:#334155;text-align:right'>{html_escape(qty_text)}</td>"
+            "</tr>"
+        )
+    if not rows:
+        rows.append(
+            "<tr>"
+            "<td colspan='3' style='padding:12px;color:#64748b;border-bottom:1px solid #edf1f5'>Sin detalle de productos</td>"
+            "</tr>"
+        )
+    if len(items) > 25:
+        rows.append(
+            "<tr>"
+            "<td colspan='3' style='padding:10px 12px;color:#64748b'>... y mas productos</td>"
+            "</tr>"
+        )
+
+    logo_block = (
+        f"<img src='{html_escape(logo_url)}' alt='{brand_name}' style='height:42px;display:block;margin:0 0 12px 0;'/>"
+        if logo_url else ""
+    )
+
+    return (
+        "<!doctype html>"
+        "<html><body style='margin:0;padding:0;background:#f3f5f7;font-family:Arial,sans-serif;color:#0f172a;'>"
+        "<table role='presentation' width='100%' cellspacing='0' cellpadding='0' style='background:#f3f5f7;'>"
+        "<tr><td align='center' style='padding:24px 12px;'>"
+        "<table role='presentation' width='640' cellspacing='0' cellpadding='0' "
+        "style='max-width:640px;width:100%;background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden;'>"
+        "<tr><td style='padding:24px 28px;background:#0f172a;color:#f8fafc;'>"
+        f"{logo_block}"
+        "<div style='font-size:22px;font-weight:700;line-height:1.2;'>Pedido recibido</div>"
+        "<div style='margin-top:6px;font-size:14px;color:#cbd5e1;'>Estamos preparando tu pedido.</div>"
+        "</td></tr>"
+        "<tr><td style='padding:24px 28px;'>"
+        f"<p style='margin:0 0 14px 0;font-size:15px;'>Hola {customer_name}, gracias por tu compra.</p>"
+        "<table role='presentation' width='100%' cellspacing='0' cellpadding='0' "
+        "style='border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;margin-bottom:18px;'>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Pedido</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:600;'>#{order_id}</td></tr>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Fecha</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:600;'>{created_at_text or '-'}</td></tr>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Total</td><td style='padding:10px 12px;text-align:right;font-size:15px;color:#0f172a;font-weight:700;'>{total_text}</td></tr>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Email</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:600;'>{email_text}</td></tr>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Entrega</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:600;'>{delivery_address}</td></tr>"
+        "</table>"
+        "<div style='font-size:14px;font-weight:700;color:#0f172a;margin-bottom:8px;'>Detalle del pedido</div>"
+        "<table role='presentation' width='100%' cellspacing='0' cellpadding='0' "
+        "style='border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;'>"
+        "<thead><tr>"
+        "<th align='left' style='padding:10px 12px;background:#f8fafc;font-size:12px;color:#475569;text-transform:uppercase;'>#</th>"
+        "<th align='left' style='padding:10px 12px;background:#f8fafc;font-size:12px;color:#475569;text-transform:uppercase;'>Producto</th>"
+        "<th align='right' style='padding:10px 12px;background:#f8fafc;font-size:12px;color:#475569;text-transform:uppercase;'>Cantidad</th>"
+        "</tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "<p style='margin:18px 0 0 0;font-size:12px;color:#64748b;'>Si necesitas ayuda, responde este correo y te asistimos.</p>"
+        "</td></tr>"
+        "<tr><td style='padding:14px 28px;border-top:1px solid #e5e7eb;color:#64748b;font-size:12px;'>"
+        f"{brand_name} - Confirmacion automatica de pedido"
+        "</td></tr>"
+        "</table>"
+        "</td></tr></table>"
+        "</body></html>"
+    )
+
+
+async def _send_order_confirmation_email(
+    order_data: Optional[Dict[str, Any]],
+    request_data: Optional[Dict[str, Any]] = None,
+    token_payload: Optional[Dict[str, Any]] = None,
+) -> bool:
+    # Configure in environment:
+    # RESEND_API_KEY=re_xxxxxxxxx  (replace re_xxxxxxxxx with your real API key)
+    api_key = (os.environ.get('RESEND_API_KEY') or '').strip()
+    if not api_key:
+        return False
+    if api_key == 're_xxxxxxxxx':
+        logger.warning("RESEND_API_KEY is still 're_xxxxxxxxx'. Replace it with your real API key.")
+        return False
+
+    enabled_raw = (os.environ.get('RESEND_ORDER_CONFIRMATION_ENABLED') or 'true').strip().lower()
+    if enabled_raw in ('0', 'false', 'no', 'off'):
+        return False
+
+    order_payload = order_data if isinstance(order_data, dict) else {}
+    to_email = _extract_customer_email_for_order(order_payload, request_data, token_payload)
+    if not to_email:
+        logger.info(
+            'Skipping Resend confirmation: no customer email found for order id=%s',
+            order_payload.get('id'),
+        )
+        return False
+
+    from_email = (os.environ.get('RESEND_FROM_EMAIL') or 'onboarding@resend.dev').strip()
+    send_payload = {
+        'from': from_email,
+        'to': [to_email],
+        'subject': _build_order_confirmation_subject(order_payload),
+        'html': _build_order_confirmation_html(order_payload),
+    }
+    reply_to = _normalize_email(os.environ.get('RESEND_REPLY_TO'))
+    if reply_to:
+        send_payload['reply_to'] = reply_to
+
+    try:
+        timeout_seconds = float(os.environ.get('RESEND_TIMEOUT_SECONDS') or '12')
+    except Exception:
+        timeout_seconds = 12.0
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            response = await client.post(
+                'https://api.resend.com/emails',
+                headers={
+                    'Authorization': f'Bearer {api_key}',
+                    'Content-Type': 'application/json',
+                },
+                json=send_payload,
+            )
+    except Exception as e:
+        logger.warning('Resend request failed for order id=%s: %s', order_payload.get('id'), e)
+        return False
+
+    if response.status_code >= 400:
+        try:
+            body_preview = response.text[:300]
+        except Exception:
+            body_preview = '<unavailable>'
+        logger.warning(
+            'Resend send failed for order id=%s status=%s body=%s',
+            order_payload.get('id'),
+            response.status_code,
+            body_preview,
+        )
+        return False
+
+    resend_id = None
+    try:
+        resend_id = (response.json() or {}).get('id')
+    except Exception:
+        resend_id = None
+
+    logger.info(
+        'Resend confirmation sent for order id=%s to=%s resend_id=%s',
+        order_payload.get('id'),
+        to_email,
+        resend_id,
+    )
+    return True
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
 
@@ -2650,6 +2925,20 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
                     logger.exception('apply consumos after order failed')
         except Exception:
             logger.exception('post-order product update notifications failed')
+        # Send order confirmation email in background so checkout response is not blocked.
+        try:
+            order_for_email = dict(payload) if isinstance(payload, dict) else {}
+            request_for_email = dict(encoded) if isinstance(encoded, dict) else None
+            token_for_email = dict(token_payload) if isinstance(token_payload, dict) else None
+            asyncio.create_task(
+                _send_order_confirmation_email(
+                    order_data=order_for_email,
+                    request_data=request_for_email,
+                    token_payload=token_for_email,
+                )
+            )
+        except Exception:
+            logger.exception('Could not schedule order confirmation email for id=%s', getattr(order, 'id', None))
         return order
     except HTTPException:
         raise
@@ -2899,6 +3188,30 @@ async def backup_orders(request: Request):
                 finally:
                     db.close()
             created = await anyio.to_thread.run_sync(task_payload)
+            try:
+                created_payload = jsonable_encoder(created)
+            except Exception:
+                created_payload = {
+                    'id': getattr(created, 'id', None),
+                    'items': getattr(created, 'items', None),
+                    'total': getattr(created, 'total', None),
+                    'user_email': getattr(created, 'user_email', None),
+                    'created_at': getattr(created, 'created_at', None),
+                }
+            try:
+                request_payload = dict(it) if isinstance(it, dict) else None
+                asyncio.create_task(
+                    _send_order_confirmation_email(
+                        order_data=created_payload if isinstance(created_payload, dict) else {},
+                        request_data=request_payload,
+                        token_payload=None,
+                    )
+                )
+            except Exception:
+                logger.exception(
+                    'backup_orders: could not schedule confirmation email for id=%s',
+                    created_payload.get('id') if isinstance(created_payload, dict) else None,
+                )
             results.append({'ok': True, 'id': getattr(created, 'id', None)})
         except Exception as e:
             logger.exception('backup_orders: failed to persist order: %s', e)
