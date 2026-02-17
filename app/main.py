@@ -711,6 +711,15 @@ async def _send_order_confirmation_email(
 
     order_payload = order_data if isinstance(order_data, dict) else {}
     to_email = _extract_customer_email_for_order(order_payload, request_data, token_payload)
+    force_to_email = _normalize_email(os.environ.get('RESEND_FORCE_TO_EMAIL'))
+    if force_to_email:
+        logger.info(
+            'RESEND_FORCE_TO_EMAIL active: overriding recipient %s -> %s for order id=%s',
+            to_email,
+            force_to_email,
+            order_payload.get('id'),
+        )
+        to_email = force_to_email
     if not to_email:
         logger.info(
             'Skipping Resend confirmation: no customer email found for order id=%s',
@@ -795,6 +804,7 @@ def _resend_status_snapshot() -> Dict[str, Any]:
         'api_key_placeholder': api_key == 're_xxxxxxxxx',
         'from_email': from_email,
         'reply_to': reply_to,
+        'force_to_email': _normalize_email(os.environ.get('RESEND_FORCE_TO_EMAIL')),
         'require_customer_email': (os.environ.get('ORDER_REQUIRE_CUSTOMER_EMAIL') or 'true').strip().lower() not in ('0', 'false', 'no', 'off'),
     }
 
