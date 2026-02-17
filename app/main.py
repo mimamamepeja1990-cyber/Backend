@@ -344,6 +344,12 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception('Database startup check failed')
 
+    # Log current email delivery configuration once at startup.
+    try:
+        logger.info('Resend config snapshot: %s', _resend_status_snapshot())
+    except Exception:
+        logger.exception('Could not log Resend config snapshot')
+
     db = SessionLocal()
     try:
         try:
@@ -507,6 +513,28 @@ def _extract_customer_email_for_order(
     return None
 
 
+def _resolve_user_email_by_id(user_id: Any) -> Optional[str]:
+    try:
+        uid = int(user_id)
+    except Exception:
+        return None
+    db = SessionLocal()
+    try:
+        try:
+            from app import models as _models
+            user = db.query(_models.User).filter(_models.User.id == uid).first()
+            if not user:
+                return None
+            return _normalize_email(getattr(user, 'email', None))
+        except Exception:
+            return None
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
 def _build_order_confirmation_subject(order_data: Dict[str, Any]) -> str:
     order_id = order_data.get('id')
     if order_id is None:
@@ -659,6 +687,13 @@ async def _send_order_confirmation_email(
     request_data: Optional[Dict[str, Any]] = None,
     token_payload: Optional[Dict[str, Any]] = None,
 ) -> bool:
+    def _masked_key(v: str) -> str:
+        if not v:
+            return ''
+        if len(v) <= 8:
+            return '*' * len(v)
+        return f"{v[:4]}...{v[-4:]}"
+
     # Configure in environment:
     # RESEND_API_KEY=re_xxxxxxxxx  (replace re_xxxxxxxxx with your real API key)
     api_key = (os.environ.get('RESEND_API_KEY') or '').strip()
@@ -684,6 +719,13 @@ async def _send_order_confirmation_email(
         return False
 
     from_email = (os.environ.get('RESEND_FROM_EMAIL') or 'onboarding@resend.dev').strip()
+    logger.info(
+        'Resend send attempt order id=%s to=%s from=%s key=%s',
+        order_payload.get('id'),
+        to_email,
+        from_email,
+        _masked_key(api_key),
+    )
     send_payload = {
         'from': from_email,
         'to': [to_email],
@@ -739,6 +781,22 @@ async def _send_order_confirmation_email(
         resend_id,
     )
     return True
+
+
+def _resend_status_snapshot() -> Dict[str, Any]:
+    api_key = (os.environ.get('RESEND_API_KEY') or '').strip()
+    from_email = (os.environ.get('RESEND_FROM_EMAIL') or 'onboarding@resend.dev').strip()
+    reply_to = _normalize_email(os.environ.get('RESEND_REPLY_TO'))
+    enabled_raw = (os.environ.get('RESEND_ORDER_CONFIRMATION_ENABLED') or 'true').strip().lower()
+    enabled = enabled_raw not in ('0', 'false', 'no', 'off')
+    return {
+        'enabled': enabled,
+        'api_key_present': bool(api_key),
+        'api_key_placeholder': api_key == 're_xxxxxxxxx',
+        'from_email': from_email,
+        'reply_to': reply_to,
+        'require_customer_email': (os.environ.get('ORDER_REQUIRE_CUSTOMER_EMAIL') or 'true').strip().lower() not in ('0', 'false', 'no', 'off'),
+    }
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
 
@@ -1333,6 +1391,53 @@ async def debug_whoami(request: Request):
     except Exception as e:
         logger.exception('debug_whoami failed: %s', e)
         return JSONResponse(status_code=500, content={'ok': False, 'error': str(e)}, headers=headers)
+
+
+@app.post('/debug/test-email')
+async def debug_test_email(request: Request):
+    """Send a test order-confirmation email to validate Resend setup.
+    Requires MIGRATION_SECRET header when configured.
+    """
+    secret = os.environ.get('MIGRATION_SECRET')
+    provided = request.headers.get('x-migrate-secret')
+    if secret and provided != secret:
+        return JSONResponse(status_code=403, content={'error': 'forbidden'})
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    to_email = _normalize_email((body or {}).get('to'))
+    if not to_email:
+        return JSONResponse(
+            status_code=400,
+            content={'error': 'missing_to', 'detail': 'Provide a valid `to` email in JSON body.'},
+        )
+
+    test_order = {
+        'id': body.get('order_id') or f"test-{int(time.time())}",
+        'total': body.get('total') if body.get('total') is not None else 0,
+        'items': body.get('items') if isinstance(body.get('items'), list) else [{'id': 'TEST', 'qty': 1}],
+        'user_email': to_email,
+        'user_full_name': body.get('name') or 'Cliente test',
+        'created_at': datetime.datetime.utcnow().isoformat(),
+    }
+
+    ok = await _send_order_confirmation_email(
+        order_data=test_order,
+        request_data={'user_email': to_email},
+        token_payload=None,
+    )
+    return JSONResponse(
+        status_code=200,
+        content={
+            'ok': bool(ok),
+            'to': to_email,
+            'order_id': test_order['id'],
+            'config': _resend_status_snapshot(),
+        },
+    )
 
 
 
@@ -2673,6 +2778,55 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
             # Non-fatal: ignore if we cannot mutate the payload
             pass
 
+    # Resolve customer email before creating the order.
+    # Priority: payload/request -> token -> users table by user_id.
+    try:
+        encoded_for_email = encoded if isinstance(encoded, dict) else {}
+        inferred_email = _extract_customer_email_for_order(
+            order_data=encoded_for_email,
+            request_data=encoded_for_email,
+            token_payload=token_payload if isinstance(token_payload, dict) else None,
+        )
+        if not inferred_email:
+            uid_candidate = None
+            try:
+                uid_candidate = getattr(payload, 'user_id', None)
+            except Exception:
+                uid_candidate = None
+            if uid_candidate is None and isinstance(encoded_for_email, dict):
+                uid_candidate = encoded_for_email.get('user_id')
+            if uid_candidate is not None:
+                inferred_email = _resolve_user_email_by_id(uid_candidate)
+
+        if inferred_email:
+            try:
+                if not getattr(payload, 'user_email', None):
+                    setattr(payload, 'user_email', inferred_email)
+            except Exception:
+                try:
+                    payload.user_email = inferred_email
+                except Exception:
+                    pass
+            try:
+                if isinstance(encoded_for_email, dict) and not encoded_for_email.get('user_email'):
+                    encoded_for_email['user_email'] = inferred_email
+            except Exception:
+                pass
+        else:
+            require_email_raw = (os.environ.get('ORDER_REQUIRE_CUSTOMER_EMAIL') or 'true').strip().lower()
+            require_email = require_email_raw not in ('0', 'false', 'no', 'off')
+            if require_email:
+                logger.warning('create_order blocked: missing customer email in payload/token/user profile')
+                raise HTTPException(
+                    status_code=400,
+                    detail='Customer email is required to confirm the order. Please provide user_email.',
+                )
+            logger.info('create_order continuing without customer email because ORDER_REQUIRE_CUSTOMER_EMAIL is disabled')
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception('create_order: could not normalize customer email')
+
     # Infer source from headers or payload: prefer explicit payload.source, then header 'X-Client-Platform' or 'X-Source'.
     # Si el payload no trae source, o viene vacío, se infiere SIEMPRE aquí y se fuerza el valor correcto.
     try:
@@ -3177,12 +3331,28 @@ async def backup_orders(request: Request):
     results = []
     for it in items:
         try:
+            request_payload = dict(it) if isinstance(it, dict) else {}
+            inferred_email = _extract_customer_email_for_order(
+                order_data=request_payload,
+                request_data=request_payload,
+                token_payload=None,
+            )
+            if not inferred_email and isinstance(request_payload, dict) and request_payload.get('user_id') is not None:
+                inferred_email = _resolve_user_email_by_id(request_payload.get('user_id'))
+            require_email_raw = (os.environ.get('ORDER_REQUIRE_CUSTOMER_EMAIL') or 'true').strip().lower()
+            require_email = require_email_raw not in ('0', 'false', 'no', 'off')
+            if require_email and not inferred_email:
+                results.append({'ok': False, 'error': 'missing_user_email'})
+                continue
+            if inferred_email and isinstance(request_payload, dict) and not request_payload.get('user_email'):
+                request_payload['user_email'] = inferred_email
+            payload_to_parse = request_payload if isinstance(request_payload, dict) and request_payload else it
             # Normalize into OrderCreate schema
             try:
-                order_schema = schemas.OrderCreate.parse_obj(it)
+                order_schema = schemas.OrderCreate.parse_obj(payload_to_parse)
             except Exception:
                 # Try simple coercion for common shapes
-                order_schema = schemas.OrderCreate(**it)
+                order_schema = schemas.OrderCreate(**payload_to_parse)
             def task_payload(sch=order_schema):
                 db = SessionLocal()
                 try:
@@ -3201,11 +3371,10 @@ async def backup_orders(request: Request):
                     'created_at': getattr(created, 'created_at', None),
                 }
             try:
-                request_payload = dict(it) if isinstance(it, dict) else None
                 asyncio.create_task(
                     _send_order_confirmation_email(
                         order_data=created_payload if isinstance(created_payload, dict) else {},
-                        request_data=request_payload,
+                        request_data=request_payload if isinstance(request_payload, dict) else None,
                         token_payload=None,
                     )
                 )
