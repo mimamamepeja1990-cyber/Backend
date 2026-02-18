@@ -254,6 +254,7 @@ const promoProductsList = document.getElementById('promoProductsList');
 const promoType = document.getElementById('promoType');
 const promoValue = document.getElementById('promoValue');
 const promoValueField = document.getElementById('promoValueField');
+const promoValidUntil = document.getElementById('promoValidUntil');
 const savePromoBtn = document.getElementById('savePromoBtn');
 const cancelPromoBtn = document.getElementById('cancelPromoBtn');
 const promoSearch = document.getElementById('promoSearch');
@@ -1381,14 +1382,59 @@ function loadPromotions(){
 function savePromotions(promos){
   try{ localStorage.setItem(PROMO_KEY, JSON.stringify(promos || [])); }catch(e){ console.warn('savePromotions failed', e); }
 }
+
+function parsePromoDate(value){
+  if (!value) return null;
+  try{
+    const raw = String(value).trim();
+    if (!raw) return null;
+    const normalized = raw.endsWith('Z') ? raw : raw.replace(' ', 'T');
+    const dt = new Date(normalized);
+    if (Number.isNaN(dt.getTime())) return null;
+    return dt;
+  }catch(_){ return null; }
+}
+
+function promoInputToIso(value){
+  const dt = parsePromoDate(value);
+  return dt ? dt.toISOString() : null;
+}
+
+function isoToPromoInput(value){
+  const dt = parsePromoDate(value);
+  if (!dt) return '';
+  const local = new Date(dt.getTime() - (dt.getTimezoneOffset() * 60000));
+  return local.toISOString().slice(0, 16);
+}
+
+function formatPromoValidity(value){
+  const dt = parsePromoDate(value);
+  if (!dt) return '<span class="muted">Sin vencimiento</span>';
+  return dt.toLocaleString('es-AR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+function isPromoExpired(value){
+  const dt = parsePromoDate(value);
+  if (!dt) return false;
+  return dt.getTime() < Date.now();
+}
+
 function renderPromotions(){
   try{
     const promos = loadPromotions();
     if(!promotionsTableBody) return;
     promotionsTableBody.innerHTML = '';
     for(const p of (promos || [])){
+      const validity = formatPromoValidity(p.valid_until);
+      const expiredClass = isPromoExpired(p.valid_until) ? ' style="color:#b42318;font-weight:700"' : '';
       const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${escapeHtml(p.name)}</td><td>${p.type || ''}${p.type === 'percent' && p.value ? ' ('+p.value+'%)' : ''}</td><td>${(p.productIds||[]).length}</td><td><button data-id="${p.id}" class="editPromo btn">Editar</button><button data-id="${p.id}" class="delPromo btn">Eliminar</button></td>`;
+      tr.innerHTML = `<td>${escapeHtml(p.name)}</td><td>${p.type || ''}${p.type === 'percent' && p.value ? ' ('+p.value+'%)' : ''}</td><td${expiredClass}>${validity}</td><td>${(p.productIds||[]).length}</td><td><button data-id="${p.id}" class="editPromo btn">Editar</button><button data-id="${p.id}" class="delPromo btn">Eliminar</button></td>`;
       promotionsTableBody.appendChild(tr);
     }
     document.querySelectorAll('.delPromo').forEach(btn => btn.onclick = () => { deletePromotion(btn.dataset.id); });
@@ -1752,7 +1798,12 @@ async function openPromoModal(editId){
     try{ console.log('[admin] promoModal classes after open:', promoModal.className, 'computed-display:', getComputedStyle(promoModal).display, 'zIndex:', getComputedStyle(promoModal).zIndex); }catch(e){}
   }catch(e){ console.error('[admin] error opening promo modal', e); showToast('Error abriendo el modal', 'error'); }
   currentPromotionEditId = editId;
-  if(promoName) promoName.value = ''; if(promoDesc) promoDesc.value = '';
+  if(promoName) promoName.value = '';
+  if(promoDesc) promoDesc.value = '';
+  if(promoType) promoType.value = 'percent';
+  if(promoValue) promoValue.value = '';
+  if(promoValueField) promoValueField.style.display = 'block';
+  if(promoValidUntil) promoValidUntil.value = '';
   if(savePromoBtn) savePromoBtn.disabled = true;
   if(promoProductsList) promoProductsList.innerHTML = 'Cargando productos...';
   let products = [];
@@ -1765,9 +1816,9 @@ async function openPromoModal(editId){
   if(!allProductsCache.length){ if(promoProductsList) promoProductsList.innerHTML = '<div class="empty">No se encontraron productos</div>'; }
   else { renderPromoProductsList(allProductsCache); }
   if(editId){
-  const promos = loadPromotions(); const p = promos.find(x => x.id == editId); if(p){ if(promoName) promoName.value = p.name; if(promoDesc) promoDesc.value = p.description || ''; }
+  const promos = loadPromotions(); const p = promos.find(x => x.id == editId); if(p){ if(promoName) promoName.value = p.name; if(promoDesc) promoDesc.value = p.description || ''; if(promoType) promoType.value = p.type || 'percent'; if(promoValue) promoValue.value = (p.value != null ? String(p.value) : ''); if(promoValueField) promoValueField.style.display = (promoType && promoType.value === 'percent') ? 'block' : 'none'; if(promoValidUntil) promoValidUntil.value = isoToPromoInput(p.valid_until); }
     // mark selected products
-  setTimeout(()=>{ if(editId){ const promos = loadPromotions(); const p = promos.find(x=> x.id == editId); if(p && promoProductsList){ p.productIds.forEach(pid => { const cb = promoProductsList.querySelector(`input[data-id='${pid}']`); if(cb) cb.checked = true; }); } } }, 80);
+  setTimeout(()=>{ if(editId){ const promos = loadPromotions(); const p = promos.find(x=> x.id == editId); if(p && promoProductsList){ p.productIds.forEach(pid => { const cb = promoProductsList.querySelector(`input[data-id='${pid}']`); if(cb) cb.checked = true; }); } } try{ updateSavePromoBtn(); }catch(_){ } }, 80);
   }
   // focus first input to make it obvious modal opened
   setTimeout(()=>{ try{ if(promoName) promoName.focus(); }catch(e){} }, 80);
@@ -1780,10 +1831,11 @@ function closePromoModal(){ promoModal.classList.add('hidden'); promoModal.setAt
 
 function renderPromoProductsList(products){ promoProductsList.innerHTML = ''; for(const pr of products){ const div = document.createElement('div'); div.className = 'promo-product-row'; div.innerHTML = `<input type="checkbox" data-id="${pr.id}" id="promo-p-${pr.id}" /><label for="promo-p-${pr.id}">${pr.name} <small class="muted">${pr.category||''}</small></label>`; promoProductsList.appendChild(div); } }
 
-function updateSavePromoBtn(){ const name = promoName.value.trim(); const anyChecked = Array.from(promoProductsList.querySelectorAll('input[type=checkbox]')).some(cb => cb.checked); let ok = (name && anyChecked); try{ if(promoType && promoType.value === 'percent'){ const v = Number(promoValue.value); ok = ok && !isNaN(v) && v > 0; } }catch(e){}; if(savePromoBtn) savePromoBtn.disabled = !ok; }
+function updateSavePromoBtn(){ const name = promoName.value.trim(); const anyChecked = Array.from(promoProductsList.querySelectorAll('input[type=checkbox]')).some(cb => cb.checked); let ok = (name && anyChecked); try{ if(promoType && promoType.value === 'percent'){ const v = Number(promoValue.value); ok = ok && !isNaN(v) && v > 0; } }catch(e){}; try{ const hasValidUntil = !!promoInputToIso(promoValidUntil && promoValidUntil.value ? promoValidUntil.value : ''); ok = ok && hasValidUntil; }catch(e){}; if(savePromoBtn) savePromoBtn.disabled = !ok; }
 // When type is percent, ensure a value is entered
 if(promoType) promoType.onchange = () => { try{ if(promoType.value === 'percent'){ if(promoValueField) promoValueField.style.display = 'block'; } else { if(promoValueField) promoValueField.style.display = 'none'; } }catch(e){}; updateSavePromoBtn(); };
 if(promoValue) promoValue.oninput = () => { updateSavePromoBtn(); };
+if(promoValidUntil) promoValidUntil.oninput = () => { updateSavePromoBtn(); };
 
 function filterPromoProducts(q){ q = (q||'').toLowerCase(); const filtered = allProductsCache.filter(p => !q || p.name.toLowerCase().includes(q) || (p.brand||'').toLowerCase().includes(q)); renderPromoProductsList(filtered); }
 
@@ -1791,7 +1843,10 @@ async function savePromo(){ const name = promoName.value.trim(); const desc = pr
   // compute type and value
   const type = (promoType && promoType.value) ? promoType.value : 'percent';
   const value = (promoValue && promoValue.value) ? Number(promoValue.value) : null;
-  let promos = loadPromotions(); if(currentPromotionEditId){ const idx = promos.findIndex(x=> x.id == currentPromotionEditId); if(idx > -1){ promos[idx].name = name; promos[idx].description = desc; promos[idx].productIds = checked; promos[idx].type = type; promos[idx].value = value; } }else{ const p = { id: Date.now(), name, description: desc, productIds: checked, type, value }; promos.push(p); }
+  const validUntilRaw = promoValidUntil && promoValidUntil.value ? promoValidUntil.value.trim() : '';
+  const validUntilIso = promoInputToIso(validUntilRaw);
+  if(!validUntilIso){ return showToast('Defini hasta cuando dura la promocion', 'error'); }
+  let promos = loadPromotions(); if(currentPromotionEditId){ const idx = promos.findIndex(x=> x.id == currentPromotionEditId); if(idx > -1){ promos[idx].name = name; promos[idx].description = desc; promos[idx].productIds = checked; promos[idx].type = type; promos[idx].value = value; promos[idx].valid_until = validUntilIso; } }else{ const p = { id: Date.now(), name, description: desc, productIds: checked, type, value, valid_until: validUntilIso }; promos.push(p); }
   savePromotions(promos); renderPromotions(); closePromoModal(); showToast('Promoción guardada');
   console.log('[admin] saved promotions to localStorage, count=', (promos || []).length, promos);
   // Broadcast promotions update to other tabs/pages (same-origin)
@@ -1845,7 +1900,7 @@ if(promoModalClose) promoModalClose.onclick = ()=> closePromoModal();
 if(cancelPromoBtn) cancelPromoBtn.onclick = ()=> closePromoModal();
 if(savePromoBtn) savePromoBtn.onclick = ()=> savePromo();
 if(promoProductSearch) promoProductSearch.oninput = (e)=> filterPromoProducts(e.target.value);
-if(promoSearch) promoSearch.oninput = (e)=> { const q = e.target.value.toLowerCase(); const promos = loadPromotions().filter(ps => ps.name.toLowerCase().includes(q) || (ps.description||'').toLowerCase().includes(q)); promotionsTableBody.innerHTML = ''; for(const p of promos){ const tr = document.createElement('tr'); tr.innerHTML = `<td>${p.name}</td><td>${p.type || ''}${p.type === 'percent' && p.value ? ' ('+p.value+'%)' : ''}</td><td>${(p.productIds||[]).length}</td><td><button data-id="${p.id}" class="editPromo btn">Editar</button><button data-id="${p.id}" class="delPromo btn">Eliminar</button></td>`; promotionsTableBody.appendChild(tr); } document.querySelectorAll('.delPromo').forEach(btn => btn.onclick = () => { deletePromotion(btn.dataset.id); }); document.querySelectorAll('.editPromo').forEach(btn => btn.onclick = () => { editPromotion(btn.dataset.id); }); }
+if(promoSearch) promoSearch.oninput = (e)=> { const q = e.target.value.toLowerCase(); const promos = loadPromotions().filter(ps => ps.name.toLowerCase().includes(q) || (ps.description||'').toLowerCase().includes(q)); promotionsTableBody.innerHTML = ''; for(const p of promos){ const tr = document.createElement('tr'); const validity = formatPromoValidity(p.valid_until); const expiredClass = isPromoExpired(p.valid_until) ? ' style="color:#b42318;font-weight:700"' : ''; tr.innerHTML = `<td>${p.name}</td><td>${p.type || ''}${p.type === 'percent' && p.value ? ' ('+p.value+'%)' : ''}</td><td${expiredClass}>${validity}</td><td>${(p.productIds||[]).length}</td><td><button data-id="${p.id}" class="editPromo btn">Editar</button><button data-id="${p.id}" class="delPromo btn">Eliminar</button></td>`; promotionsTableBody.appendChild(tr); } document.querySelectorAll('.delPromo').forEach(btn => btn.onclick = () => { deletePromotion(btn.dataset.id); }); document.querySelectorAll('.editPromo').forEach(btn => btn.onclick = () => { editPromotion(btn.dataset.id); }); }
 if(exportPromosBtn) exportPromosBtn.onclick = ()=>{
   try{
     const promos = loadPromotions(); const blob = new Blob([JSON.stringify(promos, null, 2)], {type:'application/json'});

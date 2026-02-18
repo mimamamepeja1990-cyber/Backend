@@ -2996,20 +2996,107 @@ def write_catalog_snapshot():
         logger.exception('write_catalog_snapshot: remote backup step failed')
 
 
+def _parse_promo_datetime(value: Any) -> Optional[datetime.datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime.datetime):
+        dt = value
+    else:
+        try:
+            raw = str(value).strip()
+        except Exception:
+            return None
+        if not raw:
+            return None
+        # Accept common ISO forms, including trailing Z.
+        if raw.endswith('Z'):
+            raw = raw[:-1] + '+00:00'
+        try:
+            dt = datetime.datetime.fromisoformat(raw)
+        except Exception:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    else:
+        dt = dt.astimezone(datetime.timezone.utc)
+    return dt
+
+
+def _normalize_promotion_entry(entry: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(entry, dict):
+        return None
+    out = dict(entry)
+
+    # Normalize common aliases and preserve unknown keys.
+    product_ids = out.get('productIds')
+    if product_ids is None:
+        product_ids = out.get('product_ids')
+    if isinstance(product_ids, list):
+        norm_ids = []
+        for pid in product_ids:
+            if pid is None:
+                continue
+            try:
+                s = str(pid).strip()
+                if not s:
+                    continue
+                norm_ids.append(int(s) if s.isdigit() else s)
+            except Exception:
+                continue
+        out['productIds'] = norm_ids
+
+    if 'type' in out and out.get('type') is not None:
+        try:
+            out['type'] = str(out.get('type')).strip().lower()
+        except Exception:
+            pass
+
+    if 'value' in out and out.get('value') is not None:
+        try:
+            out['value'] = float(out.get('value'))
+        except Exception:
+            pass
+
+    valid_until_raw = (
+        out.get('valid_until')
+        if out.get('valid_until') is not None
+        else out.get('validUntil')
+    )
+    valid_until_dt = _parse_promo_datetime(valid_until_raw)
+    if valid_until_dt:
+        out['valid_until'] = valid_until_dt.isoformat().replace('+00:00', 'Z')
+    elif valid_until_raw is not None:
+        out['valid_until'] = None
+
+    return out
+
+
+def _normalize_promotions_payload(promos: Any) -> List[Dict[str, Any]]:
+    if not isinstance(promos, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in promos:
+        normalized = _normalize_promotion_entry(item)
+        if normalized is not None:
+            out.append(normalized)
+    return out
+
+
 def write_promotions_snapshot(promos):
     """Write promotions snapshot to catalog directory so frontend/admin can read/write a canonical file."""
     try:
+        normalized_promos = _normalize_promotions_payload(promos or [])
         if not os.path.exists(CATALOG_DIR):
             os.makedirs(CATALOG_DIR, exist_ok=True)
         path = os.path.join(CATALOG_DIR, "promotions.json")
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(promos or [], f, indent=2, ensure_ascii=False)
+            json.dump(normalized_promos, f, indent=2, ensure_ascii=False)
         logger.info('promotions snapshot written to %s', path)
         # best-effort: also push promotions to configured gist backup
         try:
             if GIST_TOKEN and GIST_ID:
                 url = f"https://api.github.com/gists/{GIST_ID}"
-                payload = {"files": {"promotions.json": {"content": json.dumps(promos or [], ensure_ascii=False, indent=2)}}}
+                payload = {"files": {"promotions.json": {"content": json.dumps(normalized_promos, ensure_ascii=False, indent=2)}}}
                 try:
                     resp = httpx.patch(url, json=payload, headers={"Authorization": f"token {GIST_TOKEN}", "Accept": "application/vnd.github.v3+json"}, timeout=15)
                     if resp.status_code >= 200 and resp.status_code < 300:
@@ -3031,7 +3118,7 @@ def list_promotions():
         path = os.path.join(CATALOG_DIR, 'promotions.json')
         if os.path.exists(path):
             with open(path, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                return _normalize_promotions_payload(json.load(f))
     except Exception as e:
         logger.exception('list_promotions failed: %s', e)
     return []
@@ -3041,11 +3128,12 @@ def list_promotions():
 def save_promotions(promos: List[Dict[str, Any]]):
     """Persist promotions snapshot (admin may send the full array)."""
     try:
-        logger.info('Received /promotions POST, count=%s', len(promos or []))
-        ok = write_promotions_snapshot(promos)
+        normalized_promos = _normalize_promotions_payload(promos or [])
+        logger.info('Received /promotions POST, count=%s', len(normalized_promos))
+        ok = write_promotions_snapshot(normalized_promos)
         if not ok:
             raise HTTPException(status_code=500, detail='failed to write promotions')
-        return { 'detail': 'ok', 'count': len(promos or []) }
+        return { 'detail': 'ok', 'count': len(normalized_promos) }
     except HTTPException:
         raise
     except Exception as e:
