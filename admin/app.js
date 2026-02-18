@@ -758,18 +758,11 @@ async function onDelete(id){
 }
 
 // --- Orders (admin) ---
-// We now have two sections: web and app. Controls are suffixed with _web/_app.
+// Orders section is Web-only.
 const orderSearch_web = document.getElementById('orderSearch_web');
 const orderDate_web = document.getElementById('orderDate_web');
 const clearOrderDate_web = document.getElementById('clearOrderDate_web');
 const refreshOrdersBtn_web = document.getElementById('refreshOrdersBtn_web');
-
-const orderSearch_app = document.getElementById('orderSearch_app');
-const orderDate_app = document.getElementById('orderDate_app');
-const clearOrderDate_app = document.getElementById('clearOrderDate_app');
-const refreshOrdersBtn_app = document.getElementById('refreshOrdersBtn_app');
-
-let orderSourceFilter = '';
 
 // source-filter buttons were removed to avoid duplication with the tab UI
 // The clear cache control is available in the Orders tab UI (`clearOrderCache`).
@@ -840,16 +833,11 @@ async function verifyServerHasOrder(id, attempts = 6, interval = 2000){
           try{
               const srv = list[0] || {};
               const hasUserInfo = !!(srv.user_full_name || srv.user_email || srv.user_id || (srv._token_preview && (srv._token_preview.email || srv._token_preview.name)) );
-              const srvSrc = String((srv.source || 'web')).toLowerCase();
-              // update any row in the DOM to remove pending marker (search across both tables)
-              // but do NOT remove or delete local/app rows when the server reports this as 'web'.
-              document.querySelectorAll('table[id^="ordersTable"] tbody tr').forEach(r => {
+              // update pending state only in the Web table
+              document.querySelectorAll('#ordersTable_web tbody tr').forEach(r => {
                 try{
                   if(String((r.children && r.children[0] && r.children[0].textContent) || '').trim() !== String(id)) return;
-                  const rowSrc = (r.getAttribute && (r.getAttribute('data-source') || '')).toLowerCase();
                   const isLocal = r.getAttribute && r.getAttribute('data-local-insert');
-                  const localPayload = (window.__localOrderRows && window.__localOrderRows[id] && window.__localOrderRows[id].payload) || {};
-                  const localPayloadSrc = String(localPayload.source || '').toLowerCase();
                   // Si el pedido ya tiene created_at, limpiar caché local y estado pendiente
                   if (srv && srv.created_at) {
                     try { delete window.__localOrderRows[id]; window.__localOrderIds && window.__localOrderIds.delete(String(id)); saveLocalOrderCache && saveLocalOrderCache(); } catch(_){}
@@ -858,30 +846,27 @@ async function verifyServerHasOrder(id, attempts = 6, interval = 2000){
                     r.classList.remove('pending-sync-resolved');
                     return;
                   }
-                  const preserveBecauseApp = (rowSrc === 'app' || localPayloadSrc === 'app' || !!isLocal) && srvSrc === 'web';
-                  if(preserveBecauseApp){
-                    if(hasUserInfo){ r.classList.remove('pending-sync'); r.classList.add('pending-sync-resolved'); }
-                    else { r.setAttribute('data-local-insert','1'); r.classList.add('pending-sync'); }
+                  if(!!isLocal && !hasUserInfo){
+                    r.setAttribute('data-local-insert','1');
+                    r.classList.add('pending-sync');
                   } else {
-                    if(hasUserInfo){ r.removeAttribute('data-local-insert'); r.classList.remove('pending-sync'); }
-                    else { r.setAttribute('data-local-insert','1'); r.classList.add('pending-sync'); }
+                    if(hasUserInfo){
+                      r.removeAttribute('data-local-insert');
+                      r.classList.remove('pending-sync');
+                      r.classList.remove('pending-sync-resolved');
+                    } else {
+                      r.setAttribute('data-local-insert','1');
+                      r.classList.add('pending-sync');
+                    }
                   }
                 }catch(_){ }
               });
-              // If server returned user info and this is NOT a preserved local/app row, we can clear the local cache; otherwise keep it so we can merge token preview into later renders
+              // Si ya hay datos de usuario en servidor (o fecha persistida), limpiar cache local.
               try{
-                const shouldDeleteLocal = (() => {
-                  try{
-                    const rec = window.__localOrderRows && window.__localOrderRows[id];
-                    const localPayloadSrc = rec && rec.payload ? String(rec.payload.source || '').toLowerCase() : '';
-                    // if local/app is present and server says web, do not delete
-                    if((localPayloadSrc === 'app') && srvSrc === 'web') return false;
-                    return hasUserInfo;
-                  }catch(_){ return hasUserInfo; }
-                })();
+                const shouldDeleteLocal = !!hasUserInfo || !!(srv && srv.created_at);
                 if(shouldDeleteLocal){ try{ delete window.__localOrderRows[id]; window.__localOrderIds.delete(String(id)); try{ saveLocalOrderCache(); }catch(_){ } }catch(_){ } }
               }catch(_){ }
-              try{ console.debug('[admin] verifyServerHasOrder: server-confirmed', id, 'hasUserInfo=', hasUserInfo, 'srvSrc=', srvSrc); }catch(_){ }
+              try{ console.debug('[admin] verifyServerHasOrder: server-confirmed', id, 'hasUserInfo=', hasUserInfo); }catch(_){ }
           }catch(_){ }
           return true;
         }
@@ -992,15 +977,13 @@ function renderOrders(list, source, dateFilter){
     return;
   }
 
-  // Si source es 'todos', no filtrar; si es 'web' o 'app', filtrar por source estrictamente
-  try {
-    if (String(source).toLowerCase() !== 'todos') {
-      list = (list || []).filter(o => {
-        let osrc = (o && typeof o.source !== 'undefined' && o.source !== null && String(o.source).trim() !== '') ? String(o.source) : 'web';
-        return String(osrc).toLowerCase() === String(source).toLowerCase();
-      });
-    }
-  } catch (_){ }
+  // El panel de pedidos ahora es solo Web.
+  try{
+    list = (list || []).filter(o => {
+      const osrc = (o && typeof o.source !== 'undefined' && o.source !== null && String(o.source).trim() !== '') ? String(o.source) : 'web';
+      return String(osrc).toLowerCase() === 'web';
+    });
+  }catch(_){ }
   // Agrupar por día y deduplicar por id (siempre mostrar solo una vez por tabla)
   const groups = new Map();
   const seenIds = new Set();
@@ -1051,8 +1034,8 @@ function renderOrders(list, source, dateFilter){
       try{
         const rec = window.__localOrderRows[lid];
         if(!rec || !rec.payload) continue;
-        const recSource = String((rec.payload.source||'')).toLowerCase();
-        if(String(recSource) !== String(source).toLowerCase()) continue;
+        const recSource = String((rec.payload.source||'web')).toLowerCase();
+        if(recSource !== 'web') continue;
         const ageOk = (Date.now() - (rec.ts||0)) < (1000*60*60*24);
         const hasUserInfo = !!(rec.payload.user_full_name || rec.payload.user_email || (rec.payload._token_preview && (rec.payload._token_preview.name || rec.payload._token_preview.email)));
         const isPending = !!rec.pending || !(rec.payload && rec.payload.created_at);
@@ -1146,131 +1129,70 @@ function orderRowFor(o){
 
 function insertOrderAtTop(o, source){
   try{
-    // Siempre insertar primero en 'todos'.
-    const oid = String(o && o.id || '');
+    const oid = String((o && o.id) || '');
+    if(!oid) return;
+
     let effectiveSource = source;
     try{ if(!effectiveSource && o && o.source) effectiveSource = o.source; }catch(_){ }
-    try{ if(!effectiveSource && window.__localOrderRows && window.__localOrderRows[oid] && window.__localOrderRows[oid].payload && window.__localOrderRows[oid].payload.source) effectiveSource = window.__localOrderRows[oid].payload.source; }catch(_){ }
-    // Insertar en 'todos' siempre
-    const todosTableBody = document.querySelector('#ordersTable_todos tbody');
-    if(todosTableBody) {
-      let found = false;
-      todosTableBody.querySelectorAll('tr').forEach(r => {
-        if(String((r.children && r.children[0] && r.children[0].textContent) || '').trim() === String(o.id)) found = true;
-      });
-      if(!found) {
-        const trTodos = orderRowFor(o);
-        try{ trTodos.setAttribute('data-source', String(effectiveSource || 'web')); }catch(_){ }
-        todosTableBody.insertBefore(trTodos, todosTableBody.firstChild);
-        try{ regroupOrdersForTable('todos'); }catch(_){ }
+    try{
+      if(!effectiveSource && window.__localOrderRows && window.__localOrderRows[oid] && window.__localOrderRows[oid].payload && window.__localOrderRows[oid].payload.source){
+        effectiveSource = window.__localOrderRows[oid].payload.source;
       }
-      updateBadgeCount('todos');
+    }catch(_){ }
+
+    const normalizedSource = String(effectiveSource || 'web').toLowerCase();
+    if(normalizedSource !== 'web') return;
+
+    const ordersTableBody = document.querySelector('#ordersTable_web tbody');
+    if(!ordersTableBody) return;
+
+    try{
+      window.__localOrderRows = window.__localOrderRows || {};
+      window.__localOrderIds = window.__localOrderIds || new Set();
+    }catch(_){
+      window.__localOrderRows = window.__localOrderRows || {};
+      window.__localOrderIds = window.__localOrderIds || new Set();
     }
 
-    // Solo insertar en la tabla específica si el pedido ya tiene created_at (confirmado por backend)
-    // Y solo en la pestaña que corresponde a su source, nunca en la otra
-    if(o.created_at && effectiveSource && ['web','app'].includes(String(effectiveSource).toLowerCase())) {
-      if(String(effectiveSource).toLowerCase() === 'app') {
-        // Nunca insertar en web si es de app
-        const tableId = 'ordersTable_app';
-        const ordersTableBody = document.querySelector(`#${tableId} tbody`);
-        if(ordersTableBody) {
-          let found = false;
-          ordersTableBody.querySelectorAll('tr').forEach(r => {
-            if(String((r.children && r.children[0] && r.children[0].textContent) || '').trim() === String(o.id)) found = true;
-          });
-          if(!found) {
-            const tr = orderRowFor(o);
-            try{ tr.setAttribute('data-source', 'app'); }catch(_){ }
-            ordersTableBody.insertBefore(tr, ordersTableBody.firstChild);
-            try{ regroupOrdersForTable('app'); }catch(_){ }
-          }
-          updateBadgeCount('app');
-        }
-      } else if (String(effectiveSource).toLowerCase() === 'web') {
-        // Nunca insertar en app si es de web
-        const tableId = 'ordersTable_web';
-        const ordersTableBody = document.querySelector(`#${tableId} tbody`);
-        if(ordersTableBody) {
-          let found = false;
-          ordersTableBody.querySelectorAll('tr').forEach(r => {
-            if(String((r.children && r.children[0] && r.children[0].textContent) || '').trim() === String(o.id)) found = true;
-          });
-          if(!found) {
-            const tr = orderRowFor(o);
-            try{ tr.setAttribute('data-source', 'web'); }catch(_){ }
-            ordersTableBody.insertBefore(tr, ordersTableBody.firstChild);
-            try{ regroupOrdersForTable('web'); }catch(_){ }
-          }
-          updateBadgeCount('web');
-        }
-      }
-    }
-    // initialize local insert cache if not present
-    try{ window.__localOrderRows = window.__localOrderRows || {}; window.__localOrderIds = window.__localOrderIds || new Set(); }catch(_){ window.__localOrderRows = window.__localOrderRows || {}; window.__localOrderIds = window.__localOrderIds || new Set(); }
-    // avoid duplicates: if a row with this id exists in the current table, skip inserting
     let found = false;
     ordersTableBody.querySelectorAll('tr').forEach(r => {
-      if(String((r.children && r.children[0] && r.children[0].textContent) || '').trim() === String(o.id)) found = true;
+      if(String((r.children && r.children[0] && r.children[0].textContent) || '').trim() === oid) found = true;
     });
     if(found) return;
+
     const tr = orderRowFor(o);
-    // mark row as locally-inserted for diagnostics and tag its source
-    try{ tr.setAttribute('data-local-insert', '1'); tr.classList.add('pending-sync'); if(effectiveSource) tr.setAttribute('data-source', String(effectiveSource)); }catch(_){ }
-    ordersTableBody.insertBefore(tr, ordersTableBody.firstChild);
-    try{ regroupOrdersForTable(effectiveSource); }catch(_){ }
-    try{ console.debug('[admin] insertOrderAtTop inserted', o.id, 'source=' + effectiveSource); }catch(_){ }
-    // remove duplicates with same id from other source tables so item only appears in its correct tab
-    try {
-      const oidStr = String(o.id);
-      const otherSources = ['web','app'].filter(s => s !== String(effectiveSource));
-      for (const os of otherSources) {
-        try {
-          const otherTable = document.querySelector(`#ordersTable_${os} tbody`);
-          if (!otherTable) continue;
-          Array.from(otherTable.querySelectorAll('tr')).forEach(rr => {
-            try {
-              const rid = String((rr.children && rr.children[0] && rr.children[0].textContent) || '').trim();
-              if (rid !== oidStr) return;
-              const isLocal = rr.getAttribute && rr.getAttribute('data-local-insert');
-              const rowSrc = rr.getAttribute && (rr.getAttribute('data-source') || '').toLowerCase();
-              const localCache = (window.__localOrderRows || {})[String(rid)];
-              const localPayloadSrc = localCache && localCache.payload ? String(localCache.payload.source || '').toLowerCase() : '';
-              // Si la fila es local y el backend la devuelve como 'web', eliminar la fila local de app
-              if (os === 'app' && effectiveSource === 'web' && isLocal && (rowSrc === 'app' || localPayloadSrc === 'app')) {
-                rr.parentNode && rr.parentNode.removeChild(rr);
-                try { delete window.__localOrderRows[rid]; window.__localOrderIds.delete(String(rid)); saveLocalOrderCache(); } catch(_){}
-                return;
-              }
-              // Si la fila local o el cache tiene source 'app', nunca eliminar ni reemplazar por 'web'
-              if (isLocal && (rowSrc === 'app' || localPayloadSrc === 'app')) return;
-              // Si la fila es local pero el backend la devuelve con source 'app', sí reemplazar
-              if (rowSrc === 'app' && effectiveSource === 'app') {
-                rr.parentNode && rr.parentNode.replaceChild(tr, rr);
-                return;
-              }
-              // Si la fila es local y el backend la devuelve como 'web', nunca eliminar
-              if (isLocal && effectiveSource === 'web') return;
-              // default: eliminar si no es local/app
-              rr.parentNode && rr.parentNode.removeChild(rr);
-            } catch (_) { }
-          });
-        } catch (_) { }
-      }
-    } catch (_) { }
-    // save HTML snapshot and payload so we can restore/merge it if a render happens concurrently
     try{
-      // ensure payload records the effective source so restores remain consistent
-      const payload = Object.assign({}, o);
-      try{ if(!payload.source && typeof effectiveSource !== 'undefined') payload.source = effectiveSource; }catch(_){ }
-      window.__localOrderRows[String(o.id)] = { html: tr.outerHTML, ts: Date.now(), pending: true, payload };
-      window.__localOrderIds.add(String(o.id)); try{ saveLocalOrderCache(); }catch(_){ }
+      tr.setAttribute('data-local-insert', '1');
+      tr.classList.add('pending-sync');
+      tr.setAttribute('data-source', 'web');
     }catch(_){ }
-    // wire view button
-    try{ tr.querySelector('.viewOrderBtn').onclick = async (ev) => { const id = ev.target.dataset.id; const list = await fetchOrders(String(id)); const order = (list || []).find(x => String(x.id) === String(id)) || (list && list[0]); if(order) showOrderDetail(order); }; }catch(e){}
-    // start verification loop to confirm order persisted on server and remove pending state
-    try{ verifyServerHasOrder(String(o.id)); }catch(e){ console.warn('verifyServerHasOrder failed start', e); }
-  }catch(e){ console.error('insertOrderAtTop failed', e); }
+
+    ordersTableBody.insertBefore(tr, ordersTableBody.firstChild);
+    try{ regroupOrdersForTable('web'); }catch(_){ }
+    updateBadgeCount('web');
+
+    try{ console.debug('[admin] insertOrderAtTop inserted', o.id, 'source=web'); }catch(_){ }
+
+    try{
+      const payload = Object.assign({}, o, { source: 'web' });
+      window.__localOrderRows[oid] = { html: tr.outerHTML, ts: Date.now(), pending: true, payload };
+      window.__localOrderIds.add(oid);
+      try{ saveLocalOrderCache(); }catch(_){ }
+    }catch(_){ }
+
+    try{
+      tr.querySelector('.viewOrderBtn').onclick = async (ev) => {
+        const id = ev.target.dataset.id;
+        const list = await fetchOrders(String(id));
+        const order = (list || []).find(x => String(x.id) === String(id)) || (list && list[0]);
+        if(order) showOrderDetail(order);
+      };
+    }catch(_){ }
+
+    try{ verifyServerHasOrder(oid); }catch(e){ console.warn('verifyServerHasOrder failed start', e); }
+  }catch(e){
+    console.error('insertOrderAtTop failed', e);
+  }
 }
 
 function showOrderDetail(order){
@@ -1358,16 +1280,15 @@ const orderModalClose = document.getElementById('orderModalClose'); if(orderModa
 
 async function refreshOrders(source){
   try{
-    source = source || 'web';
-    const q = (source === 'app' ? (orderSearch_app && orderSearch_app.value) : (orderSearch_web && orderSearch_web.value)) ? (source === 'app' ? orderSearch_app.value.trim() : orderSearch_web.value.trim()) : '';
-    const date = (source === 'app' ? (orderDate_app && orderDate_app.value) : (orderDate_web && orderDate_web.value)) ? (source === 'app' ? orderDate_app.value : orderDate_web.value) : '';
+    source = 'web';
+    const q = (orderSearch_web && orderSearch_web.value) ? orderSearch_web.value.trim() : '';
+    const date = (orderDate_web && orderDate_web.value) ? orderDate_web.value : '';
     const list = await fetchOrders(q, date, source);
     if (list === null){
       console.warn('refreshOrders: fetch failed; preserving existing orders table');
       showToast('No se pudo actualizar pedidos (conservando la vista actual)', 'warning');
       return;
     }
-    // If server didn't support date filtering, apply an extra client-side filter by created_at date (ISO YYYY-MM-DD)
     const dateFilter = date || '';
     let toRender = list;
     if(dateFilter){ try{ toRender = (list || []).filter(o => { try{ return (o.created_at || '').slice(0,10) === dateFilter; }catch(_){ return false; } }); }catch(e){ toRender = list; } }
@@ -1376,9 +1297,8 @@ async function refreshOrders(source){
 }
 
 // Wire refresh buttons per-section and add a single test push button
-const anchorForTest = document.querySelector('#refreshOrdersBtn_web') || document.querySelector('#refreshOrdersBtn_app');
+const anchorForTest = document.querySelector('#refreshOrdersBtn_web');
 if(refreshOrdersBtn_web) refreshOrdersBtn_web.addEventListener('click', ()=> refreshOrders('web'));
-if(refreshOrdersBtn_app) refreshOrdersBtn_app.addEventListener('click', ()=> refreshOrders('app'));
 try{
   const testBtn = document.createElement('button'); testBtn.id = 'testPushBtn'; testBtn.className = 'btn'; testBtn.style.marginLeft = '8px'; testBtn.textContent = 'Probar evento WS';
   if(anchorForTest && anchorForTest.parentNode) anchorForTest.parentNode.appendChild(testBtn); else document.body.appendChild(testBtn);
@@ -1398,66 +1318,23 @@ if(orderSearch_web) orderSearch_web.addEventListener('input', ()=> refreshOrders
 if(orderDate_web) orderDate_web.addEventListener('change', ()=> refreshOrders('web'));
 if(clearOrderDate_web) clearOrderDate_web.addEventListener('click', ()=> { if(orderDate_web) orderDate_web.value = ''; refreshOrders('web'); });
 
-if(orderSearch_app) orderSearch_app.addEventListener('input', ()=> refreshOrders('app'));
-if(orderDate_app) orderDate_app.addEventListener('change', ()=> refreshOrders('app'));
-if(clearOrderDate_app) clearOrderDate_app.addEventListener('click', ()=> { if(orderDate_app) orderDate_app.value = ''; refreshOrders('app'); });
-
-const orderSearch_todos = document.getElementById('orderSearch_todos');
-const orderDate_todos = document.getElementById('orderDate_todos');
-const clearOrderDate_todos = document.getElementById('clearOrderDate_todos');
-const refreshOrdersBtn_todos = document.getElementById('refreshOrdersBtn_todos');
-if(orderSearch_todos) orderSearch_todos.addEventListener('input', ()=> refreshOrders('todos'));
-if(orderDate_todos) orderDate_todos.addEventListener('change', ()=> refreshOrders('todos'));
-if(clearOrderDate_todos) clearOrderDate_todos.addEventListener('click', ()=> { if(orderDate_todos) orderDate_todos.value = ''; refreshOrders('todos'); });
-if(refreshOrdersBtn_todos) refreshOrdersBtn_todos.addEventListener('click', ()=> refreshOrders('todos'));
-
-// Tabs and badges wiring
+// Tabs and badges wiring (web only)
 const ordersSection = document.getElementById('orders');
-const tabTodosBtn = document.getElementById('tab_todos');
 const tabWebBtn = document.getElementById('tab_web');
-const tabAppBtn = document.getElementById('tab_app');
-const badgeTodos = document.getElementById('badge_todos');
 const badgeWeb = document.getElementById('badge_web');
-const badgeApp = document.getElementById('badge_app');
 const clearOrderCacheBtn = document.getElementById('clearOrderCache');
 
-function showTab(source){
+function showTab(){
   try{
-    const todosSec = document.getElementById('orders_todos');
     const webSec = document.getElementById('orders_web');
-    const appSec = document.getElementById('orders_app');
-    if(source === 'todos'){
-      if(webSec) webSec.classList.add('hidden');
-      if(appSec) appSec.classList.add('hidden');
-      if(todosSec) todosSec.classList.remove('hidden');
-      if(tabWebBtn) tabWebBtn.classList.remove('active');
-      if(tabAppBtn) tabAppBtn.classList.remove('active');
-      if(tabTodosBtn) tabTodosBtn.classList.add('active');
-      refreshOrders('todos');
-    } else if(source === 'app'){
-      if(webSec) webSec.classList.add('hidden');
-      if(appSec) appSec.classList.remove('hidden');
-      if(todosSec) todosSec.classList.add('hidden');
-      if(tabWebBtn) tabWebBtn.classList.remove('active');
-      if(tabAppBtn) tabAppBtn.classList.add('active');
-      if(tabTodosBtn) tabTodosBtn.classList.remove('active');
-      refreshOrders('app');
-    } else {
-      if(appSec) appSec.classList.add('hidden');
-      if(webSec) webSec.classList.remove('hidden');
-      if(todosSec) todosSec.classList.add('hidden');
-      if(tabAppBtn) tabAppBtn.classList.remove('active');
-      if(tabWebBtn) tabWebBtn.classList.add('active');
-      if(tabTodosBtn) tabTodosBtn.classList.remove('active');
-      refreshOrders('web');
-    }
+    if(webSec) webSec.classList.remove('hidden');
+    if(tabWebBtn) tabWebBtn.classList.add('active');
+    refreshOrders('web');
   }catch(e){ console.warn('showTab failed', e); }
 }
 
-if(tabTodosBtn) tabTodosBtn.addEventListener('click', ()=> showTab('todos'));
-if(tabWebBtn) tabWebBtn.addEventListener('click', ()=> showTab('web'));
-if(tabAppBtn) tabAppBtn.addEventListener('click', ()=> showTab('app'));
-if(clearOrderCacheBtn) clearOrderCacheBtn.addEventListener('click', ()=>{ try{ localStorage.removeItem('admin_local_orders_v1'); window.__localOrderRows = {}; window.__localOrderIds = new Set(); showToast('Caché local de pedidos limpiada', 'info'); refreshOrders('web'); refreshOrders('app'); }catch(e){ console.warn('clearOrderCache failed', e); showToast('No se pudo limpiar caché','error'); } });
+if(tabWebBtn) tabWebBtn.addEventListener('click', ()=> showTab());
+if(clearOrderCacheBtn) clearOrderCacheBtn.addEventListener('click', ()=>{ try{ localStorage.removeItem('admin_local_orders_v1'); window.__localOrderRows = {}; window.__localOrderIds = new Set(); showToast('Cache local de pedidos limpiada', 'info'); refreshOrders('web'); }catch(e){ console.warn('clearOrderCache failed', e); showToast('No se pudo limpiar cache','error'); } });
 
 function updateBadgeCount(source){
   try{
@@ -1465,8 +1342,6 @@ function updateBadgeCount(source){
     if(!table) return;
     const rows = table.querySelectorAll('tr');
     const count = Array.from(rows).filter(r => !(r.children && r.children[0] && r.children[0].textContent && r.children[0].textContent.indexOf('No hay pedidos') !== -1)).length;
-    if(source === 'todos' && badgeTodos) badgeTodos.textContent = String(count);
-    if(source === 'app' && badgeApp) badgeApp.textContent = String(count);
     if(source === 'web' && badgeWeb) badgeWeb.textContent = String(count);
   }catch(e){ console.warn('updateBadgeCount failed', e); }
 }
@@ -1703,7 +1578,6 @@ async function bootstrapAdmin(){
   // restore any locally-inserted order previews (persisted across reloads)
   try{ loadLocalOrderCache(); }catch(e){ console.warn('loadLocalOrderCache failed', e); }
   try{ await refreshOrders('web'); }catch(e){ console.warn('refreshOrders web failed', e); }
-  try{ await refreshOrders('app'); }catch(e){ console.warn('refreshOrders app failed', e); }
 }
 bootstrapAdmin();
 
@@ -1722,23 +1596,21 @@ function dedupeDOMOrders(){
           else {
             const prev = byId.get(id);
             try{
-              // Si alguna fila es local/pending o app, nunca la borres ni la reemplaces por una web
+              // Si alguna fila es local/pending, conservarla hasta que sincronice
               const prevIsLocal = prev.row.getAttribute && prev.row.getAttribute('data-local-insert');
               const currIsLocal = r.getAttribute && r.getAttribute('data-local-insert');
-              const prevSrc = prev.row.getAttribute && (prev.row.getAttribute('data-source') || '').toLowerCase();
-              const currSrc = r.getAttribute && (r.getAttribute('data-source') || '').toLowerCase();
-              if(prevIsLocal || prevSrc === 'app'){
-                // nunca borrar ni reemplazar local/app
+              if(prevIsLocal){
+                // nunca borrar ni reemplazar filas locales pendientes
                 try{ r.parentNode && r.parentNode.removeChild(r); }catch(_){ }
                 continue;
               }
-              if(currIsLocal || currSrc === 'app'){
-                // nunca borrar ni reemplazar local/app
+              if(currIsLocal){
+                // nunca borrar ni reemplazar filas locales pendientes
                 try{ prev.row.parentNode && prev.row.parentNode.removeChild(prev.row); }catch(_){ }
                 byId.set(id, { row: r, ts: createdTs });
                 continue;
               }
-              // Si ninguna es local/app, preferir la más reciente
+              // Si ninguna es local, preferir la más reciente
               if((createdTs || 0) > (prev.ts || 0)){
                 try{ prev.row.parentNode && prev.row.parentNode.removeChild(prev.row); }catch(_){ }
                 byId.set(id, { row: r, ts: createdTs });
@@ -1797,7 +1669,7 @@ function regroupOrdersForTable(source){
 
 // Add periodic polling as a fallback so the orders table refreshes even if WS fails
 try{
-  setInterval(()=>{ refreshOrders('web'); refreshOrders('app'); }, 10000); // every 10s
+  setInterval(()=>{ refreshOrders('web'); }, 10000); // every 10s
 }catch(e){ console.warn('orders polling setup failed', e); }
 
 // websocket to refresh list live with reconnection/backoff
@@ -1825,9 +1697,9 @@ function setupSocket(attempt = 0){
           try{
             // Si no hay source, default a web
             if(!data.order.source){ data.order.source = 'web'; }
-            // Solo insertar si el source es válido
+            // Solo insertar pedidos web en el panel web-only
             const src = String(data.order.source).toLowerCase();
-            if(src === 'app' || src === 'web') {
+            if(src === 'web') {
               insertOrderAtTop(data.order);
               showToast(`Pedido recibido: #${data.order.id}`);
             }
@@ -1842,19 +1714,19 @@ function setupSocket(attempt = 0){
               try{
                 const list = await fetchOrders(String(id));
                 if(Array.isArray(list) && list.length > 0){
-                  // server has the record; solo insertar si el source es válido
+                  // server has the record; solo insertar si es web
                   try{
                     const srv = list[0];
-                    if(srv && (srv.source === 'app' || srv.source === 'web')){
+                    if(srv && srv.source === 'web'){
                       insertOrderAtTop(srv);
                       try{ showToast(`Pedido recibido: #${srv.id}`); }catch(_){ }
                     }
                   }catch(_){ }
                 } else {
-                  // fallback: full refresh both sections
-                  refreshOrders('web'); refreshOrders('app');
+                  // fallback: full refresh web table
+                  refreshOrders('web');
                 }
-              }catch(e){ console.warn('fetch by id after ws event failed', e); refreshOrders('web'); refreshOrders('app'); }
+              }catch(e){ console.warn('fetch by id after ws event failed', e); refreshOrders('web'); }
             })();
             return;
           }

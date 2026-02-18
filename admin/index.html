@@ -105,7 +105,6 @@
                 <th>Nombre</th>
                 <th>Categoria</th>
                 <th>Precio</th>
-                <th>Stock</th>
                 <th>Activo</th>
                 <th>Acciones</th>
               </tr>
@@ -136,12 +135,10 @@
       </section>
 
       <section id="consumos" class="section hidden">
-        <h2>Consumición inmediata <small id="consumosCount" style="color:#666; font-weight:normal; margin-left:8px"></small></h2>
-        <p>Seleccionar productos próximos a vencerse y asigne un descuento (%) que se aplicará en el catálogo.</p>
+        <h2>Consumición inmediata</h2>
+        <p>Seleccione productos próximos a vencerse y asigne un descuento (%) que se aplicará en el catálogo público.</p>
         <div class="controls">
           <input id="consumoSearch" placeholder="Buscar producto..." />
-          <input id="creatorFilter" placeholder="Filtrar por creador (email o id)" style="width:220px;margin-left:8px" />
-          <label style="margin-left:8px"><input id="onlyMyProducts" type="checkbox"> Solo mis productos</label>
           <button id="loadConsumosBtn" class="btn">Cargar consumos</button>
           <button id="saveConsumosBtn" class="btn primary">Guardar consumos</button>
         </div>
@@ -172,39 +169,11 @@
 
       <section id="orders" class="section hidden">
         <div id="ordersTabs" class="controls tabs">
-          <button id="tab_todos" class="btn tab active">Todos <span id="badge_todos" class="badge-pill">0</span></button>
-          <button id="tab_web" class="btn tab">Web <span id="badge_web" class="badge-pill">0</span></button>
-          <button id="tab_app" class="btn tab">App <span id="badge_app" class="badge-pill">0</span></button>
-          <button id="clearOrderCache" class="btn clear-cache">Limpiar caché local</button>
+          <button id="tab_web" class="btn tab active">Web <span id="badge_web" class="badge-pill">0</span></button>
+          <button id="clearOrderCache" class="btn clear-cache">Limpiar cache local</button>
         </div>
-                <section id="orders_todos" class="section">
-                  <h3>Pedidos — Todos</h3>
-                <div class="controls center">
-                  <input id="orderSearch_todos" placeholder="Buscar pedidos por producto o id..." />
-                  <input id="orderDate_todos" type="date" title="Filtrar por fecha" />
-                  <button id="clearOrderDate_todos" class="btn">Limpiar fecha</button>
-                  <button id="refreshOrdersBtn_todos" class="btn">Actualizar pedidos (Todos)</button>
-                </div>
-                <div class="table-wrap">
-                  <table id="ordersTable_todos">
-                    <thead>
-                      <tr>
-                        <th>ID</th>
-                        <th>Items</th>
-                        <th>Total</th>
-                        <th>Usuario</th>
-                        <th>Dirección</th>
-                        <th>Estado</th>
-                        <th>Fecha</th>
-                        <th>Acciones</th>
-                      </tr>
-                    </thead>
-                    <tbody></tbody>
-                  </table>
-                </div>
-                </section>
         <section id="orders_web" class="section">
-          <h3>Pedidos — Web</h3>
+          <h3>Pedidos - Web</h3>
         <div class="controls center">
           <input id="orderSearch_web" placeholder="Buscar pedidos por producto o id..." />
           <input id="orderDate_web" type="date" title="Filtrar por fecha" />
@@ -229,50 +198,7 @@
           </table>
         </div>
         </section>
-
-        <section id="orders_app" class="section hidden">
-          <h3>Pedidos — App</h3>
-        <div class="controls center">
-          <input id="orderSearch_app" placeholder="Buscar pedidos por producto o id..." />
-          <input id="orderDate_app" type="date" title="Filtrar por fecha" />
-          <button id="clearOrderDate_app" class="btn">Limpiar fecha</button>
-          <button id="refreshOrdersBtn_app" class="btn">Actualizar pedidos (App)</button>
-        </div>
-        <div class="table-wrap">
-          <table id="ordersTable_app">
-            <thead>
-              <tr>
-                <th>ID</th>
-                <th>Items</th>
-                <th>Total</th>
-                <th>Usuario</th>
-                <th>Contacto / Dirección</th>
-                <th>Estado</th>
-                <th>Fecha</th>
-                <th>Acciones</th>
-              </tr>
-            </thead>
-            <tbody></tbody>
-          </table>
-        </div>
-        </section>
       </section>
-
-      <!-- Add Consumo Modal -->
-      <div id="addConsumoModal" class="modal hidden" aria-hidden="true" role="dialog" aria-labelledby="addConsumoModalTitle" aria-modal="true">
-        <div class="modal-card">
-          <button id="addConsumosCloseBtn" class="modal-close" aria-label="Cerrar">✕</button>
-          <h2 id="addConsumoModalTitle">Agregar consumos</h2>
-          <div class="controls">
-            <input id="addConsumosSearch" placeholder="Buscar productos..." />
-          </div>
-          <div id="addConsumosList" style="max-height:420px; overflow:auto; margin-top:12px"></div>
-          <div class="form-actions">
-            <button id="addConsumosConfirmBtn" class="btn primary">Agregar seleccionados</button>
-            <button id="addConsumosCancelBtn" type="button" class="btn">Cancelar</button>
-          </div>
-        </div>
-      </div>
 
       <!-- Order Detail Modal -->
       <div id="orderModal" class="modal hidden" aria-hidden="true" role="dialog" aria-modal="true">
@@ -301,22 +227,11 @@
             <input id="name" name="name" required placeholder="Nombre del producto" />
           </div>
           <div class="field">
-            <label for="price" id="priceLabel">Precio</label>
+            <label for="price">Precio</label>
             <input id="price" name="price" required type="number" step="0.01" placeholder="0.00" />
           </div>
           <div class="field">
-            <label for="sale_unit">Venta por</label>
-            <select id="sale_unit" name="sale_unit">
-              <option value="unit">Unidad</option>
-              <option value="kg">Kg</option>
-            </select>
-          </div>
-          <div class="field" id="kgPerUnitField" style="display:none;">
-            <label for="kg_per_unit">Kg por unidad</label>
-            <input id="kg_per_unit" name="kg_per_unit" type="number" min="0.01" step="0.01" value="1" placeholder="Ej: 4" />
-          </div>
-          <div class="field">
-            <label for="stock" id="stockLabel">Stock</label>
+            <label for="stock">Stock</label>
             <input id="stock" name="stock" type="number" min="0" step="1" value="0" placeholder="0" />
           </div>
           <div class="field">
@@ -422,6 +337,6 @@
     window.addEventListener('error', function(e){ try{ window.adminFallback('JS error: ' + (e && e.message ? e.message : e)); }catch(_){} });
     window.addEventListener('unhandledrejection', function(e){ try{ var r = e && e.reason ? (e.reason.message || JSON.stringify(e.reason)) : e; window.adminFallback('Unhandled promise rejection: ' + r); }catch(_){} });
   </script>
-  <script src="app.js?v=20260215"></script>
+  <script src="app.js"></script>
 </body>
 </html>
