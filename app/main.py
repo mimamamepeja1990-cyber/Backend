@@ -620,9 +620,110 @@ def _build_order_seen_html(order_data: Dict[str, Any]) -> str:
     brand_name = html_escape(str(os.environ.get('RESEND_BRAND_NAME') or 'DistriAr'))
     order_id = html_escape(str(order_data.get('id') or 'sin-id'))
     customer_name = html_escape(str(order_data.get('user_full_name') or 'cliente'))
-    delivery_window = html_escape(
-        str(os.environ.get('ORDER_SEEN_DELIVERY_WINDOW') or 'manana entre las 9:00 y las 15:00')
+    delivery_window_raw = str(
+        os.environ.get('ORDER_SEEN_DELIVERY_WINDOW') or 'ma\u00f1ana entre las 9:00 y las 15:00'
     )
+    # Keep old env values compatible while fixing "manana" typo in customer-facing text.
+    delivery_window_raw = delivery_window_raw.replace('manana', 'ma\u00f1ana')
+    delivery_window = html_escape(delivery_window_raw)
+
+    created_at_raw = order_data.get('created_at')
+    created_at_text = ''
+    if created_at_raw:
+        try:
+            parsed_dt = datetime.datetime.fromisoformat(str(created_at_raw).replace('Z', '+00:00'))
+            created_at_text = parsed_dt.strftime('%Y-%m-%d %H:%M')
+        except Exception:
+            created_at_text = str(created_at_raw)
+    created_at_text = html_escape(created_at_text) if created_at_text else '-'
+
+    seen_at_text = ''
+    try:
+        timezone_name = str(os.environ.get('ORDER_EMAIL_TIMEZONE') or 'America/Argentina/Buenos_Aires').strip()
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        seen_dt = now_utc
+        if timezone_name:
+            try:
+                from zoneinfo import ZoneInfo
+                seen_dt = now_utc.astimezone(ZoneInfo(timezone_name))
+            except Exception:
+                seen_dt = now_utc
+        seen_at_text = seen_dt.strftime('%Y-%m-%d %H:%M')
+    except Exception:
+        try:
+            seen_at_text = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M')
+        except Exception:
+            seen_at_text = ''
+    seen_at_text = html_escape(seen_at_text) if seen_at_text else '-'
+
+    total_raw = order_data.get('total')
+    try:
+        total_text = f"${float(total_raw or 0):,.2f}"
+    except Exception:
+        total_text = f"${html_escape(str(total_raw or '0'))}"
+
+    email_val = _normalize_email(order_data.get('user_email'))
+    email_text = html_escape(email_val) if email_val else '-'
+
+    address_parts: List[str] = []
+    calle = order_data.get('user_calle')
+    numeracion = order_data.get('user_numeracion')
+    barrio = order_data.get('user_barrio')
+    if calle:
+        address_parts.append(str(calle).strip())
+    if numeracion:
+        address_parts.append(str(numeracion).strip())
+    if barrio:
+        address_parts.append(f"Barrio {str(barrio).strip()}")
+    delivery_address = html_escape(', '.join([p for p in address_parts if p])) if address_parts else '-'
+
+    items = order_data.get('items') if isinstance(order_data.get('items'), list) else []
+    rows: List[str] = []
+    for idx, item in enumerate(items[:25], start=1):
+        if isinstance(item, dict):
+            prod_id_raw = item.get('id', '?')
+            qty_raw = item.get('qty', '?')
+            meta = item.get('meta') if isinstance(item.get('meta'), dict) else {}
+            item_name = meta.get('name') or meta.get('title') or meta.get('product_name')
+            qty_label = meta.get('qty_label')
+        else:
+            prod_id_raw = getattr(item, 'id', '?')
+            qty_raw = getattr(item, 'qty', '?')
+            meta = getattr(item, 'meta', None)
+            meta = meta if isinstance(meta, dict) else {}
+            item_name = meta.get('name') or meta.get('title') or meta.get('product_name')
+            qty_label = meta.get('qty_label')
+
+        try:
+            qty_text = f"{float(qty_raw):g}"
+        except Exception:
+            qty_text = str(qty_raw)
+        if qty_label:
+            qty_text = f"{qty_text} ({str(qty_label)})"
+
+        if not item_name:
+            item_name = f"Producto #{prod_id_raw}"
+
+        rows.append(
+            "<tr>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #edf1f5;color:#1f2937'>{idx}</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #edf1f5;color:#1f2937'>{html_escape(str(item_name))}</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #edf1f5;color:#334155;text-align:right'>{html_escape(qty_text)}</td>"
+            "</tr>"
+        )
+    if not rows:
+        rows.append(
+            "<tr>"
+            "<td colspan='3' style='padding:12px;color:#64748b;border-bottom:1px solid #edf1f5'>Sin detalle de productos</td>"
+            "</tr>"
+        )
+    if len(items) > 25:
+        rows.append(
+            "<tr>"
+            "<td colspan='3' style='padding:10px 12px;color:#64748b'>... y mas productos</td>"
+            "</tr>"
+        )
+
     support_email = html_escape(str(os.environ.get('RESEND_REPLY_TO') or ''))
     support_line = (
         f"<p style='margin:18px 0 0 0;font-size:13px;color:#64748b;'>"
@@ -639,21 +740,38 @@ def _build_order_seen_html(order_data: Dict[str, Any]) -> str:
         "<html><body style='margin:0;padding:0;background:#f3f5f7;font-family:Arial,sans-serif;color:#0f172a;'>"
         "<table role='presentation' width='100%' cellspacing='0' cellpadding='0' style='background:#f3f5f7;'>"
         "<tr><td align='center' style='padding:24px 12px;'>"
-        "<table role='presentation' width='620' cellspacing='0' cellpadding='0' "
-        "style='max-width:620px;width:100%;background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden;'>"
+        "<table role='presentation' width='640' cellspacing='0' cellpadding='0' "
+        "style='max-width:640px;width:100%;background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden;'>"
         "<tr><td style='padding:22px 26px;background:#0f172a;color:#f8fafc;'>"
         "<div style='font-size:20px;font-weight:700;'>Pedido visto por administracion</div>"
+        "<div style='margin-top:6px;font-size:14px;color:#cbd5e1;'>Tu pedido ya esta en preparacion.</div>"
         "</td></tr>"
         "<tr><td style='padding:24px 26px;'>"
         f"<p style='margin:0 0 12px 0;font-size:15px;'>Hola {customer_name},</p>"
         "<p style='margin:0 0 12px 0;font-size:15px;'>"
         "tu pedido ya fue visto por el panel de administracion."
         "</p>"
-        f"<p style='margin:0 0 12px 0;font-size:15px;'><strong>Pedido:</strong> #{order_id}</p>"
-        f"<p style='margin:0 0 12px 0;font-size:15px;'>"
-        f"Entrega estimada: <strong>{delivery_window}</strong>."
-        "</p>"
-        "<p style='margin:0 0 12px 0;font-size:15px;'>Gracias por tu compra.</p>"
+        "<table role='presentation' width='100%' cellspacing='0' cellpadding='0' "
+        "style='border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;margin-bottom:18px;'>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Pedido</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:600;'>#{order_id}</td></tr>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Fecha del pedido</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:600;'>{created_at_text}</td></tr>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Fecha de revision</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:600;'>{seen_at_text}</td></tr>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Total</td><td style='padding:10px 12px;text-align:right;font-size:15px;color:#0f172a;font-weight:700;'>{total_text}</td></tr>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Email</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:600;'>{email_text}</td></tr>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Entrega</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:600;'>{delivery_address}</td></tr>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Ventana estimada</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:700;'>{delivery_window}</td></tr>"
+        "</table>"
+        "<div style='font-size:14px;font-weight:700;color:#0f172a;margin-bottom:8px;'>Productos solicitados</div>"
+        "<table role='presentation' width='100%' cellspacing='0' cellpadding='0' "
+        "style='border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;'>"
+        "<thead><tr>"
+        "<th align='left' style='padding:10px 12px;background:#f8fafc;font-size:12px;color:#475569;text-transform:uppercase;'>#</th>"
+        "<th align='left' style='padding:10px 12px;background:#f8fafc;font-size:12px;color:#475569;text-transform:uppercase;'>Producto</th>"
+        "<th align='right' style='padding:10px 12px;background:#f8fafc;font-size:12px;color:#475569;text-transform:uppercase;'>Cantidad</th>"
+        "</tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "<p style='margin:18px 0 12px 0;font-size:15px;'>Gracias por tu compra.</p>"
         f"{support_line}"
         "</td></tr>"
         "<tr><td style='padding:12px 26px;border-top:1px solid #e5e7eb;color:#64748b;font-size:12px;'>"
