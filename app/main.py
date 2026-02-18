@@ -197,8 +197,7 @@ async def lifespan(app: FastAPI):
     # issue ALTER TABLE ADD COLUMN statements for any that are absent. This
     # avoids relying on information_schema schema assumptions.
     try:
-        conn = engine.connect()
-        try:
+        with engine.begin() as conn:
             needed = {
                 'status': "VARCHAR(50) DEFAULT 'nuevo'",
                 'user_id': 'INTEGER',
@@ -239,15 +238,12 @@ async def lifespan(app: FastAPI):
                     logger.info('Added missing column to orders: %s', col)
                 except Exception as e:
                     logger.warning('Could not add column %s to orders: %s', col, e)
-        finally:
-            conn.close()
     except Exception:
         logger.exception('ensure orders columns step failed')
 
     # Ensure legacy DBs get `stock` and `discount` columns on the `products` table.
     try:
-        conn = engine.connect()
-        try:
+        with engine.begin() as conn:
             dialect = getattr(engine, 'dialect', None)
             dialect_name = getattr(dialect, 'name', '') if dialect else ''
             discount_type = 'REAL DEFAULT 0' if 'postgres' in dialect_name else 'FLOAT DEFAULT 0'
@@ -298,8 +294,6 @@ async def lifespan(app: FastAPI):
                     """))
             except Exception as e:
                 logger.warning('Could not backfill stock_kg from stock: %s', e)
-        finally:
-            conn.close()
     except Exception:
         logger.exception('ensure products columns step failed')
 
@@ -535,6 +529,79 @@ def _resolve_user_email_by_id(user_id: Any) -> Optional[str]:
             pass
 
 
+def _enrich_order_contact_fields(order_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Best-effort enrich order payload with contact fields when DB lacks user_* columns."""
+    payload = dict(order_data) if isinstance(order_data, dict) else {}
+    order_id = payload.get('id')
+    order_id_text = str(order_id).strip() if order_id is not None else ''
+
+    def _apply_candidate(candidate: Any) -> None:
+        if not isinstance(candidate, dict):
+            return
+        for field in ('user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion'):
+            if not payload.get(field) and candidate.get(field):
+                payload[field] = candidate.get(field)
+
+        token_preview = candidate.get('_token_preview')
+        if isinstance(token_preview, dict):
+            if not payload.get('_token_preview'):
+                payload['_token_preview'] = token_preview
+            if not payload.get('user_full_name') and token_preview.get('name'):
+                payload['user_full_name'] = token_preview.get('name')
+            if not payload.get('user_email') and token_preview.get('email'):
+                payload['user_email'] = token_preview.get('email')
+            if '_token_received' not in payload:
+                payload['_token_received'] = True
+
+    # 1) In-memory payload cache (fast path).
+    if order_id_text and (not payload.get('user_email') or not payload.get('user_full_name')):
+        try:
+            cached_entry = ORDER_PAYLOAD_CACHE.get(order_id_text) or {}
+            _apply_candidate(cached_entry.get('payload'))
+        except Exception:
+            pass
+
+    # 2) Persisted preview table (durable path).
+    if order_id_text and (not payload.get('user_email') or not payload.get('user_full_name')):
+        try:
+            row = _safe_engine_fetchone(
+                'SELECT token_preview, token_received FROM order_token_previews WHERE order_id = :id ORDER BY created_at DESC LIMIT 1',
+                {'id': order_id_text},
+            )
+            if row:
+                tp_raw = row[0]
+                token_received = bool(row[1]) if len(row) > 1 else False
+                token_preview = {}
+                if tp_raw:
+                    try:
+                        token_preview = json.loads(tp_raw) if isinstance(tp_raw, str) else (tp_raw if isinstance(tp_raw, dict) else {})
+                    except Exception:
+                        token_preview = {}
+                candidate = {'_token_preview': token_preview, '_token_received': token_received}
+                if isinstance(token_preview, dict):
+                    if token_preview.get('email'):
+                        candidate['user_email'] = token_preview.get('email')
+                    if token_preview.get('name'):
+                        candidate['user_full_name'] = token_preview.get('name')
+                    if token_preview.get('barrio'):
+                        candidate['user_barrio'] = token_preview.get('barrio')
+                    if token_preview.get('calle'):
+                        candidate['user_calle'] = token_preview.get('calle')
+                    if token_preview.get('numeracion'):
+                        candidate['user_numeracion'] = token_preview.get('numeracion')
+                _apply_candidate(candidate)
+        except Exception:
+            pass
+
+    # 3) Last fallback: resolve by user_id from users table.
+    if not payload.get('user_email') and payload.get('user_id') is not None:
+        resolved = _resolve_user_email_by_id(payload.get('user_id'))
+        if resolved:
+            payload['user_email'] = resolved
+
+    return payload
+
+
 def _build_order_confirmation_subject(order_data: Dict[str, Any]) -> str:
     order_id = order_data.get('id')
     if order_id is None:
@@ -765,7 +832,7 @@ async def _send_order_confirmation_email(
         logger.info('RESEND_ORDER_CONFIRMATION_ENABLED disabled. Skipping confirmation email.')
         return False
 
-    order_payload = order_data if isinstance(order_data, dict) else {}
+    order_payload = _enrich_order_contact_fields(order_data if isinstance(order_data, dict) else {})
     to_email = _extract_customer_email_for_order(order_payload, request_data, token_payload)
     force_to_email = _normalize_email(os.environ.get('RESEND_FORCE_TO_EMAIL'))
     if force_to_email:
@@ -869,7 +936,7 @@ async def _send_order_seen_notification_email(order_data: Optional[Dict[str, Any
         logger.warning("RESEND_API_KEY is still 're_xxxxxxxxx'. Replace it with your real API key.")
         return False
 
-    order_payload = order_data if isinstance(order_data, dict) else {}
+    order_payload = _enrich_order_contact_fields(order_data if isinstance(order_data, dict) else {})
     to_email = _extract_customer_email_for_order(order_payload, order_payload, None)
     force_to_email = _normalize_email(os.environ.get('RESEND_FORCE_TO_EMAIL'))
     if force_to_email:
@@ -1378,7 +1445,7 @@ def _run_add_user_columns() -> dict:
         if not has_orders:
             return {'error': 'no_orders_table'}
         existing = {c['name'] for c in insp.get_columns('orders')}
-        with engine.connect() as conn:
+        with engine.begin() as conn:
             for name, coltype in needed:
                 if name in existing:
                     results['skipped'].append(name)
@@ -3879,8 +3946,14 @@ async def update_order_status(order_id: str, request: Request):
     try:
         status_norm = str((od.get('status') or status or '')).strip().lower()
         if status_norm == 'visto':
-            payload_for_seen = dict(od) if isinstance(od, dict) else {'id': id_param, 'status': status}
-            asyncio.create_task(_send_order_seen_notification_email(payload_for_seen))
+            payload_for_seen = _enrich_order_contact_fields(
+                dict(od) if isinstance(od, dict) else {'id': id_param, 'status': status}
+            )
+            send_ok = await _send_order_seen_notification_email(payload_for_seen)
+            try:
+                od['_seen_email_sent'] = bool(send_ok)
+            except Exception:
+                pass
     except Exception:
         logger.exception('Could not schedule seen-notification email for order id=%s', id_param)
 
