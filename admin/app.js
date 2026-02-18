@@ -899,8 +899,15 @@ function renderOrderItemLabel(it){
     if(typeof it === 'string') return escapeHtml(it);
     const name = (it && it.meta && it.meta.name) ? it.meta.name : (it && it.id) ? it.id : '';
     const isConsumo = isOrderItemConsumo(it);
-    const badge = isConsumo ? ' <span style="margin-left:6px;padding:2px 6px;border-radius:999px;background:#fff1e6;border:1px solid rgba(242,107,56,0.25);color:#b45309;font-weight:700;font-size:11px;vertical-align:middle">Consumo inmediato</span>' : '';
-    return `${escapeHtml(name)}${badge}`;
+    const promoName = getOrderItemPromoName(it);
+    let badges = '';
+    if (isConsumo) {
+      badges += ' <span style="margin-left:6px;padding:2px 6px;border-radius:999px;background:#fff1e6;border:1px solid rgba(242,107,56,0.25);color:#b45309;font-weight:700;font-size:11px;vertical-align:middle">Consumo inmediato</span>';
+    }
+    if (promoName) {
+      badges += ' <span style="margin-left:6px;padding:2px 6px;border-radius:999px;background:#ecfeff;border:1px solid rgba(8,145,178,0.25);color:#0e7490;font-weight:700;font-size:11px;vertical-align:middle">Promo: ' + escapeHtml(promoName) + '</span>';
+    }
+    return `${escapeHtml(name)}${badges}`;
   }catch(_){
     return '';
   }
@@ -956,6 +963,23 @@ function isOrderItemConsumo(it){
     return key.includes(':consumo');
   }catch(_){
     return false;
+  }
+}
+
+function getOrderItemPromoName(it){
+  try{
+    if(!it || typeof it !== 'object') return '';
+    const meta = (it.meta && typeof it.meta === 'object') ? it.meta : {};
+    const explicit = String(meta.promo_name || meta.promotion_name || '').trim();
+    if (explicit) return explicit;
+    const idStr = String(it.id || '').toLowerCase();
+    if (meta.is_promo || idStr.startsWith('promo:')) {
+      const fallback = String(meta.name || '').trim();
+      return fallback;
+    }
+    return '';
+  }catch(_){
+    return '';
   }
 }
 
