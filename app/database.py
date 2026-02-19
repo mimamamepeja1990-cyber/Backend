@@ -1,50 +1,25 @@
-
-# --- MIGRACIÓN AUTOMÁTICA DE SOURCE EN ORDERS ---
-import sqlalchemy
-from sqlalchemy import text
+﻿from pathlib import Path
 import os
-def migrate_orders_source():
-    db_url = os.environ.get('DATABASE_URL')
-    if not db_url:
-        return
-    engine = sqlalchemy.create_engine(db_url)
-    with engine.connect() as conn:
-        try:
-            conn.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS source VARCHAR(16);"))
-        except Exception:
-            pass
-        try:
-            conn.execute(text("CREATE INDEX IF NOT EXISTS idx_orders_source ON orders(source);"))
-        except Exception:
-            pass
-        try:
-            conn.execute(text("UPDATE orders SET source = 'web' WHERE source IS NULL OR TRIM(source) = '';"))
-        except Exception:
-            pass
-        print('Migración automática de source en orders ejecutada.')
 
-migrate_orders_source()
-from pathlib import Path
-import os
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.orm import declarative_base, sessionmaker
 
 # app/
 BASE_DIR = Path(__file__).resolve().parent
 
 # Backend/data/
-DATA_DIR = BASE_DIR.parent / "data"
+DATA_DIR = BASE_DIR.parent / 'data'
 DATA_DIR.mkdir(exist_ok=True)
 
-DB_PATH = DATA_DIR / "database.db"
+DB_PATH = DATA_DIR / 'database.db'
 
 # Allow overriding the DB with a managed DATABASE_URL (Postgres, etc.) via env var.
 # Use `str(DB_PATH)` to ensure a proper path string is embedded in the sqlite URL.
 SQLALCHEMY_DATABASE_URL = os.environ.get('DATABASE_URL') or f"sqlite:///{str(DB_PATH)}"
 
-# For sqlite we need the special connect arg; for other DBs (e.g. postgres) don't pass it
+# For sqlite we need the special connect arg; for other DBs (e.g. postgres) do not pass it.
 if SQLALCHEMY_DATABASE_URL.startswith('sqlite'):
-    engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False})
+    engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={'check_same_thread': False})
 else:
     engine = create_engine(SQLALCHEMY_DATABASE_URL)
 
@@ -52,10 +27,72 @@ else:
 SessionLocal = sessionmaker(
     autocommit=False,
     autoflush=False,
-    bind=engine
+    bind=engine,
 )
 
 Base = declarative_base()
+
+
+def _migrate_orders_optional_columns() -> None:
+    """Best-effort migration for legacy `orders` schemas.
+
+    Runs at import time so ad-hoc scripts (that do not boot FastAPI lifespan)
+    can still operate with payment/source/user columns present.
+    """
+    try:
+        insp = inspect(engine)
+        if 'orders' not in insp.get_table_names():
+            return
+        existing = {c['name'] for c in insp.get_columns('orders')}
+    except Exception:
+        return
+
+    try:
+        dialect = engine.dialect.name if engine and getattr(engine, 'dialect', None) else ''
+    except Exception:
+        dialect = ''
+
+    needed = [
+        ('status', "VARCHAR(50) DEFAULT 'nuevo'"),
+        ('user_id', 'INTEGER'),
+        ('user_full_name', 'VARCHAR(200)'),
+        ('user_email', 'VARCHAR(320)'),
+        ('user_barrio', 'VARCHAR(200)'),
+        ('user_calle', 'VARCHAR(200)'),
+        ('user_numeracion', 'VARCHAR(100)'),
+        ('_token_received', 'BOOLEAN'),
+        ('_token_preview', 'TEXT'),
+        ('source', "VARCHAR(50) DEFAULT 'web'"),
+        ('payment_method', 'VARCHAR(50)'),
+        ('payment_status', 'VARCHAR(50)'),
+        ('payment_reference', 'VARCHAR(200)'),
+    ]
+
+    with engine.begin() as conn:
+        for name, coltype in needed:
+            if name in existing:
+                continue
+            try:
+                if 'postgres' in dialect:
+                    conn.execute(text(f"ALTER TABLE orders ADD COLUMN IF NOT EXISTS {name} {coltype};"))
+                else:
+                    conn.execute(text(f"ALTER TABLE orders ADD COLUMN {name} {coltype};"))
+            except Exception:
+                pass
+
+        try:
+            conn.execute(text('CREATE INDEX IF NOT EXISTS idx_orders_source ON orders(source);'))
+        except Exception:
+            pass
+
+        try:
+            conn.execute(text("UPDATE orders SET source = 'web' WHERE source IS NULL OR TRIM(source) = '';"))
+        except Exception:
+            pass
+
+
+_migrate_orders_optional_columns()
+
 
 def get_db():
     db = SessionLocal()

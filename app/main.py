@@ -1,4 +1,4 @@
-from fastapi import status
+﻿from fastapi import status
 from fastapi import (
     FastAPI, Depends, HTTPException, UploadFile, File,
     WebSocket, WebSocketDisconnect, Request
@@ -37,7 +37,7 @@ from sqlalchemy.exc import IntegrityError
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from typing import Tuple
 
-# optional remote backup (GitHub Gist) — configured via env vars
+# optional remote backup (GitHub Gist) â€” configured via env vars
 import httpx
 try:
     import mercadopago  # type: ignore
@@ -121,7 +121,7 @@ logger.addHandler(handler)
 logger.setLevel(logging.INFO)
 
 # -------------------------------------------------------------------
-# Engine-level safe helpers 🔧
+# Engine-level safe helpers ðŸ”§
 # -------------------------------------------------------------------
 
 def _invalidate_conn(conn):
@@ -247,6 +247,20 @@ async def lifespan(app: FastAPI):
                     logger.warning('Could not add column %s to orders: %s', col, e)
     except Exception:
         logger.exception('ensure orders columns step failed')
+
+    # Run a second, explicit migration pass for legacy deployments where
+    # the orders table schema may drift between releases.
+    try:
+        mig = _run_add_user_columns()
+        if isinstance(mig, dict):
+            added = mig.get('added') or []
+            failed = mig.get('failed') or []
+            if added:
+                logger.info('orders migration pass added columns: %s', added)
+            if failed:
+                logger.warning('orders migration pass failed for: %s', failed)
+    except Exception:
+        logger.exception('secondary orders migration pass failed')
 
     # Ensure legacy DBs get `stock` and `discount` columns on the `products` table.
     try:
@@ -435,7 +449,7 @@ async def lifespan(app: FastAPI):
 # -------------------------------------------------------------------
 # APP
 # -------------------------------------------------------------------
-app = FastAPI(title="Catálogo API", lifespan=lifespan)
+app = FastAPI(title="CatÃ¡logo API", lifespan=lifespan)
 
 # In-memory cache of recently created order payloads (id -> { payload, ts })
 # Used to surface token previews in the admin list when the DB lacks persisted user_* columns.
@@ -1398,7 +1412,8 @@ async def global_exception_handler(request: Request, exc: Exception):
 # Lightweight health and debug endpoints
 @app.get('/health')
 def health():
-    return {'status': 'ok'}
+    mp_configured = bool((os.environ.get('MERCADOPAGO_ACCESS_TOKEN') or '').strip())
+    return {'status': 'ok', 'mercadopago_configured': mp_configured}
 
 @app.get('/debug/version')
 def debug_version():
@@ -2073,7 +2088,7 @@ def list_uploads(request: Request, db: Session = Depends(get_db)):
                     base = str(request.base_url).rstrip('/')
                 except Exception:
                     base = ''
-                # Normalize stored URL — if it's an absolute HTTP URL, keep it.
+                # Normalize stored URL â€” if it's an absolute HTTP URL, keep it.
                 stored = (r.url or '')
                 # If stored URL looks like a filesystem path (backslashes or drive letter), ignore it and build public path
                 use_filename = False
@@ -2088,7 +2103,7 @@ def list_uploads(request: Request, db: Session = Depends(get_db)):
                         if (':' in stored and ('\\' in stored or '/' in stored)) or '\\' in stored:
                             use_filename = True
                         else:
-                            # relative path like 'uploads/promos/...' — ensure leading slash
+                            # relative path like 'uploads/promos/...' â€” ensure leading slash
                             if s.startswith('uploads/'):
                                 s = '/' + s
                             url = (base + s) if base else s
@@ -2347,7 +2362,7 @@ def deselect_promo(filename: str, request: Request, db: Session = Depends(get_db
         return JSONResponse(status_code=500, content={'detail': 'failed'}, headers=headers)
 
 
-# --- Consumición inmediata API (admin) ---
+# --- ConsumiciÃ³n inmediata API (admin) ---
 @app.get('/api/consumos')
 def list_consumos(request: Request, db: Session = Depends(get_db)):
     """Return consumos config: list of { id: product_id, discount: percent }.
@@ -3214,6 +3229,17 @@ def _update_order_payment_snapshot(order_id: Any, payment_method: Optional[str],
     except Exception:
         existing_cols = set()
 
+    # Self-heal legacy schemas: if payment columns are missing, attempt the
+    # same migration used by debug tooling before writing the payment snapshot.
+    required_payment_cols = {'payment_method', 'payment_status', 'payment_reference'}
+    if required_payment_cols - existing_cols:
+        try:
+            _run_add_user_columns()
+            insp = inspect(engine)
+            existing_cols = {c['name'] for c in insp.get_columns('orders')}
+        except Exception:
+            logger.exception('Could not auto-migrate payment columns before snapshot update')
+
     set_parts = []
     params: Dict[str, Any] = {}
     if payment_method is not None and 'payment_method' in existing_cols:
@@ -3244,11 +3270,38 @@ def _update_order_payment_snapshot(order_id: Any, payment_method: Optional[str],
             conn.execute(text(f"UPDATE orders SET {set_sql} WHERE CAST(id AS TEXT) = :id"), {**params, 'id': str(order_id)})
 
 
+@app.get('/payments/mercadopago/health')
+async def mercadopago_health(request: Request):
+    configured = bool((os.environ.get('MERCADOPAGO_ACCESS_TOKEN') or '').strip())
+    use_sdk_raw = (os.environ.get('MERCADOPAGO_USE_SDK') or 'true').strip().lower()
+    use_sdk = use_sdk_raw not in ('0', 'false', 'no', 'off')
+
+    try:
+        insp = inspect(engine)
+        cols = {c['name'] for c in insp.get_columns('orders')}
+    except Exception:
+        cols = set()
+
+    required = {'payment_method', 'payment_status', 'payment_reference'}
+    headers = _cors_headers_for_request(request)
+    return JSONResponse(
+        status_code=200,
+        content={
+            'configured': configured,
+            'sdk_installed': mercadopago is not None,
+            'sdk_enabled': use_sdk,
+            'orders_payment_columns_ready': required.issubset(cols),
+            'missing_order_columns': sorted(list(required - cols)),
+        },
+        headers=headers,
+    )
+
+
 @app.post('/payments/mercadopago/preference', response_model=schemas.MercadoPagoPreferenceResponse)
 async def create_mercadopago_preference(request: Request, payload: schemas.MercadoPagoPreferenceCreate):
     access_token = (os.environ.get('MERCADOPAGO_ACCESS_TOKEN') or '').strip()
     if not access_token:
-        raise HTTPException(status_code=503, detail='Mercado Pago no está configurado')
+        raise HTTPException(status_code=503, detail='Mercado Pago no esta configurado')
 
     items = []
     for item in (payload.items or []):
@@ -3264,7 +3317,7 @@ async def create_mercadopago_preference(request: Request, payload: schemas.Merca
         except Exception:
             unit_price = 0
         if unit_price <= 0:
-            raise HTTPException(status_code=400, detail='Todos los ítems deben tener un precio válido')
+            raise HTTPException(status_code=400, detail='Todos los items deben tener un precio valido')
 
         title = (item.title or '').strip()
         if not title:
@@ -3282,7 +3335,7 @@ async def create_mercadopago_preference(request: Request, payload: schemas.Merca
         items.append(mp_item)
 
     if not items:
-        raise HTTPException(status_code=400, detail='No hay ítems para cobrar')
+        raise HTTPException(status_code=400, detail='No hay items para cobrar')
 
     mp_payload: Dict[str, Any] = {
         'items': items,
@@ -3401,19 +3454,58 @@ async def create_mercadopago_preference(request: Request, payload: schemas.Merca
 
         resp = _MPRespShim(data)
 
+
     if resp.status_code >= 400:
         raw = ''
+        reason = ''
         try:
-            raw = resp.text[:500]
+            raw = resp.text[:1000]
         except Exception:
             raw = 'error'
-        logger.warning('Mercado Pago preference error %s: %s', resp.status_code, raw)
-        raise HTTPException(status_code=502, detail='Mercado Pago rechazó la preferencia')
+        try:
+            err_json = resp.json()
+        except Exception:
+            err_json = None
+
+        if isinstance(err_json, dict):
+            candidates = [
+                err_json.get('message'),
+                err_json.get('error'),
+                err_json.get('detail'),
+            ]
+            cause = err_json.get('cause')
+            if isinstance(cause, list) and cause:
+                first = cause[0]
+                if isinstance(first, dict):
+                    candidates.extend([
+                        first.get('description'),
+                        first.get('message'),
+                        first.get('code'),
+                    ])
+                else:
+                    candidates.append(str(first))
+            for value in candidates:
+                if isinstance(value, str) and value.strip():
+                    reason = value.strip()
+                    break
+            if not reason:
+                try:
+                    reason = json.dumps(err_json, ensure_ascii=False)[:300]
+                except Exception:
+                    reason = ''
+        else:
+            reason = (raw or '').strip()[:300]
+
+        logger.warning('Mercado Pago preference error %s: %s', resp.status_code, reason or raw)
+        detail = f"Mercado Pago rechazo la preferencia ({resp.status_code})"
+        if reason:
+            detail = f"{detail}: {reason}"
+        raise HTTPException(status_code=502, detail=detail)
 
     try:
         data = resp.json()
     except Exception:
-        raise HTTPException(status_code=502, detail='Respuesta inválida de Mercado Pago')
+        raise HTTPException(status_code=502, detail='Respuesta invalida de Mercado Pago')
 
     preference_id = str(data.get('id') or '').strip()
     init_point = str(data.get('init_point') or data.get('sandbox_init_point') or '').strip()
@@ -3421,7 +3513,7 @@ async def create_mercadopago_preference(request: Request, payload: schemas.Merca
 
     if not preference_id or not init_point:
         logger.warning('Mercado Pago response missing checkout URLs: %s', data)
-        raise HTTPException(status_code=502, detail='Mercado Pago no devolvió un link de pago')
+        raise HTTPException(status_code=502, detail='Mercado Pago no devolvio un link de pago')
 
     try:
         _update_order_payment_snapshot(
@@ -3449,6 +3541,13 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
         encoded = { 'items': getattr(payload, 'items', None), 'total': getattr(payload, 'total', None) }
 
     logger.info('create_order called; payload=%s', encoded)
+
+    # Self-heal legacy schemas before persisting order snapshots (including
+    # payment_method/payment_status for cash or Mercado Pago flows).
+    try:
+        _run_add_user_columns()
+    except Exception:
+        logger.exception('create_order: could not run orders optional-columns migration')
 
     # decode optional bearer token so the DB task can associate the order with the authenticated user
     auth = request.headers.get('authorization') or request.headers.get('Authorization')
@@ -3541,7 +3640,7 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
         logger.exception('create_order: could not normalize customer email')
 
     # Infer source from headers or payload: prefer explicit payload.source, then header 'X-Client-Platform' or 'X-Source'.
-    # Si el payload no trae source, o viene vacío, se infiere SIEMPRE aquí y se fuerza el valor correcto.
+    # Si el payload no trae source, o viene vacÃ­o, se infiere SIEMPRE aquÃ­ y se fuerza el valor correcto.
     try:
         src = getattr(payload, 'source', None)
         if not src or not str(src).strip():
@@ -3550,10 +3649,10 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
                 src = src_hdr
         if not src or not str(src).strip():
             ua = (request.headers.get('user-agent') or '').lower()
-            # Detectar móvil por user-agent o headers
+            # Detectar mÃ³vil por user-agent o headers
             if ua and ( 'okhttp' in ua or 'android' in ua or 'dalvik' in ua or 'retrofit' in ua or 'okhttp/' in ua ):
                 src = 'app'
-            # También considerar si el referer o origin contiene 'app' (por si hay proxy)
+            # TambiÃ©n considerar si el referer o origin contiene 'app' (por si hay proxy)
             ref = (request.headers.get('referer') or request.headers.get('origin') or '').lower()
             if 'app' in ref:
                 src = 'app'
@@ -3564,7 +3663,7 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
         # Solo permitir 'app' o 'web'
         if src not in ('app', 'web'):
             src = 'web'
-        # Forzar 'app' si user-agent es móvil aunque el cliente mande mal el campo
+        # Forzar 'app' si user-agent es mÃ³vil aunque el cliente mande mal el campo
         ua = (request.headers.get('user-agent') or '').lower()
         if ua and ( 'okhttp' in ua or 'android' in ua or 'dalvik' in ua or 'retrofit' in ua or 'okhttp/' in ua ):
             src = 'app'
@@ -3578,7 +3677,7 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
         logger.info(f'[create_order] source inferido: {src}')
     except Exception as e:
         setattr(payload, 'source', 'web')
-        logger.warning(f'[create_order] Error infiriendo source, se forzó a web: {e}')
+        logger.warning(f'[create_order] Error infiriendo source, se forzÃ³ a web: {e}')
 
     def task():
         db = SessionLocal()
