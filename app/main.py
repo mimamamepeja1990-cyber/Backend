@@ -637,6 +637,61 @@ def _build_order_seen_subject(order_data: Dict[str, Any]) -> str:
     return f'Tu pedido #{order_id} ya fue visto por administracion'
 
 
+def _order_payment_ui(order_data: Dict[str, Any]) -> Dict[str, str]:
+    method_raw = str(order_data.get('payment_method') or '').strip().lower()
+    status_raw = str(order_data.get('payment_status') or '').strip().lower()
+    reference_raw = str(order_data.get('payment_reference') or '').strip()
+
+    method_map = {
+        'mercadopago': 'Mercado Pago',
+        'mp': 'Mercado Pago',
+        'mercado_pago': 'Mercado Pago',
+        'cash': 'Efectivo',
+        'efectivo': 'Efectivo',
+    }
+    status_map = {
+        'mp_pending': 'Pendiente',
+        'pending': 'Pendiente',
+        'in_process': 'Pendiente',
+        'inprocess': 'Pendiente',
+        'authorized': 'Pendiente',
+        'cash_pending': 'A cobrar en entrega',
+        'approved': 'Aprobado',
+        'accredited': 'Aprobado',
+        'rejected': 'Rechazado',
+        'cancelled': 'Cancelado',
+        'cancelled_by_user': 'Cancelado',
+        'refunded': 'Reintegrado',
+        'charged_back': 'Reintegrado',
+    }
+
+    method_label = method_map.get(method_raw, method_raw.replace('_', ' ').title() if method_raw else 'No especificado')
+    status_label = status_map.get(status_raw, status_raw.replace('_', ' ').title() if status_raw else 'Pendiente')
+
+    status_bg = '#fff7ed'
+    status_color = '#9a3412'
+    if status_raw in ('approved', 'accredited'):
+        status_bg = '#ecfdf3'
+        status_color = '#166534'
+    elif status_raw in ('rejected', 'cancelled', 'cancelled_by_user'):
+        status_bg = '#fef2f2'
+        status_color = '#991b1b'
+    elif status_raw in ('refunded', 'charged_back'):
+        status_bg = '#eff6ff'
+        status_color = '#1d4ed8'
+    elif status_raw in ('cash_pending',):
+        status_bg = '#ecfeff'
+        status_color = '#0f766e'
+
+    return {
+        'method_label': method_label,
+        'status_label': status_label,
+        'status_bg': status_bg,
+        'status_color': status_color,
+        'reference': reference_raw,
+    }
+
+
 def _build_order_seen_html(order_data: Dict[str, Any]) -> str:
     brand_name = html_escape(str(os.environ.get('RESEND_BRAND_NAME') or 'DistriAr'))
     order_id = html_escape(str(order_data.get('id') or 'sin-id'))
@@ -685,6 +740,17 @@ def _build_order_seen_html(order_data: Dict[str, Any]) -> str:
 
     email_val = _normalize_email(order_data.get('user_email'))
     email_text = html_escape(email_val) if email_val else '-'
+    payment_ui = _order_payment_ui(order_data)
+    payment_method_text = html_escape(payment_ui.get('method_label') or 'No especificado')
+    payment_status_text = html_escape(payment_ui.get('status_label') or 'Pendiente')
+    payment_status_badge = (
+        "<span style='display:inline-block;padding:4px 10px;border-radius:999px;"
+        f"background:{payment_ui.get('status_bg') or '#fff7ed'};"
+        f"color:{payment_ui.get('status_color') or '#9a3412'};"
+        "font-weight:700;font-size:12px;'>"
+        f"{payment_status_text}</span>"
+    )
+    payment_ref_text = html_escape(payment_ui.get('reference') or '-') if payment_ui.get('reference') else '-'
 
     address_parts: List[str] = []
     calle = order_data.get('user_calle')
@@ -780,6 +846,9 @@ def _build_order_seen_html(order_data: Dict[str, Any]) -> str:
         f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Total</td><td style='padding:10px 12px;text-align:right;font-size:15px;color:#0f172a;font-weight:700;'>{total_text}</td></tr>"
         f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Email</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:600;'>{email_text}</td></tr>"
         f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Entrega</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:600;'>{delivery_address}</td></tr>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Forma de pago</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:700;'>{payment_method_text}</td></tr>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Estado del pago</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:700;'>{payment_status_badge}</td></tr>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Referencia</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:600;'>{payment_ref_text}</td></tr>"
         f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Ventana estimada</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:700;'>{delivery_window}</td></tr>"
         "</table>"
         "<div style='font-size:14px;font-weight:700;color:#0f172a;margin-bottom:8px;'>Productos solicitados</div>"
@@ -836,6 +905,17 @@ def _build_order_confirmation_html(order_data: Dict[str, Any]) -> str:
 
     email_val = _normalize_email(order_data.get('user_email'))
     email_text = html_escape(email_val) if email_val else '-'
+    payment_ui = _order_payment_ui(order_data)
+    payment_method_text = html_escape(payment_ui.get('method_label') or 'No especificado')
+    payment_status_text = html_escape(payment_ui.get('status_label') or 'Pendiente')
+    payment_status_badge = (
+        "<span style='display:inline-block;padding:4px 10px;border-radius:999px;"
+        f"background:{payment_ui.get('status_bg') or '#fff7ed'};"
+        f"color:{payment_ui.get('status_color') or '#9a3412'};"
+        "font-weight:700;font-size:12px;'>"
+        f"{payment_status_text}</span>"
+    )
+    payment_ref_text = html_escape(payment_ui.get('reference') or '-') if payment_ui.get('reference') else '-'
 
     address_parts: List[str] = []
     calle = order_data.get('user_calle')
@@ -922,6 +1002,9 @@ def _build_order_confirmation_html(order_data: Dict[str, Any]) -> str:
         f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Total</td><td style='padding:10px 12px;text-align:right;font-size:15px;color:#0f172a;font-weight:700;'>{total_text}</td></tr>"
         f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Email</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:600;'>{email_text}</td></tr>"
         f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Entrega</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:600;'>{delivery_address}</td></tr>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Forma de pago</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:700;'>{payment_method_text}</td></tr>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Estado del pago</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:700;'>{payment_status_badge}</td></tr>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Referencia</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:600;'>{payment_ref_text}</td></tr>"
         "</table>"
         "<div style='font-size:14px;font-weight:700;color:#0f172a;margin-bottom:8px;'>Detalle del pedido</div>"
         "<table role='presentation' width='100%' cellspacing='0' cellpadding='0' "
