@@ -3322,10 +3322,15 @@ async def create_mercadopago_preference(request: Request, payload: schemas.Merca
     if not back_urls:
         origin = _infer_frontend_origin(request)
         if origin:
+            return_path = (os.environ.get('MERCADOPAGO_RETURN_PATH') or '/catalogo').strip()
+            if not return_path:
+                return_path = '/catalogo'
+            if not return_path.startswith('/'):
+                return_path = '/' + return_path
             back_urls = {
-                'success': f"{origin}/catalogo?payment=success",
-                'failure': f"{origin}/catalogo?payment=failure",
-                'pending': f"{origin}/catalogo?payment=pending",
+                'success': f"{origin}{return_path}?payment=success",
+                'failure': f"{origin}{return_path}?payment=failure",
+                'pending': f"{origin}{return_path}?payment=pending",
             }
 
     if back_urls:
