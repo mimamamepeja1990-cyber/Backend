@@ -3270,6 +3270,115 @@ def _update_order_payment_snapshot(order_id: Any, payment_method: Optional[str],
             conn.execute(text(f"UPDATE orders SET {set_sql} WHERE CAST(id AS TEXT) = :id"), {**params, 'id': str(order_id)})
 
 
+def _normalize_mp_payment_status(value: Optional[str]) -> str:
+    raw = str(value or '').strip().lower()
+    if raw in ('approved', 'accredited'):
+        return 'approved'
+    if raw in ('rejected', 'cancelled', 'cancelled_by_user'):
+        return 'rejected'
+    if raw in ('refunded', 'charged_back'):
+        return 'refunded'
+    if raw in ('authorized', 'in_process', 'inprocess', 'pending', 'in_mediation', 'action_required'):
+        return 'in_process'
+    if raw:
+        return raw
+    return 'mp_pending'
+
+
+async def _sync_mercadopago_payment(
+    payment_id: Optional[str],
+    external_reference: Optional[str],
+    raw_status: Optional[str],
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    metadata = metadata or {}
+    access_token = (os.environ.get('MERCADOPAGO_ACCESS_TOKEN') or '').strip()
+    allow_unverified_raw = (os.environ.get('MERCADOPAGO_ALLOW_UNVERIFIED_SYNC') or 'false').strip().lower()
+    allow_unverified = allow_unverified_raw in ('1', 'true', 'yes', 'on')
+
+    resolved_order_id = str(external_reference or metadata.get('order_id') or '').strip()
+    resolved_status = str(raw_status or '').strip().lower()
+    payment_reference = str(payment_id or '').strip() or None
+    mp_payload: Optional[Dict[str, Any]] = None
+
+    # Security: by default, require payment_id so the backend can verify the
+    # payment against Mercado Pago before updating order status.
+    if not payment_id and not allow_unverified:
+        return {
+            'ok': True,
+            'updated': False,
+            'reason': 'missing_payment_id',
+            'payment_status': _normalize_mp_payment_status(resolved_status),
+        }
+
+    # Prefer authoritative payment details from MP when payment_id is available.
+    if payment_id and access_token:
+        try:
+            timeout = httpx.Timeout(20.0, connect=8.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(
+                    f"https://api.mercadopago.com/v1/payments/{payment_id}",
+                    headers={'Authorization': f'Bearer {access_token}'},
+                )
+            if resp.status_code < 400:
+                mp_payload = resp.json()
+                resolved_status = str(mp_payload.get('status') or resolved_status or '').strip().lower()
+                mp_ext = str(mp_payload.get('external_reference') or '').strip()
+                if mp_ext:
+                    resolved_order_id = mp_ext
+                try:
+                    md = mp_payload.get('metadata') if isinstance(mp_payload, dict) else None
+                    if not resolved_order_id and isinstance(md, dict):
+                        resolved_order_id = str(md.get('order_id') or '').strip()
+                except Exception:
+                    pass
+                pid = str(mp_payload.get('id') or payment_id).strip()
+                payment_reference = pid or payment_reference
+            else:
+                logger.warning(
+                    'Mercado Pago payment lookup failed status=%s body=%s',
+                    resp.status_code,
+                    (resp.text or '')[:500],
+                )
+        except Exception:
+            logger.exception('Could not fetch Mercado Pago payment details for payment_id=%s', payment_id)
+
+    if not resolved_order_id:
+        return {
+            'ok': True,
+            'updated': False,
+            'reason': 'missing_order_reference',
+            'payment_status': _normalize_mp_payment_status(resolved_status),
+        }
+
+    normalized_status = _normalize_mp_payment_status(resolved_status)
+    try:
+        _update_order_payment_snapshot(
+            order_id=resolved_order_id,
+            payment_method='mercadopago',
+            payment_status=normalized_status,
+            payment_reference=payment_reference,
+        )
+    except Exception:
+        logger.exception('Could not update order payment snapshot from MP event order_id=%s', resolved_order_id)
+        return {
+            'ok': False,
+            'updated': False,
+            'order_id': str(resolved_order_id),
+            'payment_status': normalized_status,
+            'payment_reference': payment_reference,
+        }
+
+    return {
+        'ok': True,
+        'updated': True,
+        'order_id': str(resolved_order_id),
+        'payment_status': normalized_status,
+        'payment_reference': payment_reference,
+        'has_payment_payload': bool(mp_payload),
+    }
+
+
 @app.get('/payments/mercadopago/health')
 async def mercadopago_health(request: Request):
     configured = bool((os.environ.get('MERCADOPAGO_ACCESS_TOKEN') or '').strip())
@@ -3279,6 +3388,8 @@ async def mercadopago_health(request: Request):
     explicit_failure = (os.environ.get('MERCADOPAGO_FAILURE_URL') or '').strip()
     explicit_pending = (os.environ.get('MERCADOPAGO_PENDING_URL') or '').strip()
     return_path = (os.environ.get('MERCADOPAGO_RETURN_PATH') or '/catalogo').strip() or '/catalogo'
+    allow_unverified_raw = (os.environ.get('MERCADOPAGO_ALLOW_UNVERIFIED_SYNC') or 'false').strip().lower()
+    allow_unverified = allow_unverified_raw in ('1', 'true', 'yes', 'on')
 
     try:
         insp = inspect(engine)
@@ -3301,10 +3412,82 @@ async def mercadopago_health(request: Request):
                 'failure': bool(explicit_failure),
                 'pending': bool(explicit_pending),
             },
+            'notification_url_configured': bool((os.environ.get('MERCADOPAGO_NOTIFICATION_URL') or '').strip()),
+            'allow_unverified_sync': allow_unverified,
             'return_path': return_path,
         },
         headers=headers,
     )
+
+
+@app.api_route('/payments/mercadopago/webhook', methods=['POST', 'GET'])
+async def mercadopago_webhook(request: Request):
+    query = request.query_params
+    payment_id = (
+        query.get('payment_id')
+        or query.get('id')
+        or query.get('data.id')
+    )
+    external_reference = query.get('external_reference')
+    status = query.get('status') or query.get('collection_status')
+
+    body: Dict[str, Any] = {}
+    try:
+        maybe_body = await request.json()
+        if isinstance(maybe_body, dict):
+            body = maybe_body
+    except Exception:
+        body = {}
+
+    if not payment_id:
+        try:
+            data_obj = body.get('data')
+            if isinstance(data_obj, dict):
+                payment_id = data_obj.get('id') or data_obj.get('payment_id')
+        except Exception:
+            pass
+
+    if not external_reference:
+        external_reference = str(body.get('external_reference') or '').strip() or None
+
+    if not status:
+        status = str(body.get('status') or body.get('collection_status') or '').strip() or None
+
+    metadata = body.get('metadata') if isinstance(body.get('metadata'), dict) else {}
+    result = await _sync_mercadopago_payment(
+        payment_id=str(payment_id or '').strip() or None,
+        external_reference=str(external_reference or '').strip() or None,
+        raw_status=str(status or '').strip() or None,
+        metadata=metadata,
+    )
+
+    headers = _cors_headers_for_request(request)
+    return JSONResponse(status_code=200, content=result, headers=headers)
+
+
+@app.post('/payments/mercadopago/sync')
+async def mercadopago_sync(request: Request):
+    body: Dict[str, Any] = {}
+    try:
+        maybe_body = await request.json()
+        if isinstance(maybe_body, dict):
+            body = maybe_body
+    except Exception:
+        body = {}
+
+    payment_id = str(body.get('payment_id') or body.get('id') or '').strip() or None
+    external_reference = str(body.get('external_reference') or body.get('order_id') or '').strip() or None
+    status = str(body.get('status') or body.get('collection_status') or '').strip() or None
+    metadata = body.get('metadata') if isinstance(body.get('metadata'), dict) else {}
+
+    result = await _sync_mercadopago_payment(
+        payment_id=payment_id,
+        external_reference=external_reference,
+        raw_status=status,
+        metadata=metadata,
+    )
+    headers = _cors_headers_for_request(request)
+    return JSONResponse(status_code=200, content=result, headers=headers)
 
 
 @app.post('/payments/mercadopago/preference', response_model=schemas.MercadoPagoPreferenceResponse)
