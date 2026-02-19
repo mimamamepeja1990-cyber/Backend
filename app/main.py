@@ -3275,6 +3275,10 @@ async def mercadopago_health(request: Request):
     configured = bool((os.environ.get('MERCADOPAGO_ACCESS_TOKEN') or '').strip())
     use_sdk_raw = (os.environ.get('MERCADOPAGO_USE_SDK') or 'true').strip().lower()
     use_sdk = use_sdk_raw not in ('0', 'false', 'no', 'off')
+    explicit_success = (os.environ.get('MERCADOPAGO_SUCCESS_URL') or '').strip()
+    explicit_failure = (os.environ.get('MERCADOPAGO_FAILURE_URL') or '').strip()
+    explicit_pending = (os.environ.get('MERCADOPAGO_PENDING_URL') or '').strip()
+    return_path = (os.environ.get('MERCADOPAGO_RETURN_PATH') or '/catalogo').strip() or '/catalogo'
 
     try:
         insp = inspect(engine)
@@ -3292,6 +3296,12 @@ async def mercadopago_health(request: Request):
             'sdk_enabled': use_sdk,
             'orders_payment_columns_ready': required.issubset(cols),
             'missing_order_columns': sorted(list(required - cols)),
+            'explicit_back_urls': {
+                'success': bool(explicit_success),
+                'failure': bool(explicit_failure),
+                'pending': bool(explicit_pending),
+            },
+            'return_path': return_path,
         },
         headers=headers,
     )
@@ -3362,33 +3372,60 @@ async def create_mercadopago_preference(request: Request, payload: schemas.Merca
     if payer_obj:
         mp_payload['payer'] = payer_obj
 
-    back_urls = {}
+    def _is_http_url(v: Any) -> bool:
+        try:
+            s = str(v or '').strip().lower()
+            return s.startswith('http://') or s.startswith('https://')
+        except Exception:
+            return False
+
+    # 1) Explicit env URLs (highest priority in production)
+    back_urls: Dict[str, str] = {}
+    env_back_urls = {
+        'success': (os.environ.get('MERCADOPAGO_SUCCESS_URL') or '').strip(),
+        'failure': (os.environ.get('MERCADOPAGO_FAILURE_URL') or '').strip(),
+        'pending': (os.environ.get('MERCADOPAGO_PENDING_URL') or '').strip(),
+    }
+    for key in ('success', 'failure', 'pending'):
+        value = env_back_urls.get(key)
+        if _is_http_url(value):
+            back_urls[key] = str(value).strip()
+
+    # 2) Request payload URLs (frontend-provided)
     try:
         raw_back_urls = payload.back_urls if isinstance(payload.back_urls, dict) else {}
     except Exception:
         raw_back_urls = {}
     for key in ('success', 'failure', 'pending'):
+        if key in back_urls:
+            continue
         value = raw_back_urls.get(key)
-        if isinstance(value, str) and (value.startswith('http://') or value.startswith('https://')):
-            back_urls[key] = value
+        if _is_http_url(value):
+            back_urls[key] = str(value).strip()
 
-    if not back_urls:
-        origin = _infer_frontend_origin(request)
+    # 3) Inferred base URL fallback
+    if 'success' not in back_urls:
+        forced_origin = (
+            (os.environ.get('FRONTEND_BASE_URL') or '')
+            or (os.environ.get('PUBLIC_FRONTEND_URL') or '')
+            or (os.environ.get('APP_BASE_URL') or '')
+        ).strip().rstrip('/')
+        origin = forced_origin if _is_http_url(forced_origin) else _infer_frontend_origin(request)
         if origin:
             return_path = (os.environ.get('MERCADOPAGO_RETURN_PATH') or '/catalogo').strip()
             if not return_path:
                 return_path = '/catalogo'
             if not return_path.startswith('/'):
                 return_path = '/' + return_path
-            back_urls = {
-                'success': f"{origin}{return_path}?payment=success",
-                'failure': f"{origin}{return_path}?payment=failure",
-                'pending': f"{origin}{return_path}?payment=pending",
-            }
+            back_urls['success'] = back_urls.get('success') or f"{origin}{return_path}?payment=success"
+            back_urls['failure'] = back_urls.get('failure') or f"{origin}{return_path}?payment=failure"
+            back_urls['pending'] = back_urls.get('pending') or f"{origin}{return_path}?payment=pending"
 
     if back_urls:
         mp_payload['back_urls'] = back_urls
-        mp_payload['auto_return'] = 'approved'
+        # Mercado Pago requires back_urls.success when auto_return=approved.
+        if back_urls.get('success'):
+            mp_payload['auto_return'] = 'approved'
 
     notification_url = (os.environ.get('MERCADOPAGO_NOTIFICATION_URL') or '').strip()
     if notification_url:
