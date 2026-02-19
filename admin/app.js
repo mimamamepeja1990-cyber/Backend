@@ -983,6 +983,44 @@ function getOrderItemPromoName(it){
   }
 }
 
+function normalizeOrderPaymentMethod(method){
+  const raw = String(method || '').trim().toLowerCase();
+  if (!raw) return '';
+  if (raw === 'mercadopago' || raw === 'mp' || raw === 'mercado_pago') return 'mercadopago';
+  if (raw === 'cash' || raw === 'efectivo') return 'cash';
+  return raw;
+}
+
+function formatOrderPaymentMethod(order){
+  try{
+    const method = normalizeOrderPaymentMethod(order && order.payment_method);
+    if (method === 'mercadopago') return 'Mercado Pago';
+    if (method === 'cash') return 'Efectivo';
+    return order && order.payment_method ? String(order.payment_method) : '—';
+  }catch(_){
+    return '—';
+  }
+}
+
+function formatOrderPaymentStatus(order){
+  try{
+    const status = String((order && order.payment_status) || '').trim().toLowerCase();
+    if (!status) return '';
+    const labels = {
+      mp_pending: 'pendiente',
+      cash_pending: 'a cobrar',
+      approved: 'aprobado',
+      rejected: 'rechazado',
+      cancelled: 'cancelado',
+      refunded: 'reintegrado',
+      in_process: 'en proceso'
+    };
+    return labels[status] || status;
+  }catch(_){
+    return '';
+  }
+}
+
 function findOrderRowById(id){
   try{ return Array.from(document.querySelectorAll('table[id^="ordersTable"] tbody tr')).find(r => String((r.children && r.children[0] && r.children[0].textContent) || '').trim() === String(id)); }catch(e){ return null; }
 }
@@ -1099,6 +1137,8 @@ function renderOrders(list, source, dateFilter){
 function orderRowFor(o){
   const itemsArr = safeParseItems(o.items || []);
   const hasConsumo = (itemsArr || []).some(it => isOrderItemConsumo(it));
+  const paymentMethod = formatOrderPaymentMethod(o);
+  const paymentStatus = formatOrderPaymentStatus(o);
   const itemsList = (itemsArr || []).map(it => {
     const qtyLabel = formatOrderQty(it);
     return `<li>${renderOrderItemLabel(it)} <span class="muted">× ${escapeHtml(qtyLabel)}</span></li>`;
@@ -1131,6 +1171,7 @@ function orderRowFor(o){
         <div class="order-row-user"><strong>Cliente:</strong> ${escapeHtml(userDisplay)}</div>
         <div class="order-row-address"><strong>Dirección:</strong> ${escapeHtml(address || '—')}</div>
         <div class="order-row-total"><strong>Total:</strong> $${Number(o.total||0).toFixed(2)}</div>
+        <div class="order-row-payment"><strong>Forma de pago:</strong> ${escapeHtml(paymentMethod)}${paymentStatus ? ` <span class="muted">(${escapeHtml(paymentStatus)})</span>` : ''}</div>
         ${isPending ? '<div class="order-row-pending">• pendiente</div>' : ''}
         <div class="order-row-actions">
           <button data-id="${o.id}" class="viewOrderBtn btn">Ver</button>
@@ -1228,6 +1269,8 @@ function showOrderDetail(order){
   const hasConsumo = (itemsArr || []).some(it => isOrderItemConsumo(it));
   const itemsHtml = (itemsArr || []).map(it=>`<li><strong>${renderOrderItemLabel(it)}</strong> — ${escapeHtml(formatOrderQty(it))} × $${Number(it.meta?.price||0).toFixed(2)}</li>`).join('') || '<li>(sin ítems)</li>';
   const address = [order.user_barrio, order.user_calle, order.user_numeracion].filter(Boolean).join(', ');
+  const paymentMethod = formatOrderPaymentMethod(order);
+  const paymentStatus = formatOrderPaymentStatus(order);
   // prefer user_* fields, otherwise display token preview when available
   const previewName = order._token_preview && (order._token_preview.name || order._token_preview.email) ? (order._token_preview.name || order._token_preview.email) : null;
   const displayName = order.user_full_name || previewName || order.user_email || (order.user_id ? '#'+order.user_id : '—');
@@ -1237,6 +1280,7 @@ function showOrderDetail(order){
       <div><strong>Dirección:</strong> ${escapeHtml(address || '—')}</div>
       <div><strong>Total:</strong> $${Number(order.total||0).toFixed(2)}</div>
       <div><strong>Estado:</strong> ${escapeHtml(order.status||'')}</div>
+      <div><strong>Forma de pago:</strong> ${escapeHtml(paymentMethod)}${paymentStatus ? ` <span class="muted">(${escapeHtml(paymentStatus)})</span>` : ''}</div>
       ${hasConsumo ? '<div style="margin-top:8px;padding:8px 10px;border-radius:10px;background:#fff7ed;border:1px solid rgba(242,107,56,0.25);color:#9a3412;font-weight:800">Pedido con consumo inmediato</div>' : ''}
       <div class="mt-8"><strong>Items:</strong><ul class="order-items-list">${itemsHtml}</ul></div>
     </div>

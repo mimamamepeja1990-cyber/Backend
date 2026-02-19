@@ -930,7 +930,11 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
             kwargs['contains_consumos'] = True
     except Exception:
         pass
-    optional = ['user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion', '_token_received', '_token_preview']
+    optional = [
+        'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
+        '_token_received', '_token_preview',
+        'payment_method', 'payment_status', 'payment_reference'
+    ]
     try:
         bind = db.get_bind()
         insp = inspect(bind)
@@ -957,6 +961,43 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
         except Exception:
             v = str(v)
         kwargs[f] = v
+
+    # Normalize payment snapshot values to stable enums.
+    try:
+        pm_raw = kwargs.get('payment_method')
+        pm_norm = None
+        if pm_raw is not None:
+            pm = str(pm_raw).strip().lower()
+            if pm in ('mercadopago', 'mp', 'mercado_pago'):
+                pm_norm = 'mercadopago'
+            elif pm in ('cash', 'efectivo'):
+                pm_norm = 'cash'
+        if pm_norm:
+            kwargs['payment_method'] = pm_norm
+        else:
+            kwargs.pop('payment_method', None)
+
+        ps_raw = kwargs.get('payment_status')
+        if ps_raw is None and pm_norm == 'mercadopago':
+            kwargs['payment_status'] = 'mp_pending'
+        elif ps_raw is None and pm_norm == 'cash':
+            kwargs['payment_status'] = 'cash_pending'
+        elif ps_raw is not None:
+            ps = str(ps_raw).strip().lower()
+            if ps:
+                kwargs['payment_status'] = ps
+            else:
+                kwargs.pop('payment_status', None)
+
+        pr_raw = kwargs.get('payment_reference')
+        if pr_raw is not None:
+            pr = str(pr_raw).strip()
+            if pr:
+                kwargs['payment_reference'] = pr[:200]
+            else:
+                kwargs.pop('payment_reference', None)
+    except Exception:
+        pass
 
     # If an authenticated user token was provided (current_user), and the payload
     # did not include contact fields, fill them from the user's record when possible.
@@ -1188,7 +1229,11 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                 existing = set()
             # base columns we expect
             cols = ['id', 'items', 'total', 'status', 'created_at']
-            optional_cols = ['user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion', '_token_received', '_token_preview']
+            optional_cols = [
+                'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
+                '_token_received', '_token_preview',
+                'payment_method', 'payment_status', 'payment_reference'
+            ]
             for c in optional_cols:
                 if c in existing:
                     cols.append(c)
@@ -1235,7 +1280,11 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                 'created_at': new_created_at
             }
             # include any optional user_* fields we actually set
-            for f in ['user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion', '_token_received', '_token_preview']:
+            for f in [
+                'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
+                '_token_received', '_token_preview',
+                'payment_method', 'payment_status', 'payment_reference'
+            ]:
                 if f in kwargs:
                     objd[f] = kwargs.get(f)
                 if 'source' in kwargs:
@@ -1357,7 +1406,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
             db.rollback()
         except Exception:
             pass
-        if 'does not exist' in msg or 'UndefinedColumn' in msg or 'unknown column' in msg or 'column "user_' in msg:
+        if 'does not exist' in msg or 'UndefinedColumn' in msg or 'unknown column' in msg or 'column "user_' in msg or 'column "payment_' in msg:
             logger.info('Retrying explicit insert without optional user_* fields due to DB schema mismatch')
             for f in optional:
                 if f in kwargs:
@@ -1394,7 +1443,11 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                         'status': kwargs.get('status', 'nuevo'),
                         'created_at': new_created_at
                     }
-                    for f in ['user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion', '_token_received', '_token_preview']:
+                    for f in [
+                        'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
+                        '_token_received', '_token_preview',
+                        'payment_method', 'payment_status', 'payment_reference'
+                    ]:
                         if f in kwargs:
                             objd[f] = kwargs.get(f)
                     obj = SimpleNamespace(**objd)
@@ -1431,6 +1484,14 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
         obj.items = _json.loads(obj.items) if isinstance(obj.items, str) else obj.items
     except Exception:
         obj.items = []
+    # Ensure the response object carries recent metadata even when selected via
+    # fallback queries that only fetched minimal columns.
+    try:
+        for _col in ('source', 'payment_method', 'payment_status', 'payment_reference'):
+            if getattr(obj, _col, None) is None and kwargs.get(_col) is not None:
+                setattr(obj, _col, kwargs.get(_col))
+    except Exception:
+        pass
     # As a final durability step: if the orders table lacked user_* columns
     # during insert and we didn't persist a token preview yet, persist a
     # minimal preview derived from any user_* snapshot fields so contact info
@@ -1497,7 +1558,11 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
             to_set = {}
             # Candidate sources: kwargs (what we attempted to insert), payload attrs, preview_candidate
             sources = (kwargs, getattr(payload, '__dict__', {}) or {}, preview_candidate or {})
-            for col in ('user_id','user_full_name','user_email','user_barrio','user_calle','user_numeracion','_token_preview','_token_received'):
+            for col in (
+                'user_id','user_full_name','user_email','user_barrio','user_calle','user_numeracion',
+                '_token_preview','_token_received',
+                'payment_method','payment_status','payment_reference'
+            ):
                 if col not in existing_cols:
                     continue
                 val = None
@@ -1565,7 +1630,11 @@ def get_orders(db: Session, skip: int = 0, limit: int = 200, source: Optional[st
         existing = set()
 
     cols = ['id', 'items', 'total', 'status', 'created_at']
-    optional = ['user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion', '_token_received', '_token_preview', 'source']
+    optional = [
+        'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
+        '_token_received', '_token_preview', 'source',
+        'payment_method', 'payment_status', 'payment_reference'
+    ]
     for c in optional:
         if c in existing:
             cols.append(c)

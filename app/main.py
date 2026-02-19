@@ -211,6 +211,9 @@ async def lifespan(app: FastAPI):
                 # Ensure 'source' has a server-side default so rows without explicit
                 # source end up with 'web' in the DB and survive restarts.
                 'source': "VARCHAR(50) DEFAULT 'web'",
+                'payment_method': 'VARCHAR(50)',
+                'payment_status': 'VARCHAR(50)',
+                'payment_reference': 'VARCHAR(200)',
             }
 
             try:
@@ -1555,6 +1558,10 @@ def _run_add_user_columns() -> dict:
         ('user_numeracion', 'VARCHAR(100)'),
         ('_token_received', 'BOOLEAN'),
         ('_token_preview', 'TEXT'),
+        ('source', "VARCHAR(50) DEFAULT 'web'"),
+        ('payment_method', 'VARCHAR(50)'),
+        ('payment_status', 'VARCHAR(50)'),
+        ('payment_reference', 'VARCHAR(200)'),
     ]
     dialect = engine.dialect.name if engine and getattr(engine, 'dialect', None) else ''
     try:
@@ -3174,6 +3181,214 @@ def stats(db: Session = Depends(get_db)):
 # -----------------------------
 # Orders
 # -----------------------------
+def _infer_frontend_origin(request: Request) -> Optional[str]:
+    try:
+        origin = (request.headers.get('origin') or '').strip()
+        if origin.lower().startswith('http://') or origin.lower().startswith('https://'):
+            return origin.rstrip('/')
+    except Exception:
+        pass
+    try:
+        from urllib.parse import urlparse
+        referer = (request.headers.get('referer') or '').strip()
+        if referer.lower().startswith('http://') or referer.lower().startswith('https://'):
+            parsed = urlparse(referer)
+            if parsed.scheme and parsed.netloc:
+                return f"{parsed.scheme}://{parsed.netloc}"
+    except Exception:
+        pass
+    try:
+        return str(request.base_url).rstrip('/')
+    except Exception:
+        return None
+
+
+def _update_order_payment_snapshot(order_id: Any, payment_method: Optional[str], payment_status: Optional[str], payment_reference: Optional[str]) -> None:
+    try:
+        insp = inspect(engine)
+        existing_cols = {c['name'] for c in insp.get_columns('orders')}
+    except Exception:
+        existing_cols = set()
+
+    set_parts = []
+    params: Dict[str, Any] = {}
+    if payment_method is not None and 'payment_method' in existing_cols:
+        set_parts.append('payment_method = :payment_method')
+        params['payment_method'] = str(payment_method)
+    if payment_status is not None and 'payment_status' in existing_cols:
+        set_parts.append('payment_status = :payment_status')
+        params['payment_status'] = str(payment_status)
+    if payment_reference is not None and 'payment_reference' in existing_cols:
+        set_parts.append('payment_reference = :payment_reference')
+        params['payment_reference'] = str(payment_reference)
+
+    if not set_parts:
+        return
+
+    set_sql = ', '.join(set_parts)
+    use_int_id = False
+    try:
+        oid_int = int(order_id)
+        use_int_id = True
+    except Exception:
+        oid_int = None
+
+    with engine.begin() as conn:
+        if use_int_id:
+            conn.execute(text(f"UPDATE orders SET {set_sql} WHERE id = :id"), {**params, 'id': oid_int})
+        else:
+            conn.execute(text(f"UPDATE orders SET {set_sql} WHERE CAST(id AS TEXT) = :id"), {**params, 'id': str(order_id)})
+
+
+@app.post('/payments/mercadopago/preference', response_model=schemas.MercadoPagoPreferenceResponse)
+async def create_mercadopago_preference(request: Request, payload: schemas.MercadoPagoPreferenceCreate):
+    access_token = (os.environ.get('MERCADOPAGO_ACCESS_TOKEN') or '').strip()
+    if not access_token:
+        raise HTTPException(status_code=503, detail='Mercado Pago no está configurado')
+
+    items = []
+    for item in (payload.items or []):
+        try:
+            qty = int(item.quantity or 1)
+        except Exception:
+            qty = 1
+        if qty <= 0:
+            qty = 1
+
+        try:
+            unit_price = float(item.unit_price or 0)
+        except Exception:
+            unit_price = 0
+        if unit_price <= 0:
+            raise HTTPException(status_code=400, detail='Todos los ítems deben tener un precio válido')
+
+        title = (item.title or '').strip()
+        if not title:
+            title = f"Producto {item.id}"
+
+        mp_item = {
+            'id': str(item.id),
+            'title': title,
+            'quantity': qty,
+            'unit_price': round(unit_price, 2),
+            'currency_id': str(item.currency_id or 'ARS').upper(),
+        }
+        if item.description:
+            mp_item['description'] = str(item.description)
+        items.append(mp_item)
+
+    if not items:
+        raise HTTPException(status_code=400, detail='No hay ítems para cobrar')
+
+    mp_payload: Dict[str, Any] = {
+        'items': items,
+        'external_reference': str(payload.external_reference or payload.order_id),
+        'metadata': {
+            'order_id': str(payload.order_id)
+        }
+    }
+    try:
+        if payload.total is not None:
+            mp_payload['metadata']['order_total'] = float(payload.total)
+    except Exception:
+        pass
+
+    payer_obj = {}
+    try:
+        if payload.payer:
+            if payload.payer.name:
+                payer_obj['name'] = str(payload.payer.name)
+            if payload.payer.email:
+                payer_obj['email'] = str(payload.payer.email)
+    except Exception:
+        payer_obj = {}
+    if payer_obj:
+        mp_payload['payer'] = payer_obj
+
+    back_urls = {}
+    try:
+        raw_back_urls = payload.back_urls if isinstance(payload.back_urls, dict) else {}
+    except Exception:
+        raw_back_urls = {}
+    for key in ('success', 'failure', 'pending'):
+        value = raw_back_urls.get(key)
+        if isinstance(value, str) and (value.startswith('http://') or value.startswith('https://')):
+            back_urls[key] = value
+
+    if not back_urls:
+        origin = _infer_frontend_origin(request)
+        if origin:
+            back_urls = {
+                'success': f"{origin}/catalogo?payment=success",
+                'failure': f"{origin}/catalogo?payment=failure",
+                'pending': f"{origin}/catalogo?payment=pending",
+            }
+
+    if back_urls:
+        mp_payload['back_urls'] = back_urls
+        mp_payload['auto_return'] = 'approved'
+
+    notification_url = (os.environ.get('MERCADOPAGO_NOTIFICATION_URL') or '').strip()
+    if notification_url:
+        mp_payload['notification_url'] = notification_url
+
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json',
+        'X-Idempotency-Key': f"order-{payload.order_id}-{int(time.time() * 1000)}",
+    }
+
+    try:
+        timeout = httpx.Timeout(25.0, connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.post(
+                'https://api.mercadopago.com/checkout/preferences',
+                json=mp_payload,
+                headers=headers,
+            )
+    except Exception as e:
+        logger.exception('Mercado Pago request failed: %s', e)
+        raise HTTPException(status_code=502, detail='No se pudo contactar a Mercado Pago')
+
+    if resp.status_code >= 400:
+        raw = ''
+        try:
+            raw = resp.text[:500]
+        except Exception:
+            raw = 'error'
+        logger.warning('Mercado Pago preference error %s: %s', resp.status_code, raw)
+        raise HTTPException(status_code=502, detail='Mercado Pago rechazó la preferencia')
+
+    try:
+        data = resp.json()
+    except Exception:
+        raise HTTPException(status_code=502, detail='Respuesta inválida de Mercado Pago')
+
+    preference_id = str(data.get('id') or '').strip()
+    init_point = str(data.get('init_point') or data.get('sandbox_init_point') or '').strip()
+    sandbox_init_point = data.get('sandbox_init_point')
+
+    if not preference_id or not init_point:
+        logger.warning('Mercado Pago response missing checkout URLs: %s', data)
+        raise HTTPException(status_code=502, detail='Mercado Pago no devolvió un link de pago')
+
+    try:
+        _update_order_payment_snapshot(
+            order_id=payload.order_id,
+            payment_method='mercadopago',
+            payment_status='mp_pending',
+            payment_reference=preference_id,
+        )
+    except Exception:
+        logger.exception('Could not persist Mercado Pago preference in order %s', payload.order_id)
+
+    return schemas.MercadoPagoPreferenceResponse(
+        preference_id=preference_id,
+        init_point=init_point,
+        sandbox_init_point=sandbox_init_point,
+    )
+
+
 @app.post('/orders', response_model=schemas.OrderResponse)
 async def create_order(request: Request, payload: schemas.OrderCreate):
     # Deep logging of payload for debugging (may include PII)
@@ -3861,7 +4076,15 @@ def list_orders(skip: int = 0, limit: int = 200, source: Optional[str] = None, d
     for r in (rows or []):
         try:
             # r may be a dict (raw select) or an object (ORM fallback). Normalize to dict
-            od = r if isinstance(r, dict) else { k: getattr(r, k, None) for k in ['id','items','total','status','user_id','user_full_name','user_email','user_barrio','user_calle','user_numeracion','created_at','_token_received','_token_preview'] }
+            od = r if isinstance(r, dict) else {
+                k: getattr(r, k, None)
+                for k in [
+                    'id', 'items', 'total', 'status', 'user_id', 'user_full_name', 'user_email',
+                    'user_barrio', 'user_calle', 'user_numeracion', 'created_at',
+                    '_token_received', '_token_preview', 'source',
+                    'payment_method', 'payment_status', 'payment_reference'
+                ]
+            }
             cached_used = False
             # If user fields missing try to merge from cached pushed payload
             if (not od.get('user_full_name') and not od.get('user_email')) and od.get('id'):
@@ -3872,7 +4095,10 @@ def list_orders(skip: int = 0, limit: int = 200, source: Optional[str] = None, d
                         cached_used = True
                         cached_any += 1
                         # prefer explicit user_* fields from cached payload
-                        for f in ('user_full_name','user_email','user_barrio','user_calle','user_numeracion','user_id'):
+                        for f in (
+                            'user_full_name','user_email','user_barrio','user_calle','user_numeracion','user_id',
+                            'source','payment_method','payment_status','payment_reference'
+                        ):
                             if not od.get(f) and p.get(f):
                                 od[f] = p.get(f)
                         # fallback to token preview when available
@@ -4083,7 +4309,11 @@ async def update_order_status(order_id: str, request: Request):
     for c in ('items', 'total', 'created_at', 'status'):
         if c in existing:
             cols.append(c)
-    optional = ['user_id','user_full_name','user_email','user_barrio','user_calle','user_numeracion','_token_received','_token_preview']
+    optional = [
+        'user_id','user_full_name','user_email','user_barrio','user_calle','user_numeracion',
+        '_token_received','_token_preview','source',
+        'payment_method','payment_status','payment_reference'
+    ]
     for c in optional:
         if c in existing:
             cols.append(c)

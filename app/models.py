@@ -45,6 +45,10 @@ class Order(Base):
     _token_preview = Column(Text, nullable=True)
     # source of the order (e.g. 'web' or 'app')
     source = Column(String(50), nullable=True, default='web')
+    # payment snapshot
+    payment_method = Column(String(50), nullable=True)
+    payment_status = Column(String(50), nullable=True)
+    payment_reference = Column(String(200), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

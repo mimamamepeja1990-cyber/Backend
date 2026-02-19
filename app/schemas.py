@@ -103,6 +103,10 @@ class OrderCreate(BaseModel):
     _token_preview: Optional[dict] = None
     # optional source hint (client can set to 'app' or 'web')
     source: Optional[str] = None
+    # payment snapshot
+    payment_method: Optional[str] = None
+    payment_status: Optional[str] = None
+    payment_reference: Optional[str] = None
 
 class OrderResponse(BaseModel):
     id: int
@@ -120,5 +124,37 @@ class OrderResponse(BaseModel):
     _token_received: Optional[bool] = None
     _token_preview: Optional[dict] = None
     source: Optional[str] = None
+    payment_method: Optional[str] = None
+    payment_status: Optional[str] = None
+    payment_reference: Optional[str] = None
 
     model_config = { 'from_attributes': True }
+
+
+class MercadoPagoPreferenceItem(BaseModel):
+    id: Union[str, int]
+    title: str
+    quantity: int = 1
+    unit_price: float
+    currency_id: Optional[str] = 'ARS'
+    description: Optional[str] = None
+
+
+class MercadoPagoPreferencePayer(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+
+
+class MercadoPagoPreferenceCreate(BaseModel):
+    order_id: Union[str, int]
+    items: List[MercadoPagoPreferenceItem]
+    total: Optional[float] = None
+    external_reference: Optional[str] = None
+    payer: Optional[MercadoPagoPreferencePayer] = None
+    back_urls: Optional[dict] = None
+
+
+class MercadoPagoPreferenceResponse(BaseModel):
+    preference_id: str
+    init_point: str
+    sandbox_init_point: Optional[str] = None
