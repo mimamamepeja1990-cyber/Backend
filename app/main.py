@@ -39,6 +39,10 @@ from typing import Tuple
 
 # optional remote backup (GitHub Gist) — configured via env vars
 import httpx
+try:
+    import mercadopago  # type: ignore
+except Exception:
+    mercadopago = None
 GIST_TOKEN = os.environ.get('BACKUP_GIST_TOKEN')
 GIST_ID = os.environ.get('BACKUP_GIST_ID')
 BACKUP_URL = os.environ.get('CATALOG_BACKUP_URL')  # optional public URL to fetch a snapshot from
@@ -3332,23 +3336,65 @@ async def create_mercadopago_preference(request: Request, payload: schemas.Merca
     if notification_url:
         mp_payload['notification_url'] = notification_url
 
-    headers = {
-        'Authorization': f'Bearer {access_token}',
-        'Content-Type': 'application/json',
-        'X-Idempotency-Key': f"order-{payload.order_id}-{int(time.time() * 1000)}",
-    }
+    data: Optional[Dict[str, Any]] = None
+    use_sdk_raw = (os.environ.get('MERCADOPAGO_USE_SDK') or 'true').strip().lower()
+    use_sdk = use_sdk_raw not in ('0', 'false', 'no', 'off')
 
-    try:
-        timeout = httpx.Timeout(25.0, connect=10.0)
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.post(
-                'https://api.mercadopago.com/checkout/preferences',
-                json=mp_payload,
-                headers=headers,
-            )
-    except Exception as e:
-        logger.exception('Mercado Pago request failed: %s', e)
-        raise HTTPException(status_code=502, detail='No se pudo contactar a Mercado Pago')
+    if use_sdk and mercadopago is not None:
+        try:
+            def _sdk_create_preference():
+                client = mercadopago.SDK(access_token)
+                return client.preference().create(mp_payload)
+
+            sdk_resp = await anyio.to_thread.run_sync(_sdk_create_preference)
+            if isinstance(sdk_resp, dict):
+                try:
+                    sdk_status = int(sdk_resp.get('status') or 0)
+                except Exception:
+                    sdk_status = 0
+                if sdk_status >= 400:
+                    raise RuntimeError(f'sdk_status={sdk_status}')
+                sdk_payload = sdk_resp.get('response')
+                if isinstance(sdk_payload, dict):
+                    data = sdk_payload
+                else:
+                    data = sdk_resp
+            if not isinstance(data, dict):
+                raise RuntimeError('invalid_sdk_response')
+        except Exception as sdk_err:
+            data = None
+            logger.warning('Mercado Pago SDK failed, using HTTP fallback: %s', sdk_err)
+
+    if data is None:
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json',
+            'X-Idempotency-Key': f"order-{payload.order_id}-{int(time.time() * 1000)}",
+        }
+
+        try:
+            timeout = httpx.Timeout(25.0, connect=10.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    'https://api.mercadopago.com/checkout/preferences',
+                    json=mp_payload,
+                    headers=headers,
+                )
+        except Exception as e:
+            logger.exception('Mercado Pago request failed: %s', e)
+            raise HTTPException(status_code=502, detail='No se pudo contactar a Mercado Pago')
+
+    if data is not None:
+        class _MPRespShim:
+            def __init__(self, payload_obj):
+                self.status_code = 200
+                self.text = ''
+                self._payload = payload_obj
+
+            def json(self):
+                return self._payload
+
+        resp = _MPRespShim(data)
 
     if resp.status_code >= 400:
         raw = ''
