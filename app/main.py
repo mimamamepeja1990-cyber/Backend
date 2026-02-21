@@ -204,6 +204,7 @@ async def lifespan(app: FastAPI):
         with engine.begin() as conn:
             needed = {
                 'status': "VARCHAR(50) DEFAULT 'nuevo'",
+                'customer_type': "VARCHAR(50) DEFAULT 'mayorista'",
                 'user_id': 'INTEGER',
                 'user_full_name': 'VARCHAR(200)',
                 'user_email': 'VARCHAR(320)',
@@ -1663,6 +1664,7 @@ def _run_add_user_columns() -> dict:
     results = { 'added': [], 'skipped': [], 'failed': [] }
     needed = [
         ('status', "VARCHAR(50) DEFAULT 'nuevo'"),
+        ('customer_type', "VARCHAR(50) DEFAULT 'mayorista'"),
         ('user_id', 'INTEGER'),
         ('user_full_name', 'VARCHAR(200)'),
         ('user_email', 'VARCHAR(320)'),
@@ -3997,6 +3999,33 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
         setattr(payload, 'source', 'web')
         logger.warning(f'[create_order] Error infiriendo source, se forzÃ³ a web: {e}')
 
+    try:
+        customer_type = getattr(payload, 'customer_type', None)
+        if not customer_type or not str(customer_type).strip():
+            customer_type = 'mayorista'
+        customer_type = str(customer_type).strip().lower()
+        if customer_type not in ('mayorista', 'minorista'):
+            customer_type = 'mayorista'
+        try:
+            setattr(payload, 'customer_type', customer_type)
+        except Exception:
+            try:
+                payload.customer_type = customer_type
+            except Exception:
+                pass
+        try:
+            if isinstance(encoded, dict):
+                encoded['customer_type'] = customer_type
+        except Exception:
+            pass
+        logger.info(f'[create_order] customer_type normalizado: {customer_type}')
+    except Exception as e:
+        try:
+            setattr(payload, 'customer_type', 'mayorista')
+        except Exception:
+            pass
+        logger.warning(f'[create_order] Error normalizando customer_type, se forzÃ³ a mayorista: {e}')
+
     def task():
         db = SessionLocal()
         try:
@@ -4031,6 +4060,16 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
                     pass
         except Exception:
             pass
+        # Ensure customer_type is present on pushed payload.
+        try:
+            if not payload.get('customer_type'):
+                payload['customer_type'] = getattr(order, 'customer_type', None)
+            if not payload.get('customer_type'):
+                payload['customer_type'] = encoded.get('customer_type') if isinstance(encoded, dict) else None
+            customer_type_payload = str(payload.get('customer_type') or '').strip().lower()
+            payload['customer_type'] = customer_type_payload if customer_type_payload in ('mayorista', 'minorista') else 'mayorista'
+        except Exception:
+            payload['customer_type'] = 'mayorista'
         # Workaround: if the client provided a bearer token, supplement the
         # pushed payload with user info from the token so the admin sees the
         # user's email/name immediately even if the DB could not persist the
@@ -4131,6 +4170,11 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
                         payload['source'] = getattr(order, 'source', None) or (encoded.get('source') if isinstance(encoded, dict) else None) or 'web'
                     except Exception:
                         payload['source'] = 'web'
+                try:
+                    customer_type_cache = str(payload.get('customer_type') or '').strip().lower()
+                    payload['customer_type'] = customer_type_cache if customer_type_cache in ('mayorista', 'minorista') else 'mayorista'
+                except Exception:
+                    payload['customer_type'] = 'mayorista'
                 ORDER_PAYLOAD_CACHE[str(payload.get('id'))] = {'payload': payload, 'ts': time.time()}
                 try:
                     logger.debug('create_order: cached payload for id=%s (has_user=%s, has_token_preview=%s)', payload.get('id'), bool(payload.get('user_full_name') or payload.get('user_email')), bool(payload.get('_token_preview')))
@@ -4547,12 +4591,22 @@ def list_orders(skip: int = 0, limit: int = 200, source: Optional[str] = None, d
             od = r if isinstance(r, dict) else {
                 k: getattr(r, k, None)
                 for k in [
-                    'id', 'items', 'total', 'status', 'user_id', 'user_full_name', 'user_email',
+                    'id', 'items', 'total', 'status', 'customer_type', 'user_id', 'user_full_name', 'user_email',
                     'user_barrio', 'user_calle', 'user_numeracion', 'created_at',
                     '_token_received', '_token_preview', 'source',
                     'payment_method', 'payment_status', 'payment_reference'
                 ]
             }
+            if not od.get('customer_type'):
+                od['customer_type'] = 'mayorista'
+                try:
+                    cached_ct = ORDER_PAYLOAD_CACHE.get(str(od.get('id'))) if od.get('id') else None
+                    if cached_ct and isinstance(cached_ct.get('payload'), dict):
+                        val = str(cached_ct['payload'].get('customer_type') or '').strip().lower()
+                        if val in ('mayorista', 'minorista'):
+                            od['customer_type'] = val
+                except Exception:
+                    pass
             cached_used = False
             # If user fields missing try to merge from cached pushed payload
             if (not od.get('user_full_name') and not od.get('user_email')) and od.get('id'):
@@ -4564,6 +4618,7 @@ def list_orders(skip: int = 0, limit: int = 200, source: Optional[str] = None, d
                         cached_any += 1
                         # prefer explicit user_* fields from cached payload
                         for f in (
+                            'customer_type',
                             'user_full_name','user_email','user_barrio','user_calle','user_numeracion','user_id',
                             'source','payment_method','payment_status','payment_reference'
                         ):
@@ -4778,6 +4833,7 @@ async def update_order_status(order_id: str, request: Request):
         if c in existing:
             cols.append(c)
     optional = [
+        'customer_type',
         'user_id','user_full_name','user_email','user_barrio','user_calle','user_numeracion',
         '_token_received','_token_preview','source',
         'payment_method','payment_status','payment_reference'

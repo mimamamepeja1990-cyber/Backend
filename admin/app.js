@@ -931,6 +931,40 @@ const orderSearch_web = document.getElementById('orderSearch_web');
 const orderDate_web = document.getElementById('orderDate_web');
 const clearOrderDate_web = document.getElementById('clearOrderDate_web');
 const refreshOrdersBtn_web = document.getElementById('refreshOrdersBtn_web');
+const ordersTypeTabMayorista = document.getElementById('ordersTypeTab_mayorista');
+const ordersTypeTabMinorista = document.getElementById('ordersTypeTab_minorista');
+const badgeTypeMayorista = document.getElementById('badge_type_mayorista');
+const badgeTypeMinorista = document.getElementById('badge_type_minorista');
+let currentOrderCustomerType = 'mayorista';
+let lastOrdersBaseWeb = [];
+
+function normalizeOrderCustomerType(value){
+  const v = String(value || '').trim().toLowerCase();
+  return v === 'minorista' ? 'minorista' : 'mayorista';
+}
+
+function applyOrdersCustomerTypeTabState(){
+  try{
+    const isMinorista = currentOrderCustomerType === 'minorista';
+    if (ordersTypeTabMayorista) ordersTypeTabMayorista.classList.toggle('active', !isMinorista);
+    if (ordersTypeTabMinorista) ordersTypeTabMinorista.classList.toggle('active', isMinorista);
+  }catch(_){ }
+}
+
+function updateOrdersCustomerTypeBadges(list){
+  try{
+    const rows = Array.isArray(list) ? list : [];
+    let mayoristaCount = 0;
+    let minoristaCount = 0;
+    rows.forEach((o) => {
+      const t = normalizeOrderCustomerType(o && o.customer_type);
+      if (t === 'minorista') minoristaCount += 1;
+      else mayoristaCount += 1;
+    });
+    if (badgeTypeMayorista) badgeTypeMayorista.textContent = String(mayoristaCount);
+    if (badgeTypeMinorista) badgeTypeMinorista.textContent = String(minoristaCount);
+  }catch(_){ }
+}
 
 // source-filter buttons were removed to avoid duplication with the tab UI
 // The clear cache control is available in the Orders tab UI (`clearOrderCache`).
@@ -1214,6 +1248,10 @@ function renderOrders(list, source, dateFilter){
       return String(osrc).toLowerCase() === 'web';
     });
   }catch(_){ }
+  try{
+    const selectedType = normalizeOrderCustomerType(currentOrderCustomerType);
+    list = (list || []).filter(o => normalizeOrderCustomerType(o && o.customer_type) === selectedType);
+  }catch(_){ }
   // Agrupar por dÃ­a y deduplicar por id (siempre mostrar solo una vez por tabla)
   const groups = new Map();
   const seenIds = new Set();
@@ -1251,7 +1289,10 @@ function renderOrders(list, source, dateFilter){
     for(const o of items){
       try{
         const tr = orderRowFor(o);
-        if(tr) tr.setAttribute('data-source', String(o.source || source));
+        if(tr){
+          tr.setAttribute('data-source', String(o.source || source));
+          tr.setAttribute('data-customer-type', normalizeOrderCustomerType(o && o.customer_type));
+        }
         ordersTableBody.appendChild(tr);
       }catch(_){ }
     }
@@ -1266,6 +1307,8 @@ function renderOrders(list, source, dateFilter){
         if(!rec || !rec.payload) continue;
         const recSource = String((rec.payload.source||'web')).toLowerCase();
         if(recSource !== 'web') continue;
+        const recCustomerType = normalizeOrderCustomerType(rec.payload.customer_type);
+        if(recCustomerType !== normalizeOrderCustomerType(currentOrderCustomerType)) continue;
         const ageOk = (Date.now() - (rec.ts||0)) < (1000*60*60*24);
         const hasUserInfo = !!(rec.payload.user_full_name || rec.payload.user_email || (rec.payload._token_preview && (rec.payload._token_preview.name || rec.payload._token_preview.email)));
         const isPending = !!rec.pending || !(rec.payload && rec.payload.created_at);
@@ -1316,6 +1359,8 @@ function orderRowFor(o){
   const displayName = o.user_full_name || previewName || o.user_email;
   const userDisplay = displayName ? `${displayName}${o.user_email && displayName !== o.user_email ? ' / ' + o.user_email : ''}` : (o.user_id ? `#${o.user_id}` : 'â€”');
   const address = [o.user_barrio, o.user_calle, o.user_numeracion].filter(Boolean).join(', ');
+  const orderCustomerType = normalizeOrderCustomerType(o.customer_type);
+  const orderCustomerTypeLabel = orderCustomerType === 'minorista' ? 'Minorista' : 'Mayorista';
   const fecha = o.created_at ? new Date(o.created_at).toLocaleString('es-ES', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
   // Solo mostrar 'pendiente' si NO tiene created_at y estÃ¡ en el cachÃ© local como pending
   let isPending = false;
@@ -1337,6 +1382,7 @@ function orderRowFor(o){
         ${hasConsumo ? '<div class="order-row-banner" style="margin:6px 0 10px;padding:8px 10px;border-radius:10px;background:#fff7ed;border:1px solid rgba(242,107,56,0.25);color:#9a3412;font-weight:800">Pedido con consumo inmediato</div>' : ''}
         <div class="order-row-items"><strong>ArtÃ­culos:</strong><ul class="order-items-list">${itemsList}</ul></div>
         <div class="order-row-user"><strong>Cliente:</strong> ${escapeHtml(userDisplay)}</div>
+        <div class="order-row-customer-type"><strong>Perfil:</strong> ${escapeHtml(orderCustomerTypeLabel)}</div>
         <div class="order-row-address"><strong>DirecciÃ³n:</strong> ${escapeHtml(address || 'â€”')}</div>
         <div class="order-row-total"><strong>Total:</strong> $${Number(o.total||0).toFixed(2)}</div>
         <div class="order-row-payment"><strong>Forma de pago:</strong> ${escapeHtml(paymentMethod)}${paymentStatus ? ` <span class="muted">(${escapeHtml(paymentStatus)})</span>` : ''}</div>
@@ -1377,9 +1423,17 @@ function insertOrderAtTop(o, source){
 
     const normalizedSource = String(effectiveSource || 'web').toLowerCase();
     if(normalizedSource !== 'web') return;
+    const normalizedCustomerType = normalizeOrderCustomerType(o && o.customer_type);
+    const shouldRenderNow = normalizedCustomerType === normalizeOrderCustomerType(currentOrderCustomerType);
 
     const ordersTableBody = document.querySelector('#ordersTable_web tbody');
     if(!ordersTableBody) return;
+    try{
+      const incoming = Object.assign({}, o, { source: 'web', customer_type: normalizedCustomerType });
+      const prev = Array.isArray(lastOrdersBaseWeb) ? lastOrdersBaseWeb.filter(x => String((x && x.id) || '') !== oid) : [];
+      lastOrdersBaseWeb = [incoming, ...prev];
+      updateOrdersCustomerTypeBadges(lastOrdersBaseWeb);
+    }catch(_){ }
 
     try{
       window.__localOrderRows = window.__localOrderRows || {};
@@ -1400,16 +1454,19 @@ function insertOrderAtTop(o, source){
       tr.setAttribute('data-local-insert', '1');
       tr.classList.add('pending-sync');
       tr.setAttribute('data-source', 'web');
+      tr.setAttribute('data-customer-type', normalizedCustomerType);
     }catch(_){ }
 
-    ordersTableBody.insertBefore(tr, ordersTableBody.firstChild);
-    try{ regroupOrdersForTable('web'); }catch(_){ }
-    updateBadgeCount('web');
+    if(shouldRenderNow){
+      ordersTableBody.insertBefore(tr, ordersTableBody.firstChild);
+      try{ regroupOrdersForTable('web'); }catch(_){ }
+      updateBadgeCount('web');
+    }
 
     try{ console.debug('[admin] insertOrderAtTop inserted', o.id, 'source=web'); }catch(_){ }
 
     try{
-      const payload = Object.assign({}, o, { source: 'web' });
+      const payload = Object.assign({}, o, { source: 'web', customer_type: normalizedCustomerType });
       window.__localOrderRows[oid] = { html: tr.outerHTML, ts: Date.now(), pending: true, payload };
       window.__localOrderIds.add(oid);
       try{ saveLocalOrderCache(); }catch(_){ }
@@ -1441,12 +1498,14 @@ function showOrderDetail(order){
   const paymentMethod = formatOrderPaymentMethod(order);
   const paymentStatus = formatOrderPaymentStatus(order);
   const paymentReference = String((order && order.payment_reference) || '').trim();
+  const customerTypeLabel = normalizeOrderCustomerType(order && order.customer_type) === 'minorista' ? 'Minorista' : 'Mayorista';
   // prefer user_* fields, otherwise display token preview when available
   const previewName = order._token_preview && (order._token_preview.name || order._token_preview.email) ? (order._token_preview.name || order._token_preview.email) : null;
   const displayName = order.user_full_name || previewName || order.user_email || (order.user_id ? '#'+order.user_id : 'â€”');
   body.innerHTML = `
     <div class="modal-order-body">
       <div><strong>Usuario:</strong> ${escapeHtml(displayName)} ${order.user_email && displayName !== order.user_email ? ' / ' + escapeHtml(order.user_email) : ''}</div>
+      <div><strong>Perfil:</strong> ${escapeHtml(customerTypeLabel)}</div>
       <div><strong>DirecciÃ³n:</strong> ${escapeHtml(address || 'â€”')}</div>
       <div><strong>Total:</strong> $${Number(order.total||0).toFixed(2)}</div>
       <div><strong>Estado:</strong> ${escapeHtml(order.status||'')}</div>
@@ -1532,6 +1591,9 @@ async function refreshOrders(source){
     const dateFilter = date || '';
     let toRender = list;
     if(dateFilter){ try{ toRender = (list || []).filter(o => { try{ return (o.created_at || '').slice(0,10) === dateFilter; }catch(_){ return false; } }); }catch(e){ toRender = list; } }
+    lastOrdersBaseWeb = Array.isArray(toRender) ? toRender.slice() : [];
+    updateOrdersCustomerTypeBadges(lastOrdersBaseWeb);
+    applyOrdersCustomerTypeTabState();
     renderOrders(toRender, source, date);
   }catch(e){ console.error('refreshOrders failed', e); showToast('Error al cargar pedidos', 'error'); }
 }
@@ -1576,12 +1638,25 @@ function showTab(){
 if(tabWebBtn) tabWebBtn.addEventListener('click', ()=> showTab());
 if(clearOrderCacheBtn) clearOrderCacheBtn.addEventListener('click', ()=>{ try{ localStorage.removeItem('admin_local_orders_v1'); window.__localOrderRows = {}; window.__localOrderIds = new Set(); showToast('Cache local de pedidos limpiada', 'info'); refreshOrders('web'); }catch(e){ console.warn('clearOrderCache failed', e); showToast('No se pudo limpiar cache','error'); } });
 
+function setOrdersCustomerType(type){
+  currentOrderCustomerType = normalizeOrderCustomerType(type);
+  applyOrdersCustomerTypeTabState();
+  if(Array.isArray(lastOrdersBaseWeb) && lastOrdersBaseWeb.length){
+    renderOrders(lastOrdersBaseWeb, 'web', (orderDate_web && orderDate_web.value) ? orderDate_web.value : '');
+  }else{
+    refreshOrders('web');
+  }
+}
+
+if (ordersTypeTabMayorista) ordersTypeTabMayorista.addEventListener('click', () => setOrdersCustomerType('mayorista'));
+if (ordersTypeTabMinorista) ordersTypeTabMinorista.addEventListener('click', () => setOrdersCustomerType('minorista'));
+applyOrdersCustomerTypeTabState();
+
 function updateBadgeCount(source){
   try{
     const table = document.querySelector(`#ordersTable_${source} tbody`);
     if(!table) return;
-    const rows = table.querySelectorAll('tr');
-    const count = Array.from(rows).filter(r => !(r.children && r.children[0] && r.children[0].textContent && r.children[0].textContent.indexOf('No hay pedidos') !== -1)).length;
+    const count = table.querySelectorAll('tr td .order-card-vertical').length;
     if(source === 'web' && badgeWeb) badgeWeb.textContent = String(count);
   }catch(e){ console.warn('updateBadgeCount failed', e); }
 }

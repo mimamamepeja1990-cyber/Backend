@@ -93,6 +93,7 @@ class OrderItem(BaseModel):
 class OrderCreate(BaseModel):
     items: List[OrderItem]
     total: float
+    customer_type: Optional[str] = None
     # optional user info (either reference by id or snapshot contact fields)
     user_id: Optional[int] = None
     user_full_name: Optional[str] = None
@@ -115,6 +116,7 @@ class OrderResponse(BaseModel):
     items: List[OrderItem]
     total: float
     status: Optional[str] = 'nuevo'
+    customer_type: Optional[str] = None
     user_id: Optional[int] = None
     user_full_name: Optional[str] = None
     user_email: Optional[str] = None

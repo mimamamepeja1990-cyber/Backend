@@ -950,11 +950,19 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
     if src not in ('app', 'web'):
         src = 'web'
 
+    customer_type = getattr(payload, 'customer_type', None)
+    if not customer_type or not str(customer_type).strip():
+        customer_type = 'mayorista'
+    customer_type = str(customer_type).strip().lower()
+    if customer_type not in ('mayorista', 'minorista'):
+        customer_type = 'mayorista'
+
     kwargs = {
         'items': items_json,
         'total': total_val,
         'status': 'nuevo',
-        'source': src
+        'source': src,
+        'customer_type': customer_type
     }
     # Mark that this order included pre-allocated consumos (best-effort flag)
     try:
@@ -963,6 +971,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
     except Exception:
         pass
     optional = [
+        'customer_type',
         'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
         '_token_received', '_token_preview',
         'payment_method', 'payment_status', 'payment_reference'
@@ -993,6 +1002,13 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
         except Exception:
             v = str(v)
         kwargs[f] = v
+
+    try:
+        ct_raw = kwargs.get('customer_type')
+        ct_norm = str(ct_raw).strip().lower() if ct_raw is not None else ''
+        kwargs['customer_type'] = ct_norm if ct_norm in ('mayorista', 'minorista') else customer_type
+    except Exception:
+        kwargs['customer_type'] = customer_type
 
     # Normalize payment snapshot values to stable enums.
     try:
@@ -1262,6 +1278,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
             # base columns we expect
             cols = ['id', 'items', 'total', 'status', 'created_at']
             optional_cols = [
+                'customer_type',
                 'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
                 '_token_received', '_token_preview',
                 'payment_method', 'payment_status', 'payment_reference'
@@ -1313,6 +1330,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
             }
             # include any optional user_* fields we actually set
             for f in [
+                'customer_type',
                 'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
                 '_token_received', '_token_preview',
                 'payment_method', 'payment_status', 'payment_reference'
@@ -1476,6 +1494,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                         'created_at': new_created_at
                     }
                     for f in [
+                        'customer_type',
                         'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
                         '_token_received', '_token_preview',
                         'payment_method', 'payment_status', 'payment_reference'
@@ -1519,7 +1538,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
     # Ensure the response object carries recent metadata even when selected via
     # fallback queries that only fetched minimal columns.
     try:
-        for _col in ('source', 'payment_method', 'payment_status', 'payment_reference'):
+        for _col in ('source', 'customer_type', 'payment_method', 'payment_status', 'payment_reference'):
             if getattr(obj, _col, None) is None and kwargs.get(_col) is not None:
                 setattr(obj, _col, kwargs.get(_col))
     except Exception:
@@ -1663,6 +1682,7 @@ def get_orders(db: Session, skip: int = 0, limit: int = 200, source: Optional[st
 
     cols = ['id', 'items', 'total', 'status', 'created_at']
     optional = [
+        'customer_type',
         'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
         '_token_received', '_token_preview', 'source',
         'payment_method', 'payment_status', 'payment_reference'

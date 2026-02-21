@@ -10,6 +10,7 @@
     .btn.tab.active { background: #111827; color: #fff; border-color: #111827 }
     .badge-pill { display:inline-block; min-width:20px; padding:2px 8px; font-size:12px; border-radius:999px; background:#e6eef8; color:#0366d6; }
     #ordersTabs { display:flex; align-items:center; gap:8px }
+    #ordersCustomerTabs { display:flex; align-items:center; gap:8px; margin:8px 0 12px; flex-wrap:wrap; }
     #clearOrderCache { background: #fff; border: 1px solid #e5e7eb; }
   </style>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet">
@@ -202,6 +203,10 @@
         </div>
         <section id="orders_web" class="section">
           <h3>Pedidos - Web</h3>
+        <div id="ordersCustomerTabs" class="controls tabs">
+          <button id="ordersTypeTab_mayorista" class="btn tab active">Mayoristas <span id="badge_type_mayorista" class="badge-pill">0</span></button>
+          <button id="ordersTypeTab_minorista" class="btn tab">Minoristas <span id="badge_type_minorista" class="badge-pill">0</span></button>
+        </div>
         <div class="controls center">
           <input id="orderSearch_web" placeholder="Buscar pedidos por producto o id..." />
           <input id="orderDate_web" type="date" title="Filtrar por fecha" />
