@@ -1557,7 +1557,14 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                 existing = True
             if not existing:
                 preview = {}
-                for k, label in (('user_full_name', 'name'), ('user_email', 'email'), ('user_barrio', 'barrio'), ('user_calle', 'calle'), ('user_numeracion', 'numeracion')):
+                for k, label in (
+                    ('user_full_name', 'name'),
+                    ('user_email', 'email'),
+                    ('user_barrio', 'barrio'),
+                    ('user_calle', 'calle'),
+                    ('user_numeracion', 'numeracion'),
+                    ('customer_type', 'customer_type'),
+                ):
                     v = kwargs.get(k) or getattr(payload, k, None)
                     if v:
                         preview[label] = v

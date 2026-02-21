@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 import os
 
 from sqlalchemy import create_engine, inspect, text
@@ -54,6 +54,7 @@ def _migrate_orders_optional_columns() -> None:
 
     needed = [
         ('status', "VARCHAR(50) DEFAULT 'nuevo'"),
+        ('customer_type', "VARCHAR(50) DEFAULT 'mayorista'"),
         ('user_id', 'INTEGER'),
         ('user_full_name', 'VARCHAR(200)'),
         ('user_email', 'VARCHAR(320)'),
@@ -84,14 +85,57 @@ def _migrate_orders_optional_columns() -> None:
             conn.execute(text('CREATE INDEX IF NOT EXISTS idx_orders_source ON orders(source);'))
         except Exception:
             pass
+        try:
+            conn.execute(text('CREATE INDEX IF NOT EXISTS idx_orders_customer_type ON orders(customer_type);'))
+        except Exception:
+            pass
 
         try:
             conn.execute(text("UPDATE orders SET source = 'web' WHERE source IS NULL OR TRIM(source) = '';"))
         except Exception:
             pass
+        try:
+            conn.execute(text("UPDATE orders SET customer_type = 'mayorista' WHERE customer_type IS NULL OR TRIM(customer_type) = '';"))
+        except Exception:
+            pass
 
 
 _migrate_orders_optional_columns()
+
+
+def _migrate_products_optional_columns() -> None:
+    """Best-effort migration for legacy `products` schemas."""
+    try:
+        insp = inspect(engine)
+        if 'products' not in insp.get_table_names():
+            return
+        existing = {c['name'] for c in insp.get_columns('products')}
+    except Exception:
+        return
+
+    try:
+        dialect = engine.dialect.name if engine and getattr(engine, 'dialect', None) else ''
+    except Exception:
+        dialect = ''
+
+    needed = [
+        ('price_retail', 'REAL'),
+    ]
+
+    with engine.begin() as conn:
+        for name, coltype in needed:
+            if name in existing:
+                continue
+            try:
+                if 'postgres' in dialect:
+                    conn.execute(text(f"ALTER TABLE products ADD COLUMN IF NOT EXISTS {name} {coltype};"))
+                else:
+                    conn.execute(text(f"ALTER TABLE products ADD COLUMN {name} {coltype};"))
+            except Exception:
+                pass
+
+
+_migrate_products_optional_columns()
 
 
 def get_db():

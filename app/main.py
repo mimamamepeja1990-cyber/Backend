@@ -1,4 +1,4 @@
-﻿from fastapi import status
+from fastapi import status
 from fastapi import (
     FastAPI, Depends, HTTPException, UploadFile, File,
     WebSocket, WebSocketDisconnect, Request
@@ -37,7 +37,7 @@ from sqlalchemy.exc import IntegrityError
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from typing import Tuple
 
-# optional remote backup (GitHub Gist) â€” configured via env vars
+# optional remote backup (GitHub Gist) ? configured via env vars
 import httpx
 try:
     import mercadopago  # type: ignore
@@ -451,7 +451,7 @@ async def lifespan(app: FastAPI):
 # -------------------------------------------------------------------
 # APP
 # -------------------------------------------------------------------
-app = FastAPI(title="CatÃ¡logo API", lifespan=lifespan)
+app = FastAPI(title="Catálogo API", lifespan=lifespan)
 
 # In-memory cache of recently created order payloads (id -> { payload, ts })
 # Used to surface token previews in the admin list when the DB lacks persisted user_* columns.
@@ -2184,7 +2184,7 @@ def list_uploads(request: Request, db: Session = Depends(get_db)):
                     base = str(request.base_url).rstrip('/')
                 except Exception:
                     base = ''
-                # Normalize stored URL â€” if it's an absolute HTTP URL, keep it.
+                # Normalize stored URL ? if it's an absolute HTTP URL, keep it.
                 stored = (r.url or '')
                 # If stored URL looks like a filesystem path (backslashes or drive letter), ignore it and build public path
                 use_filename = False
@@ -2199,7 +2199,7 @@ def list_uploads(request: Request, db: Session = Depends(get_db)):
                         if (':' in stored and ('\\' in stored or '/' in stored)) or '\\' in stored:
                             use_filename = True
                         else:
-                            # relative path like 'uploads/promos/...' â€” ensure leading slash
+                            # relative path like 'uploads/promos/...' ? ensure leading slash
                             if s.startswith('uploads/'):
                                 s = '/' + s
                             url = (base + s) if base else s
@@ -2458,7 +2458,7 @@ def deselect_promo(filename: str, request: Request, db: Session = Depends(get_db
         return JSONResponse(status_code=500, content={'detail': 'failed'}, headers=headers)
 
 
-# --- ConsumiciÃ³n inmediata API (admin) ---
+# --- Consumición inmediata API (admin) ---
 @app.get('/api/consumos')
 def list_consumos(request: Request, db: Session = Depends(get_db)):
     """Return consumos config: list of { id: product_id, discount: percent }.
@@ -3960,7 +3960,7 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
         logger.exception('create_order: could not normalize customer email')
 
     # Infer source from headers or payload: prefer explicit payload.source, then header 'X-Client-Platform' or 'X-Source'.
-    # Si el payload no trae source, o viene vacÃ­o, se infiere SIEMPRE aquÃ­ y se fuerza el valor correcto.
+    # Si el payload no trae source, o viene vacío, se infiere SIEMPRE aquí y se fuerza el valor correcto.
     try:
         src = getattr(payload, 'source', None)
         if not src or not str(src).strip():
@@ -3969,10 +3969,10 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
                 src = src_hdr
         if not src or not str(src).strip():
             ua = (request.headers.get('user-agent') or '').lower()
-            # Detectar mÃ³vil por user-agent o headers
+            # Detectar móvil por user-agent o headers
             if ua and ( 'okhttp' in ua or 'android' in ua or 'dalvik' in ua or 'retrofit' in ua or 'okhttp/' in ua ):
                 src = 'app'
-            # TambiÃ©n considerar si el referer o origin contiene 'app' (por si hay proxy)
+            # También considerar si el referer o origin contiene 'app' (por si hay proxy)
             ref = (request.headers.get('referer') or request.headers.get('origin') or '').lower()
             if 'app' in ref:
                 src = 'app'
@@ -3983,7 +3983,7 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
         # Solo permitir 'app' o 'web'
         if src not in ('app', 'web'):
             src = 'web'
-        # Forzar 'app' si user-agent es mÃ³vil aunque el cliente mande mal el campo
+        # Forzar 'app' si user-agent es móvil aunque el cliente mande mal el campo
         ua = (request.headers.get('user-agent') or '').lower()
         if ua and ( 'okhttp' in ua or 'android' in ua or 'dalvik' in ua or 'retrofit' in ua or 'okhttp/' in ua ):
             src = 'app'
@@ -3997,7 +3997,7 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
         logger.info(f'[create_order] source inferido: {src}')
     except Exception as e:
         setattr(payload, 'source', 'web')
-        logger.warning(f'[create_order] Error infiriendo source, se forzÃ³ a web: {e}')
+        logger.warning(f'[create_order] Error infiriendo source, se forzó a web: {e}')
 
     try:
         customer_type = getattr(payload, 'customer_type', None)
@@ -4024,7 +4024,7 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
             setattr(payload, 'customer_type', 'mayorista')
         except Exception:
             pass
-        logger.warning(f'[create_order] Error normalizando customer_type, se forzÃ³ a mayorista: {e}')
+        logger.warning(f'[create_order] Error normalizando customer_type, se forzó a mayorista: {e}')
 
     def task():
         db = SessionLocal()
@@ -4085,10 +4085,14 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
                 # Add a safe token preview to help diagnose missing token propagation without exposing secrets
                 try:
                     payload['_token_received'] = True
+                    preview_existing = payload.get('_token_preview') if isinstance(payload.get('_token_preview'), dict) else {}
+                    customer_type_preview = str(payload.get('customer_type') or '').strip().lower()
                     payload['_token_preview'] = {
+                        **preview_existing,
                         'sub': token_payload.get('sub') or token_payload.get('email') or None,
                         'email': token_payload.get('email') or token_payload.get('sub') or None,
-                        'name': token_payload.get('full_name') or token_payload.get('name') or None
+                        'name': token_payload.get('full_name') or token_payload.get('name') or None,
+                        'customer_type': customer_type_preview if customer_type_preview in ('mayorista', 'minorista') else None
                     }
                 except Exception:
                     payload['_token_received'] = True
@@ -4584,6 +4588,86 @@ def list_orders(skip: int = 0, limit: int = 200, source: Optional[str] = None, d
         _prune_status_cache()
     except Exception:
         pass
+    product_price_map = {}
+    try:
+        product_rows = db.query(models.Product.id, models.Product.price, models.Product.price_retail).all()
+        for pr in (product_rows or []):
+            try:
+                pid = str(getattr(pr, 'id', '')).strip()
+                if not pid:
+                    continue
+                wholesale = float(getattr(pr, 'price', 0) or 0)
+                retail_raw = getattr(pr, 'price_retail', None)
+                retail = None if retail_raw is None else float(retail_raw)
+                product_price_map[pid] = {'wholesale': wholesale, 'retail': retail}
+            except Exception:
+                continue
+    except Exception:
+        product_price_map = {}
+
+    def _infer_customer_type_from_items(items_value):
+        try:
+            items_arr = items_value if isinstance(items_value, list) else []
+            retail_hits = 0
+            wholesale_hits = 0
+            for it in items_arr:
+                if not isinstance(it, dict):
+                    continue
+                pid = str(it.get('id') or '').strip()
+                if not pid:
+                    continue
+                meta = it.get('meta') if isinstance(it.get('meta'), dict) else {}
+                line_price_raw = meta.get('price')
+                if line_price_raw is None:
+                    continue
+                try:
+                    line_price = float(line_price_raw)
+                except Exception:
+                    continue
+                prod_prices = product_price_map.get(pid)
+                if not prod_prices:
+                    continue
+                retail_price = prod_prices.get('retail')
+                wholesale_price = prod_prices.get('wholesale')
+                if retail_price is None:
+                    continue
+                try:
+                    retail_price = float(retail_price)
+                    wholesale_price = float(wholesale_price or 0)
+                except Exception:
+                    continue
+                if abs(retail_price - wholesale_price) <= 1e-9:
+                    continue
+                dr = abs(line_price - retail_price)
+                dw = abs(line_price - wholesale_price)
+                tolerance = 0.05
+                if dr <= tolerance and dr <= dw:
+                    retail_hits += 1
+                elif dw <= tolerance and dw < dr:
+                    wholesale_hits += 1
+            if retail_hits > 0 and retail_hits >= wholesale_hits:
+                return 'minorista'
+            if wholesale_hits > 0:
+                return 'mayorista'
+        except Exception:
+            pass
+        return None
+
+    def _normalize_customer_type(value):
+        v = str(value or '').strip().lower()
+        return v if v in ('mayorista', 'minorista') else ''
+
+    def _customer_type_from_preview(preview_value):
+        try:
+            preview = preview_value if isinstance(preview_value, dict) else {}
+            for key in ('customer_type', 'perfil', 'profile', 'price_tier', 'tier'):
+                ct = _normalize_customer_type(preview.get(key))
+                if ct:
+                    return ct
+        except Exception:
+            pass
+        return ''
+
     cached_any = 0
     for r in (rows or []):
         try:
@@ -4597,16 +4681,22 @@ def list_orders(skip: int = 0, limit: int = 200, source: Optional[str] = None, d
                     'payment_method', 'payment_status', 'payment_reference'
                 ]
             }
-            if not od.get('customer_type'):
-                od['customer_type'] = 'mayorista'
+            customer_type_value = _normalize_customer_type(od.get('customer_type'))
+            if not customer_type_value:
+                customer_type_value = _customer_type_from_preview(od.get('_token_preview'))
+            if not customer_type_value:
                 try:
                     cached_ct = ORDER_PAYLOAD_CACHE.get(str(od.get('id'))) if od.get('id') else None
                     if cached_ct and isinstance(cached_ct.get('payload'), dict):
-                        val = str(cached_ct['payload'].get('customer_type') or '').strip().lower()
-                        if val in ('mayorista', 'minorista'):
-                            od['customer_type'] = val
+                        customer_type_value = _normalize_customer_type(cached_ct['payload'].get('customer_type'))
+                        if not customer_type_value:
+                            customer_type_value = _customer_type_from_preview(cached_ct['payload'].get('_token_preview'))
                 except Exception:
                     pass
+            if not customer_type_value:
+                inferred_ct = _infer_customer_type_from_items(od.get('items'))
+                if inferred_ct in ('mayorista', 'minorista'):
+                    customer_type_value = inferred_ct
             cached_used = False
             # If user fields missing try to merge from cached pushed payload
             if (not od.get('user_full_name') and not od.get('user_email')) and od.get('id'):
@@ -4630,10 +4720,8 @@ def list_orders(skip: int = 0, limit: int = 200, source: Optional[str] = None, d
                             od['user_full_name'] = tp.get('name')
                         if not od.get('user_email') and tp.get('email'):
                             od['user_email'] = tp.get('email')
-                        # include the token preview in the returned row so clients can show it explicitly
-                        if tp:
-                            od['_token_preview'] = tp
-                            od['_token_received'] = True
+                        if not customer_type_value:
+                            customer_type_value = _customer_type_from_preview(tp)
                         # include the token preview in the returned row so clients can show it explicitly
                         if tp:
                             od['_token_preview'] = tp
@@ -4660,6 +4748,8 @@ def list_orders(skip: int = 0, limit: int = 200, source: Optional[str] = None, d
                                         od['user_full_name'] = tp.get('name')
                                     if not od.get('user_email') and tp.get('email'):
                                         od['user_email'] = tp.get('email')
+                                    if not customer_type_value:
+                                        customer_type_value = _customer_type_from_preview(tp)
                                     od['_token_preview'] = tp
                                     od['_token_received'] = bool(tr_flag)
                                     cached_used = True
@@ -4668,6 +4758,7 @@ def list_orders(skip: int = 0, limit: int = 200, source: Optional[str] = None, d
                                 pass
                     except Exception:
                         pass
+            od['customer_type'] = customer_type_value or 'mayorista'
             # Apply status override if present
             try:
                 oid = od.get('id')
@@ -4919,4 +5010,3 @@ async def update_order_status(order_id: str, request: Request):
 
     headers = _cors_headers_for_request(request)
     return JSONResponse(status_code=200, content=jsonable_encoder(od), headers=headers)
-

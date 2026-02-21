@@ -1,5 +1,5 @@
 
-"""Utility to add missing user_* columns to the `orders` table.
+"""Utility to add missing optional columns to the `orders` table.
 
 Usage (from repo root):
     $ PYTHONPATH=Backend python Backend/scripts/add_user_columns.py
@@ -13,6 +13,8 @@ from app.database import engine
 from sqlalchemy import inspect
 
 COLS = [
+    ("status", "VARCHAR(50) DEFAULT 'nuevo'"),
+    ("customer_type", "VARCHAR(50) DEFAULT 'mayorista'"),
     ("user_id", "INTEGER"),
     ("user_full_name", "VARCHAR(200)"),
     ("user_email", "VARCHAR(320)"),
@@ -20,7 +22,11 @@ COLS = [
     ("user_calle", "VARCHAR(200)"),
     ("user_numeracion", "VARCHAR(100)"),
     ("_token_received", "BOOLEAN"),
-    ("_token_preview", "TEXT")
+    ("_token_preview", "TEXT"),
+    ("source", "VARCHAR(50) DEFAULT 'web'"),
+    ("payment_method", "VARCHAR(50)"),
+    ("payment_status", "VARCHAR(50)"),
+    ("payment_reference", "VARCHAR(200)"),
 ]
 
 def main():
