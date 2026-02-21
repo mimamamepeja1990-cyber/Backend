@@ -273,7 +273,8 @@ async def lifespan(app: FastAPI):
                 'stock_kg': 'REAL DEFAULT 0',
                 'kg_per_unit': 'REAL DEFAULT 1',
                 'discount': discount_type,
-                "sale_unit": "VARCHAR(20) DEFAULT 'unit'"
+                "sale_unit": "VARCHAR(20) DEFAULT 'unit'",
+                "price_retail": "REAL",
             }
             try:
                 insp = inspect(engine)
@@ -387,7 +388,7 @@ async def lifespan(app: FastAPI):
                     logger.info('Restoring products from configured backup');
                     items = json.loads(content)
                     for p in items:
-                        db.add(models.Product(name=p.get('name'), price=p.get('price') or 0, description=p.get('description') or '', category=p.get('category') or '', image_url=p.get('image_url') or None, active=bool(p.get('active', True))))
+                        db.add(models.Product(name=p.get('name'), price=p.get('price') or 0, price_retail=p.get('price_retail'), description=p.get('description') or '', category=p.get('category') or '', image_url=p.get('image_url') or None, active=bool(p.get('active', True))))
                     db.commit()
                     restored = True
             except Exception as _err:
@@ -403,7 +404,7 @@ async def lifespan(app: FastAPI):
                         if items and isinstance(items, list):
                             logger.info('Restoring products from local snapshot %s', local_path)
                             for p in items:
-                                db.add(models.Product(name=p.get('name'), price=p.get('price') or 0, description=p.get('description') or '', category=p.get('category') or '', image_url=p.get('image_url') or None, active=bool(p.get('active', True))))
+                                db.add(models.Product(name=p.get('name'), price=p.get('price') or 0, price_retail=p.get('price_retail'), description=p.get('description') or '', category=p.get('category') or '', image_url=p.get('image_url') or None, active=bool(p.get('active', True))))
                             db.commit()
                             restored = True
                 except Exception as _err:
@@ -1358,11 +1359,16 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
                         price = float(price_raw)
                     except Exception:
                         price = None
+                    try:
+                        price_retail = float(body_json.get('price_retail')) if body_json.get('price_retail') is not None else None
+                    except Exception:
+                        price_retail = None
                     if m == 'POST':
                         if name and price is not None:
                             payload_obj = SimpleNamespace(
                                 name=name,
                                 price=price,
+                                price_retail=price_retail,
                                 description=body_json.get('description') or '',
                                 category=body_json.get('category') or '',
                                 image_url=body_json.get('image_url') or '',
@@ -1381,7 +1387,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
                                     if isinstance(created, dict):
                                         res = created
                                     else:
-                                        res = {k: getattr(created, k) for k in ('id','name','price','description','category','image_url','active','stock','stock_kg','kg_per_unit','discount','sale_unit') if hasattr(created, k)}
+                                        res = {k: getattr(created, k) for k in ('id','name','price','price_retail','description','category','image_url','active','stock','stock_kg','kg_per_unit','discount','sale_unit') if hasattr(created, k)}
                                     # log the fallback usage
                                     try:
                                         base = os.path.dirname(os.path.dirname(__file__))
@@ -1412,7 +1418,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
                         if pid is not None:
                             # Build permissive updates dict
                             updates = {}
-                            for k in ('name','price','description','category','image_url','active','stock','stock_kg','kg_per_unit','discount','sale_unit'):
+                            for k in ('name','price','price_retail','description','category','image_url','active','stock','stock_kg','kg_per_unit','discount','sale_unit'):
                                 if k in body_json:
                                     updates[k] = body_json[k]
                             if 'price' in updates:
@@ -1420,6 +1426,11 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
                                     updates['price'] = float(updates['price'])
                                 except Exception:
                                     updates.pop('price', None)
+                            if 'price_retail' in updates:
+                                try:
+                                    updates['price_retail'] = float(updates['price_retail']) if updates['price_retail'] is not None else None
+                                except Exception:
+                                    updates.pop('price_retail', None)
                             if 'stock' in updates:
                                 try:
                                     updates['stock'] = int(updates['stock'])
@@ -1462,7 +1473,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
                                     updated = crud.update_product(db, int(pid), upd_obj)
                                     if updated:
                                         # Normalize to dict
-                                        res = updated if isinstance(updated, dict) else {k: getattr(updated, k) for k in ('id','name','price','description','category','image_url','active','stock','stock_kg','kg_per_unit','discount','sale_unit') if hasattr(updated,k)}
+                                        res = updated if isinstance(updated, dict) else {k: getattr(updated, k) for k in ('id','name','price','price_retail','description','category','image_url','active','stock','stock_kg','kg_per_unit','discount','sale_unit') if hasattr(updated,k)}
                                         try:
                                             base = os.path.dirname(os.path.dirname(__file__))
                                             with open(os.path.join(base, 'server_log.txt'), 'a', encoding='utf-8') as f:
@@ -2778,6 +2789,7 @@ async def create_product(payload: schemas.ProductCreate):
                 'id': getv('id', None),
                 'name': getv('name', ''),
                 'price': getv('price', 0),
+                'price_retail': getv('price_retail', None),
                 'description': getv('description', ''),
                 'category': getv('category', ''),
                 'image_url': getv('image_url', ''),
@@ -2809,7 +2821,7 @@ async def create_product(payload: schemas.ProductCreate):
         # Normalize result to plain dict
         if not isinstance(result, dict):
             try:
-                result = {k: getattr(result, k) for k in ('id','name','price','description','category','image_url','active','stock','stock_kg','kg_per_unit','discount','sale_unit') if hasattr(result, k)}
+                result = {k: getattr(result, k) for k in ('id','name','price','price_retail','description','category','image_url','active','stock','stock_kg','kg_per_unit','discount','sale_unit') if hasattr(result, k)}
             except Exception:
                 result = dict(result.__dict__) if hasattr(result, '__dict__') else dict(result)
         try:
@@ -2861,6 +2873,7 @@ def list_products(
             except Exception:
                 existing = set()
             cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
+            if 'price_retail' in existing: cols.append('price_retail')
             if 'stock' in existing: cols.append('stock')
             if 'stock_kg' in existing: cols.append('stock_kg')
             if 'kg_per_unit' in existing: cols.append('kg_per_unit')
@@ -2906,6 +2919,7 @@ def get_product(product_id: int, db: Session = Depends(get_db)):
         except Exception:
             existing = set()
         cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
+        if 'price_retail' in existing: cols.append('price_retail')
         if 'stock' in existing: cols.append('stock')
         if 'stock_kg' in existing: cols.append('stock_kg')
         if 'kg_per_unit' in existing: cols.append('kg_per_unit')
@@ -2998,7 +3012,7 @@ def debug_products_info(db: Session = Depends(get_db)):
             # fallback: try ORM
             orm_rows = db.query(models.Product).order_by(models.Product.created_at.desc()).limit(10).all()
             for r in orm_rows:
-                d = {c: getattr(r, c, None) for c in ('id','name','price','description','category','image_url','created_at','updated_at','active','stock','stock_kg','kg_per_unit','discount','sale_unit')}
+                d = {c: getattr(r, c, None) for c in ('id','name','price','price_retail','description','category','image_url','created_at','updated_at','active','stock','stock_kg','kg_per_unit','discount','sale_unit')}
                 sample.append(d)
         except Exception:
             pass
@@ -3070,6 +3084,7 @@ def write_catalog_snapshot():
             "id": p.id,
             "name": p.name,
             "price": float(p.price) if p.price else None,
+            "price_retail": float(p.price_retail) if getattr(p, 'price_retail', None) is not None else None,
             "description": p.description,
             "category": p.category,
             "image_url": p.image_url,

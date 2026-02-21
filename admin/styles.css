@@ -128,6 +128,9 @@ th,td{padding:14px 12px}
 .consumo-row input[type="checkbox"]{ width:18px; height:18px }
 .consumo-row .right{ display:flex; align-items:center; gap:8px }
 
+#retailPricesTable .retail-price-input{ width:130px; padding:8px 10px; border-radius:8px; border:1px solid #e6e9ef; background:#fff; }
+#retailPricesTable tbody tr.retail-row-dirty td{ background:linear-gradient(90deg, rgba(255,249,230,0.7), rgba(255,255,255,0)); }
+
 /* Make the consumos list visually consistent with cards */
 #consumosList{ background:var(--card); border-radius:10px; padding:6px; box-shadow:0 6px 20px rgba(11,15,28,0.04) }
 /* small button variants used in add-consumos modal and inline actions */

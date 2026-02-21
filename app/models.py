@@ -8,6 +8,8 @@ class Product(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(200), nullable=False)
     price = Column(Float, nullable=False, default=0.0)
+    # Retail price (minorista). If null, frontend falls back to wholesale `price`.
+    price_retail = Column(Float, nullable=True)
     description = Column(String(1000), nullable=True)
     category = Column(String(200), nullable=True)
     image_url = Column(String(500), nullable=True)

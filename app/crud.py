@@ -225,6 +225,8 @@ def get_products(db: Session, skip: int = 0, limit: int = 100, q: Optional[str]=
         except Exception:
             existing = set()
         cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
+        if 'price_retail' in existing:
+            cols.append('price_retail')
         # only include optional columns if they exist
         if 'stock' in existing:
             cols.append('stock')
@@ -284,6 +286,7 @@ def _ensure_product_columns(db: Session, existing_cols: Optional[set] = None) ->
         'kg_per_unit': 'REAL DEFAULT 1',
         'discount': 'REAL DEFAULT 0',
         'sale_unit': "VARCHAR(20) DEFAULT 'unit'",
+        'price_retail': 'REAL',
     }
 
     for col, coltype in col_defs.items():
@@ -322,7 +325,7 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
         insp = inspect(bind)
         existing_cols = {c['name'] for c in insp.get_columns('products')}
     except Exception:
-        existing_cols = {'id', 'name', 'price', 'description', 'category', 'image_url', 'active', 'created_at', 'updated_at', 'stock', 'stock_kg', 'kg_per_unit', 'discount', 'sale_unit'}
+        existing_cols = {'id', 'name', 'price', 'description', 'category', 'image_url', 'active', 'created_at', 'updated_at', 'stock', 'stock_kg', 'kg_per_unit', 'discount', 'sale_unit', 'price_retail'}
     
     existing_cols = _ensure_product_columns(db, existing_cols)
     logger.info('Existing columns: %s', existing_cols)
@@ -349,9 +352,16 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
     if kg_per_unit <= 0:
         kg_per_unit = 1.0
 
+    raw_price_retail = getattr(payload, 'price_retail', None)
+    try:
+        price_retail = float(raw_price_retail) if raw_price_retail is not None else None
+    except Exception:
+        price_retail = None
+
     data = {
         'name': payload.name,
         'price': payload.price,
+        'price_retail': price_retail,
         'description': payload.description or '',
         'category': payload.category or '',
         'image_url': payload.image_url or '',
@@ -395,6 +405,8 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
     try:
         # Build an explicit column list that includes optional `stock` and `discount` if present
         cols = ['id', 'name', 'price', 'description', 'category', 'image_url', 'active', 'created_at', 'updated_at']
+        if 'price_retail' in existing:
+            cols.append('price_retail')
         try:
             bind = db.get_bind()
             insp = inspect(bind)
@@ -420,6 +432,11 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
             obj = {cols[i]: result[i] for i in range(len(cols))}
             # coerce numeric types
             obj['price'] = float(obj.get('price') or 0.0)
+            if 'price_retail' in obj:
+                try:
+                    obj['price_retail'] = float(obj.get('price_retail')) if obj.get('price_retail') is not None else None
+                except Exception:
+                    obj['price_retail'] = None
             obj['stock'] = int(obj.get('stock') or 0)
             if 'stock_kg' in obj:
                 try:
@@ -440,10 +457,15 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
         logger.exception('Could not fetch product: %s', e)
     
     # Worst case: return a plain dict with input data
+    try:
+        fallback_price_retail = float(getattr(payload, 'price_retail')) if getattr(payload, 'price_retail', None) is not None else None
+    except Exception:
+        fallback_price_retail = None
     return {
         'id': None,
         'name': payload.name,
         'price': float(payload.price) if getattr(payload, 'price', None) is not None else 0.0,
+        'price_retail': fallback_price_retail,
         'stock': int(getattr(payload, 'stock', 0) or 0),
         'stock_kg': float(getattr(payload, 'stock_kg', getattr(payload, 'stock', 0)) or 0.0),
         'kg_per_unit': float(getattr(payload, 'kg_per_unit', 1.0) or 1.0),
@@ -467,6 +489,8 @@ def get_product(db: Session, product_id: int) -> Optional[models.Product]:
         except Exception:
             existing = set()
         cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
+        if 'price_retail' in existing:
+            cols.append('price_retail')
         if 'stock' in existing:
             cols.append('stock')
         if 'stock_kg' in existing:
@@ -512,6 +536,12 @@ def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate)
         existing = set()
     existing = _ensure_product_columns(db, existing)
 
+    if 'price_retail' in updates:
+        try:
+            updates['price_retail'] = float(updates['price_retail']) if updates['price_retail'] is not None else None
+        except Exception:
+            updates.pop('price_retail', None)
+
     set_cols = [k for k in updates.keys() if (not existing) or (k in existing)]
     if not set_cols:
         # Nothing to update (columns don't exist), return the original object
@@ -538,6 +568,8 @@ def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate)
 
     # Fetch updated row safely (only request existing columns)
     cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
+    if 'price_retail' in existing:
+        cols.append('price_retail')
     if 'stock' in existing:
         cols.append('stock')
     if 'stock_kg' in existing:

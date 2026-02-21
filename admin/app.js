@@ -1,6 +1,6 @@
-/* promo-image initial block removed to avoid early API_BASE usage; code reinserted after API_BASE definition */
+﻿/* promo-image initial block removed to avoid early API_BASE usage; code reinserted after API_BASE definition */
 
-// Mostrar sección al hacer click en el menú
+// Mostrar secciÃ³n al hacer click en el menÃº
 document.querySelectorAll('.sidebar nav a[data-section]').forEach(link => {
   link.addEventListener('click', function() {
     document.querySelectorAll('main > section').forEach(sec => sec.classList.add('hidden'));
@@ -21,7 +21,7 @@ document.querySelectorAll('.sidebar nav a[data-section]').forEach(link => {
     }catch(e){}
   });
 });
-// Admin JS — UI principal sin modo oscuro ni botón de tarjeta (card)
+// Admin JS â€” UI principal sin modo oscuro ni botÃ³n de tarjeta (card)
 console.log('[admin] app.js loaded');
 const REMOTE_API_BASE = 'https://backend-0lcs.onrender.com';
 let API_BASE = (location.protocol && location.protocol.startsWith('http')) ? location.origin : REMOTE_API_BASE;
@@ -71,10 +71,10 @@ async function ensureApiBase(){
       }
     }catch(_){ }
   }
-  if(apiBaseIndicator) apiBaseIndicator.textContent = API_BASE + ' (sin conexión)';
+  if(apiBaseIndicator) apiBaseIndicator.textContent = API_BASE + ' (sin conexiÃ³n)';
   return API_BASE;
 }
-// --- Imágenes Promocionales (admin) ---
+// --- ImÃ¡genes Promocionales (admin) ---
 const promoImagesList = document.getElementById('promoImagesList');
 const promoImageInput = document.getElementById('promoImageInput');
 const promoImageForm = document.getElementById('promoImageForm');
@@ -91,7 +91,7 @@ function fetchPromoImages() {
       const selected = await safeFetch(API_BASE + '/api/promos').catch(()=>[]);
       const selectedNames = new Set((selected || []).map(i => i.name));
       if (!uploads || uploads.length === 0) {
-        promoImagesList.innerHTML = '<div style="color:#888">No hay imágenes subidas.</div>';
+        promoImagesList.innerHTML = '<div style="color:#888">No hay imÃ¡genes subidas.</div>';
         return;
       }
       uploads.forEach(img => {
@@ -123,7 +123,7 @@ function fetchPromoImages() {
         div.appendChild(imgEl);
         const fechaDiv = document.createElement('div');
         fechaDiv.className = 'meta';
-        fechaDiv.textContent = 'Subida: ' + (img.name || '—');
+        fechaDiv.textContent = 'Subida: ' + (img.name || 'â€”');
         div.appendChild(fechaDiv);
         // selection toggle
         const selBtn = document.createElement('button');
@@ -154,7 +154,7 @@ function fetchPromoImages() {
         delBtn.textContent = 'Eliminar';
         delBtn.className = 'btn danger promo-delete-btn';
         delBtn.onclick = async () => {
-          if (!confirm('¿Eliminar esta imagen?')) return;
+          if (!confirm('Â¿Eliminar esta imagen?')) return;
           try{
             const resp = await fetch(API_BASE + '/api/promos/' + encodeURIComponent(fname), { method: 'DELETE' });
             if (resp.ok) {
@@ -175,7 +175,7 @@ function fetchPromoImages() {
         div.appendChild(delBtn);
         promoImagesList.appendChild(div);
       });
-    }catch(err){ if (promoImagesList) promoImagesList.innerHTML = '<div style="color:#888">Error cargando imágenes</div>'; }
+    }catch(err){ if (promoImagesList) promoImagesList.innerHTML = '<div style="color:#888">Error cargando imÃ¡genes</div>'; }
   })();
 }
 
@@ -186,7 +186,7 @@ if (promoImageSelectBtn && promoImageInput && promoImageFileName && promoImageUp
       promoImageFileName.textContent = promoImageInput.files[0].name;
       promoImageUploadBtn.disabled = false;
     } else {
-      promoImageFileName.textContent = 'Ningún archivo seleccionado';
+      promoImageFileName.textContent = 'NingÃºn archivo seleccionado';
       promoImageUploadBtn.disabled = true;
     }
   });
@@ -199,7 +199,7 @@ if (promoImageSelectBtn && promoImageInput && promoImageFileName && promoImageUp
       .then(res => {
         if (res && (res.status === 200 || res.status === 201)) {
           promoImageInput.value = '';
-          promoImageFileName.textContent = 'Ningún archivo seleccionado';
+          promoImageFileName.textContent = 'NingÃºn archivo seleccionado';
           promoImageUploadBtn.disabled = true;
           fetchPromoImages();
         } else {
@@ -234,9 +234,15 @@ const saleUnitSelect = document.getElementById('sale_unit');
 const kgPerUnitField = document.getElementById('kgPerUnitField');
 const stockLabel = document.getElementById('stockLabel');
 const priceLabel = document.getElementById('priceLabel');
+const retailPriceInput = document.getElementById('price_retail');
+const retailPricesTableBody = document.querySelector('#retailPricesTable tbody');
+const retailPriceSearch = document.getElementById('retailPriceSearch');
+const retailRefreshBtn = document.getElementById('retailRefreshBtn');
+const retailSaveAllBtn = document.getElementById('retailSaveAllBtn');
 let currentEditId = null;
 let imageUrl = null;
 let selectedFile = null;
+let retailProductsCache = [];
 const PROMO_KEY = 'admin_promotions_v1';
 const FILTERS_KEY = 'admin_filters_v1';
 const PRODUCT_CATEGORIES_KEY = 'admin_product_categories_v1';
@@ -348,7 +354,7 @@ function syncProductUnitFields(){
 
     if (kgPerUnitField) kgPerUnitField.style.display = isKg ? '' : 'none';
     if (stockLabel) stockLabel.textContent = isKg ? 'Stock disponible (kg)' : 'Stock';
-    if (priceLabel) priceLabel.textContent = isKg ? 'Precio (unidad completa)' : 'Precio';
+    if (priceLabel) priceLabel.textContent = isKg ? 'Precio mayorista (unidad completa)' : 'Precio mayorista';
 
     if (stockInput){
       stockInput.step = isKg ? '0.01' : '1';
@@ -369,16 +375,18 @@ function syncProductUnitFields(){
 function validateForm(){
   const name = productForm.name.value.trim();
   const price = productForm.price.value;
+  const retailPrice = retailPriceInput ? retailPriceInput.value : '';
   const desc = productForm.description.value.trim();
   const saleUnit = normalizeSaleUnit((productForm.sale_unit && productForm.sale_unit.value) ? productForm.sale_unit.value : 'unit');
   const kgPerUnit = Number(productForm.kg_per_unit && productForm.kg_per_unit.value ? productForm.kg_per_unit.value : 1);
+  const retailPriceOk = (retailPrice === '' || (!isNaN(Number(retailPrice)) && Number(retailPrice) >= 0));
   // Basic form checks for product creation/update
   // Allow empty description (legacy products may not have descriptions)
-  const ok = name.length > 0 && price !== '' && !isNaN(Number(price)) && (saleUnit !== 'kg' || (!isNaN(kgPerUnit) && kgPerUnit > 0));
+  const ok = name.length > 0 && price !== '' && !isNaN(Number(price)) && Number(price) >= 0 && retailPriceOk && (saleUnit !== 'kg' || (!isNaN(kgPerUnit) && kgPerUnit > 0));
   // Log last product form change (do not pollute with promotion variables)
   try{
     const timestamp = new Date().toISOString();
-    const logEntry = { action: currentEditId ? 'update' : 'create', timestamp, name, price: Number(price) };
+    const logEntry = { action: currentEditId ? 'update' : 'create', timestamp, name, price: Number(price), price_retail: (retailPrice === '' ? null : Number(retailPrice)) };
     localStorage.setItem('productFormLog', JSON.stringify(logEntry));
     localStorage.setItem('admin_products_v1_lastUpdated', timestamp);
   }catch(e){ console.warn('Failed to write product log or lastUpdated to localStorage', e); }
@@ -399,7 +407,7 @@ function escapeHtml(str) {
 if(imageInput) imageInput.onchange = () =>{
   const f = imageInput.files[0];
   selectedFile = f || null;
-  fileNameEl.textContent = f ? f.name : 'Ningún archivo seleccionado';
+  fileNameEl.textContent = f ? f.name : 'NingÃºn archivo seleccionado';
   imagePreview.innerHTML = '';
   if(f){
     const reader = new FileReader();
@@ -501,6 +509,13 @@ async function refresh(){
   const products = await fetchProducts(q, cat, sort);
   renderProducts(products);
   updateStats(products);
+  try{
+    const retailSection = document.getElementById('retail-prices');
+    if (retailSection && !retailSection.classList.contains('hidden')) {
+      retailProductsCache = products || [];
+      renderRetailPrices(retailProductsCache);
+    }
+  }catch(_){ }
   refreshBtn.disabled = false; refreshBtn.textContent = prevText;
 }
 
@@ -537,8 +552,9 @@ function renderProducts(products){
       <td>${p.name}</td>
       <td>${catsDisplay}</td>
       <td>$${parseFloat(p.price).toFixed(2)}${unitSuffix}</td>
+      <td>${(p.price_retail === null || p.price_retail === undefined || p.price_retail === '') ? '<span class="muted">—</span>' : ('$' + parseFloat(p.price_retail).toFixed(2) + unitSuffix)}</td>
       <td>${stockDisplay}${stockSuffix}${kgPerUnitHint}</td>
-      <td>${p.active ? 'Sí' : 'No'}</td>
+      <td>${p.active ? 'SÃ­' : 'No'}</td>
       <td>
         <button data-id="${p.id}" class="editBtn btn">Editar</button>
         <button data-id="${p.id}" class="delBtn btn">Eliminar</button>
@@ -549,6 +565,130 @@ function renderProducts(products){
   categoryFilter.innerHTML = '<option value="">Todas</option>' + Array.from(categories).map(c => `<option value="${c}">${c}</option>`).join('');
   document.querySelectorAll('.editBtn').forEach(el => el.onclick = async e => { await onEdit(e.target.dataset.id) });
   document.querySelectorAll('.delBtn').forEach(el => el.onclick = async e => { await onDelete(e.target.dataset.id) });
+}
+
+function parseRetailPriceInput(rawValue){
+  const raw = String(rawValue ?? '').trim();
+  if (!raw) return null;
+  const num = Number(raw);
+  if (Number.isNaN(num) || num < 0) return null;
+  return num;
+}
+
+function normalizeRetailComparable(rawValue){
+  const parsed = parseRetailPriceInput(rawValue);
+  return parsed === null ? '' : parsed.toFixed(2);
+}
+
+function markRetailRowDirty(inputEl){
+  if (!inputEl) return;
+  const row = inputEl.closest('tr');
+  if (!row) return;
+  const original = String(row.dataset.originalRetail || '');
+  const current = normalizeRetailComparable(inputEl.value);
+  const changed = current !== original;
+  row.classList.toggle('retail-row-dirty', changed);
+}
+
+function renderRetailPrices(products){
+  if (!retailPricesTableBody) return;
+  retailPricesTableBody.innerHTML = '';
+  for (const p of (products || [])) {
+    const tr = document.createElement('tr');
+    const retailRaw = (p.price_retail === null || p.price_retail === undefined) ? '' : String(p.price_retail);
+    const retailNorm = normalizeRetailComparable(retailRaw);
+    tr.dataset.productId = String(p.id);
+    tr.dataset.originalRetail = retailNorm;
+    tr.innerHTML = `
+      <td>${escapeHtml(p.name || '')}</td>
+      <td>${escapeHtml(p.category || '')}</td>
+      <td>$${Number(p.price || 0).toFixed(2)}</td>
+      <td><input class="retail-price-input" type="number" min="0" step="0.01" value="${retailNorm}" placeholder="(usa mayorista)" /></td>
+      <td><button class="btn saveRetailRowBtn" data-id="${p.id}">Guardar</button></td>
+    `;
+    retailPricesTableBody.appendChild(tr);
+  }
+  retailPricesTableBody.querySelectorAll('.retail-price-input').forEach((input) => {
+    input.addEventListener('input', () => markRetailRowDirty(input));
+  });
+  retailPricesTableBody.querySelectorAll('.saveRetailRowBtn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const row = btn.closest('tr');
+      const input = row ? row.querySelector('.retail-price-input') : null;
+      const id = row ? Number(row.dataset.productId) : NaN;
+      if (!input || !Number.isFinite(id)) return;
+      await saveSingleRetailPrice(id, input);
+    });
+  });
+}
+
+async function saveSingleRetailPrice(productId, inputEl){
+  const raw = String(inputEl.value || '').trim();
+  const parsed = parseRetailPriceInput(raw);
+  if (raw && parsed === null) {
+    showToast('Precio minorista invÃ¡lido', 'error');
+    return false;
+  }
+  const btn = inputEl.closest('tr')?.querySelector('.saveRetailRowBtn');
+  if (btn) btn.disabled = true;
+  try{
+    await updateProduct(productId, { price_retail: parsed });
+    const row = inputEl.closest('tr');
+    if (row) {
+      row.dataset.originalRetail = normalizeRetailComparable(parsed);
+      row.classList.remove('retail-row-dirty');
+    }
+    return true;
+  }catch(e){
+    console.error('saveSingleRetailPrice failed', e);
+    showToast('No se pudo guardar el precio minorista', 'error');
+    return false;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function saveAllRetailPrices(){
+  if (!retailPricesTableBody) return;
+  const rows = Array.from(retailPricesTableBody.querySelectorAll('tr.retail-row-dirty'));
+  if (!rows.length) {
+    showToast('No hay cambios para guardar', 'info');
+    return;
+  }
+  let okCount = 0;
+  let failCount = 0;
+  if (retailSaveAllBtn) retailSaveAllBtn.disabled = true;
+  for (const row of rows) {
+    const input = row.querySelector('.retail-price-input');
+    const id = Number(row.dataset.productId);
+    if (!input || !Number.isFinite(id)) { failCount += 1; continue; }
+    const ok = await saveSingleRetailPrice(id, input);
+    if (ok) okCount += 1;
+    else failCount += 1;
+  }
+  if (retailSaveAllBtn) retailSaveAllBtn.disabled = false;
+  if (okCount > 0 && failCount === 0) showToast('Precios minorista actualizados');
+  else if (okCount > 0 && failCount > 0) showToast(`Guardados: ${okCount} · Fallidos: ${failCount}`, 'error');
+  else showToast('No se pudieron guardar los cambios', 'error');
+  try{ await refresh(); }catch(_){ }
+  try{ await refreshRetailPrices(); }catch(_){ }
+}
+
+async function refreshRetailPrices(){
+  if (!retailPricesTableBody) return;
+  const q = retailPriceSearch ? retailPriceSearch.value.trim() : '';
+  const oldText = retailRefreshBtn ? retailRefreshBtn.textContent : '';
+  if (retailRefreshBtn) { retailRefreshBtn.disabled = true; retailRefreshBtn.textContent = 'Cargando...'; }
+  try{
+    const products = await fetchProducts(q, '', 'name_asc');
+    retailProductsCache = products || [];
+    renderRetailPrices(retailProductsCache);
+  }catch(e){
+    console.error('refreshRetailPrices failed', e);
+    showToast('No se pudieron cargar precios minorista', 'error');
+  } finally {
+    if (retailRefreshBtn) { retailRefreshBtn.disabled = false; retailRefreshBtn.textContent = oldText || 'Actualizar lista'; }
+  }
 }
 
 function updateStats(products){
@@ -589,6 +729,9 @@ if(productForm) productForm.addEventListener('submit', handleSave);
 if(refreshBtn) refreshBtn.onclick = () => refresh();
 if(searchInput) searchInput.oninput = () => refresh();
 if(sortSelect) sortSelect.onchange = () => refresh();
+if(retailRefreshBtn) retailRefreshBtn.onclick = () => refreshRetailPrices();
+if(retailSaveAllBtn) retailSaveAllBtn.onclick = () => saveAllRetailPrices();
+if(retailPriceSearch) retailPriceSearch.oninput = () => refreshRetailPrices();
 // manual backup (admin)
 const backupBtn = document.getElementById('backupBtn');
 if (backupBtn) backupBtn.addEventListener('click', async () => {
@@ -604,12 +747,23 @@ if (backupBtn) backupBtn.addEventListener('click', async () => {
 document.querySelectorAll('.sidebar nav a').forEach(a => a.onclick = () => {
   document.querySelectorAll('.sidebar nav a').forEach(x=>x.classList.remove('active'));
   a.classList.add('active');
-  document.getElementById('title').textContent = a.dataset.section === 'dashboard' ? 'Dashboard' : 'Catálogo';
+  const sectionTitles = {
+    'dashboard': 'Dashboard',
+    'catalog': 'CatÃ¡logo',
+    'retail-prices': 'Precios minorista',
+    'consumos': 'ConsumiciÃ³n inmediata',
+    'promotions': 'Promociones',
+    'promo-images': 'ImÃ¡genes Promocionales',
+    'filters': 'Filtros',
+    'orders': 'Pedidos',
+  };
+  document.getElementById('title').textContent = sectionTitles[a.dataset.section] || 'AdministraciÃ³n';
   document.querySelectorAll('.section').forEach(s=>s.classList.add('hidden'));
   const target = document.getElementById(a.dataset.section);
   if(target) target.classList.remove('hidden');
   // If promo-images tab activated, ensure we load images
   try{ if(a.dataset.section === 'promo-images') fetchPromoImages(); }catch(e){ console.warn('fetchPromoImages guard failed', e); }
+  try{ if(a.dataset.section === 'retail-prices') refreshRetailPrices(); }catch(e){ console.warn('refreshRetailPrices guard failed', e); }
 });
 
 // Theme toggle
@@ -628,6 +782,15 @@ async function handleSave(ev){
   productForm.category.value = (selectedCats && selectedCats.length) ? String(selectedCats[0]) : (productForm.category.value || '');
 
   const payload = { name: productForm.name.value.trim(), price: Number(productForm.price.value), description: productForm.description.value.trim(), category: productForm.category.value.trim() || null, image_url: imageUrl, active: true };
+  try{
+    const retailRaw = retailPriceInput ? String(retailPriceInput.value || '').trim() : '';
+    payload.price_retail = retailRaw === '' ? null : Number(retailRaw);
+    if (payload.price_retail !== null && (isNaN(payload.price_retail) || payload.price_retail < 0)) {
+      showToast('Precio minorista inválido', 'error');
+      saveBtn.disabled = false;
+      return;
+    }
+  }catch(_){ payload.price_retail = null; }
   try{
     const su = normalizeSaleUnit((productForm.sale_unit && productForm.sale_unit.value) ? productForm.sale_unit.value : 'unit');
     payload.sale_unit = su;
@@ -700,9 +863,12 @@ document.addEventListener('DOMContentLoaded', () => {
       if (toShow === 'promo-images'){
         setTimeout(()=>{ try{ fetchPromoImages(); }catch(e){ /* ignore */ } }, 40);
       }
+      if (toShow === 'retail-prices'){
+        setTimeout(()=>{ try{ refreshRetailPrices(); }catch(e){ /* ignore */ } }, 40);
+      }
       // If promoImagesList exists but is empty, show a helpful hint so UI isn't blank
       if(promoImagesList && promoImagesList.children.length === 0){
-        promoImagesList.innerHTML = '<div class="empty-note">Seleccione la pestaña o recargue la página para gestionar imágenes promocionales.</div>';
+        promoImagesList.innerHTML = '<div class="empty-note">Seleccione la pestaÃ±a o recargue la pÃ¡gina para gestionar imÃ¡genes promocionales.</div>';
       }
   }catch(e){ console.warn('promo-images init guard failed', e); }
 });
@@ -715,6 +881,7 @@ async function onEdit(id){
     currentEditId = id;
     productForm.name.value = p.name;
     productForm.price.value = p.price;
+    if (retailPriceInput) retailPriceInput.value = (p.price_retail === null || p.price_retail === undefined || p.price_retail === '') ? '' : String(p.price_retail);
     productForm.category.value = p.category;
     productForm.description.value = p.description;
     try{ if(productForm.sale_unit){ productForm.sale_unit.value = normalizeSaleUnit(String(p.sale_unit || p.unit_type || p.unit || 'unit')); } }catch(_){ }
@@ -734,7 +901,7 @@ async function onEdit(id){
     }
   imagePreview.innerHTML = previewSrc ? `<img src="${previewSrc}" onerror="this.onerror=null;this.src='../images/default.png'"/>` : '';
     imageUrl = p.image_url;
-    selectedFile = null; fileNameEl.textContent = p.image_url ? p.image_url.split('/').pop() : 'Ningún archivo seleccionado';
+    selectedFile = null; fileNameEl.textContent = p.image_url ? p.image_url.split('/').pop() : 'NingÃºn archivo seleccionado';
 
     // populate category checkboxes (ensure filters sync first, then mapping)
     try{
@@ -753,7 +920,7 @@ async function onEdit(id){
 }
 
 async function onDelete(id){
-  if(!confirm('¿Eliminar producto?')) return;
+  if(!confirm('Â¿Eliminar producto?')) return;
   try{ await deleteProduct(id); showToast('Eliminado'); refresh(); }
   catch(err){ showToast('Error eliminando','error'); }
 }
@@ -839,7 +1006,7 @@ async function verifyServerHasOrder(id, attempts = 6, interval = 2000){
                 try{
                   if(String((r.children && r.children[0] && r.children[0].textContent) || '').trim() !== String(id)) return;
                   const isLocal = r.getAttribute && r.getAttribute('data-local-insert');
-                  // Si el pedido ya tiene created_at, limpiar caché local y estado pendiente
+                  // Si el pedido ya tiene created_at, limpiar cachÃ© local y estado pendiente
                   if (srv && srv.created_at) {
                     try { delete window.__localOrderRows[id]; window.__localOrderIds && window.__localOrderIds.delete(String(id)); saveLocalOrderCache && saveLocalOrderCache(); } catch(_){}
                     r.removeAttribute('data-local-insert');
@@ -996,9 +1163,9 @@ function formatOrderPaymentMethod(order){
     const method = normalizeOrderPaymentMethod(order && order.payment_method);
     if (method === 'mercadopago') return 'Mercado Pago';
     if (method === 'cash') return 'Efectivo';
-    return order && order.payment_method ? String(order.payment_method) : '—';
+    return order && order.payment_method ? String(order.payment_method) : 'â€”';
   }catch(_){
-    return '—';
+    return 'â€”';
   }
 }
 
@@ -1034,7 +1201,7 @@ function renderOrders(list, source, dateFilter){
   try{ console.debug('[admin] renderOrders called (rebuild)', { count: Array.isArray(list)?list.length:0, source }); }catch(_){ }
   ordersTableBody.innerHTML = '';
   if(!list || list.length === 0){
-    const emptyRow = document.createElement('tr'); emptyRow.innerHTML = `<td colspan="8" class="empty-note">No hay pedidos. Si esperas ver pedidos, prueba el botón "Probar evento WS" o crea uno desde el frontend.</td>`;
+    const emptyRow = document.createElement('tr'); emptyRow.innerHTML = `<td colspan="8" class="empty-note">No hay pedidos. Si esperas ver pedidos, prueba el botÃ³n "Probar evento WS" o crea uno desde el frontend.</td>`;
     ordersTableBody.appendChild(emptyRow);
     try{ updateBadgeCount(source); }catch(_){ }
     return;
@@ -1047,7 +1214,7 @@ function renderOrders(list, source, dateFilter){
       return String(osrc).toLowerCase() === 'web';
     });
   }catch(_){ }
-  // Agrupar por día y deduplicar por id (siempre mostrar solo una vez por tabla)
+  // Agrupar por dÃ­a y deduplicar por id (siempre mostrar solo una vez por tabla)
   const groups = new Map();
   const seenIds = new Set();
   for(const o of (list || [])){
@@ -1090,7 +1257,7 @@ function renderOrders(list, source, dateFilter){
     }
   }
 
-  // Restaurar solo filas locales cuyo source sea exactamente el de la pestaña
+  // Restaurar solo filas locales cuyo source sea exactamente el de la pestaÃ±a
   try{
     window.__localOrderRows = window.__localOrderRows || {};
     for(const lid of Object.keys(window.__localOrderRows)){
@@ -1139,23 +1306,24 @@ function orderRowFor(o){
   const hasConsumo = (itemsArr || []).some(it => isOrderItemConsumo(it));
   const paymentMethod = formatOrderPaymentMethod(o);
   const paymentStatus = formatOrderPaymentStatus(o);
+  const paymentReference = String((o && o.payment_reference) || '').trim();
   const itemsList = (itemsArr || []).map(it => {
     const qtyLabel = formatOrderQty(it);
-    return `<li>${renderOrderItemLabel(it)} <span class="muted">× ${escapeHtml(qtyLabel)}</span></li>`;
+    return `<li>${renderOrderItemLabel(it)} <span class="muted">Ã— ${escapeHtml(qtyLabel)}</span></li>`;
   }).join('');
   const tr = document.createElement('tr');
   const previewName = o._token_preview && (o._token_preview.name || o._token_preview.email) ? (o._token_preview.name || o._token_preview.email) : null;
   const displayName = o.user_full_name || previewName || o.user_email;
-  const userDisplay = displayName ? `${displayName}${o.user_email && displayName !== o.user_email ? ' / ' + o.user_email : ''}` : (o.user_id ? `#${o.user_id}` : '—');
+  const userDisplay = displayName ? `${displayName}${o.user_email && displayName !== o.user_email ? ' / ' + o.user_email : ''}` : (o.user_id ? `#${o.user_id}` : 'â€”');
   const address = [o.user_barrio, o.user_calle, o.user_numeracion].filter(Boolean).join(', ');
   const fecha = o.created_at ? new Date(o.created_at).toLocaleString('es-ES', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
-  // Solo mostrar 'pendiente' si NO tiene created_at y está en el caché local como pending
+  // Solo mostrar 'pendiente' si NO tiene created_at y estÃ¡ en el cachÃ© local como pending
   let isPending = false;
   const localCache = window.__localOrderRows && window.__localOrderRows[String(o.id)];
   if (!o.created_at && localCache && localCache.pending) {
     isPending = true;
   } else if (o.created_at && localCache) {
-    // Si el pedido ya tiene created_at, eliminar del caché local y nunca mostrar como pendiente
+    // Si el pedido ya tiene created_at, eliminar del cachÃ© local y nunca mostrar como pendiente
     try { delete window.__localOrderRows[String(o.id)]; window.__localOrderIds && window.__localOrderIds.delete(String(o.id)); saveLocalOrderCache && saveLocalOrderCache(); } catch(_){}
     isPending = false;
   }
@@ -1167,12 +1335,13 @@ function orderRowFor(o){
           <span class="order-date">${fecha}</span>
         </div>
         ${hasConsumo ? '<div class="order-row-banner" style="margin:6px 0 10px;padding:8px 10px;border-radius:10px;background:#fff7ed;border:1px solid rgba(242,107,56,0.25);color:#9a3412;font-weight:800">Pedido con consumo inmediato</div>' : ''}
-        <div class="order-row-items"><strong>Artículos:</strong><ul class="order-items-list">${itemsList}</ul></div>
+        <div class="order-row-items"><strong>ArtÃ­culos:</strong><ul class="order-items-list">${itemsList}</ul></div>
         <div class="order-row-user"><strong>Cliente:</strong> ${escapeHtml(userDisplay)}</div>
-        <div class="order-row-address"><strong>Dirección:</strong> ${escapeHtml(address || '—')}</div>
+        <div class="order-row-address"><strong>DirecciÃ³n:</strong> ${escapeHtml(address || 'â€”')}</div>
         <div class="order-row-total"><strong>Total:</strong> $${Number(o.total||0).toFixed(2)}</div>
         <div class="order-row-payment"><strong>Forma de pago:</strong> ${escapeHtml(paymentMethod)}${paymentStatus ? ` <span class="muted">(${escapeHtml(paymentStatus)})</span>` : ''}</div>
-        ${isPending ? '<div class="order-row-pending">• pendiente</div>' : ''}
+        ${paymentReference ? `<div class="order-row-payment-ref"><strong>Ref MP:</strong> ${escapeHtml(paymentReference)}</div>` : ''}
+        ${isPending ? '<div class="order-row-pending">â€¢ pendiente</div>' : ''}
         <div class="order-row-actions">
           <button data-id="${o.id}" class="viewOrderBtn btn">Ver</button>
           <button data-id="${o.id}" class="markSeenBtn btn">${o.status === 'visto' ? 'Visto' : 'Marcar visto'}</button>
@@ -1267,20 +1436,22 @@ function showOrderDetail(order){
   title.textContent = `Pedido #${order.id}`;
   const itemsArr = safeParseItems(order.items || []);
   const hasConsumo = (itemsArr || []).some(it => isOrderItemConsumo(it));
-  const itemsHtml = (itemsArr || []).map(it=>`<li><strong>${renderOrderItemLabel(it)}</strong> — ${escapeHtml(formatOrderQty(it))} × $${Number(it.meta?.price||0).toFixed(2)}</li>`).join('') || '<li>(sin ítems)</li>';
+  const itemsHtml = (itemsArr || []).map(it=>`<li><strong>${renderOrderItemLabel(it)}</strong> â€” ${escapeHtml(formatOrderQty(it))} Ã— $${Number(it.meta?.price||0).toFixed(2)}</li>`).join('') || '<li>(sin Ã­tems)</li>';
   const address = [order.user_barrio, order.user_calle, order.user_numeracion].filter(Boolean).join(', ');
   const paymentMethod = formatOrderPaymentMethod(order);
   const paymentStatus = formatOrderPaymentStatus(order);
+  const paymentReference = String((order && order.payment_reference) || '').trim();
   // prefer user_* fields, otherwise display token preview when available
   const previewName = order._token_preview && (order._token_preview.name || order._token_preview.email) ? (order._token_preview.name || order._token_preview.email) : null;
-  const displayName = order.user_full_name || previewName || order.user_email || (order.user_id ? '#'+order.user_id : '—');
+  const displayName = order.user_full_name || previewName || order.user_email || (order.user_id ? '#'+order.user_id : 'â€”');
   body.innerHTML = `
     <div class="modal-order-body">
       <div><strong>Usuario:</strong> ${escapeHtml(displayName)} ${order.user_email && displayName !== order.user_email ? ' / ' + escapeHtml(order.user_email) : ''}</div>
-      <div><strong>Dirección:</strong> ${escapeHtml(address || '—')}</div>
+      <div><strong>DirecciÃ³n:</strong> ${escapeHtml(address || 'â€”')}</div>
       <div><strong>Total:</strong> $${Number(order.total||0).toFixed(2)}</div>
       <div><strong>Estado:</strong> ${escapeHtml(order.status||'')}</div>
       <div><strong>Forma de pago:</strong> ${escapeHtml(paymentMethod)}${paymentStatus ? ` <span class="muted">(${escapeHtml(paymentStatus)})</span>` : ''}</div>
+      ${paymentReference ? `<div><strong>Ref MP:</strong> ${escapeHtml(paymentReference)}</div>` : ''}
       ${hasConsumo ? '<div style="margin-top:8px;padding:8px 10px;border-radius:10px;background:#fff7ed;border:1px solid rgba(242,107,56,0.25);color:#9a3412;font-weight:800">Pedido con consumo inmediato</div>' : ''}
       <div class="mt-8"><strong>Items:</strong><ul class="order-items-list">${itemsHtml}</ul></div>
     </div>
@@ -1662,7 +1833,7 @@ function editFilter(id){
     actionsCell.querySelector('.cancelEdit').onclick = () => { renderFilters(); };
     actionsCell.querySelector('.saveEdit').onclick = () => {
       const newName = input.value.trim(); const newValue = valueInput.value.trim() || newName.toLowerCase();
-      if(!newName) return showToast('El nombre no puede estar vacío','error');
+      if(!newName) return showToast('El nombre no puede estar vacÃ­o','error');
       f.name = newName; f.value = newValue;
       saveFilters(filters); renderFilters(); showToast('Filtro actualizado');
       try{ if(window.BroadcastChannel){ const bc = new BroadcastChannel('filters_channel'); bc.postMessage({ action: 'filters-updated', filters }); bc.close(); } }catch(e){ console.warn('BroadcastChannel filters send failed', e); }
@@ -1673,7 +1844,7 @@ if(addFilterBtn) addFilterBtn.addEventListener('click', ()=>{ try{ const name = 
 // allow pressing Enter inside the input to add a filter
 if(filterNameInput) filterNameInput.addEventListener('keydown', (e)=>{ if(e.key === 'Enter'){ e.preventDefault(); try{ const name = (filterNameInput && filterNameInput.value) ? filterNameInput.value.trim() : ''; if(!name){ showToast('Escribe el nombre del filtro','warning'); return; } addFilter(name); if(filterNameInput) filterNameInput.value=''; }catch(err){ console.warn('addFilter enter failed', err); } } });
 
-if(importFiltersBtn) importFiltersBtn.addEventListener('click', async ()=>{ try{ const f = await safeFetch(`${API_BASE}/filters.json`).catch(()=>null); if(f && Array.isArray(f)){ saveFilters(f); renderFilters(); showToast('Filtros importados'); try{ if(window.BroadcastChannel){ const bc = new BroadcastChannel('filters_channel'); bc.postMessage({ action: 'filters-updated', filters: f }); bc.close(); } }catch(e){} } else showToast('Archivo de filtros inválido o no encontrado','error'); }catch(e){ console.error('importFilters failed', e); showToast('Error importando filtros','error'); } });
+if(importFiltersBtn) importFiltersBtn.addEventListener('click', async ()=>{ try{ const f = await safeFetch(`${API_BASE}/filters.json`).catch(()=>null); if(f && Array.isArray(f)){ saveFilters(f); renderFilters(); showToast('Filtros importados'); try{ if(window.BroadcastChannel){ const bc = new BroadcastChannel('filters_channel'); bc.postMessage({ action: 'filters-updated', filters: f }); bc.close(); } }catch(e){} } else showToast('Archivo de filtros invÃ¡lido o no encontrado','error'); }catch(e){ console.error('importFilters failed', e); showToast('Error importando filtros','error'); } });
 
 // Listen for product-categories broadcast updates
 try{ if(window.BroadcastChannel){ const bcpc = new BroadcastChannel('product_categories_channel'); bcpc.onmessage = (ev) => { try{ if(ev.data && ev.data.action === 'product-categories-updated'){ console.log('[admin] product-categories updated via BroadcastChannel'); fetchAndSyncProductCategories().then(()=>refresh()).catch(()=>refresh()); } }catch(e){} }; } }catch(e){}
@@ -1724,7 +1895,7 @@ function dedupeDOMOrders(){
                 byId.set(id, { row: r, ts: createdTs });
                 continue;
               }
-              // Si ninguna es local, preferir la más reciente
+              // Si ninguna es local, preferir la mÃ¡s reciente
               if((createdTs || 0) > (prev.ts || 0)){
                 try{ prev.row.parentNode && prev.row.parentNode.removeChild(prev.row); }catch(_){ }
                 byId.set(id, { row: r, ts: createdTs });
@@ -1850,7 +2021,7 @@ function setupSocket(attempt = 0){
       // if snapshot file exists, we can load products and show, but avoid blocking
       try{ const resp = await fetch('../catalogo/products.json'); if(resp.ok){ const items = await resp.json(); const list = (items && items.length) ? items.map(i=> `<div>${i.name}</div>`).join('') : 'Ninguno'; const _pf = document.getElementById('promoProductsFallback'); if(_pf) _pf.innerHTML = list; } }catch(e){}
       return;
-    }catch(e){ console.error('[admin] failed to create fallback modal', e); showToast('No se pudo abrir el modal y el fallback falló', 'error'); return; }
+    }catch(e){ console.error('[admin] failed to create fallback modal', e); showToast('No se pudo abrir el modal y el fallback fallÃ³', 'error'); return; }
   }
 }
 
@@ -1915,7 +2086,7 @@ async function savePromo(){ const name = promoName.value.trim(); const desc = pr
   const validUntilIso = promoInputToIso(validUntilRaw);
   if(!validUntilIso){ return showToast('Defini hasta cuando dura la promocion', 'error'); }
   let promos = loadPromotions(); if(currentPromotionEditId){ const idx = promos.findIndex(x=> x.id == currentPromotionEditId); if(idx > -1){ promos[idx].name = name; promos[idx].description = desc; promos[idx].productIds = checked; promos[idx].type = type; promos[idx].value = value; promos[idx].valid_until = validUntilIso; } }else{ const p = { id: Date.now(), name, description: desc, productIds: checked, type, value, valid_until: validUntilIso }; promos.push(p); }
-  savePromotions(promos); renderPromotions(); closePromoModal(); showToast('Promoción guardada');
+  savePromotions(promos); renderPromotions(); closePromoModal(); showToast('PromociÃ³n guardada');
   console.log('[admin] saved promotions to localStorage, count=', (promos || []).length, promos);
   // Broadcast promotions update to other tabs/pages (same-origin)
   try{ if(window.BroadcastChannel){ const bc = new BroadcastChannel('promo_channel'); bc.postMessage({ action: 'promotions-updated', promos }); bc.close(); console.log('[admin] broadcasted promotions via BroadcastChannel'); } }catch(e){ console.warn('BroadcastChannel send failed', e); }
@@ -1930,12 +2101,12 @@ async function savePromo(){ const name = promoName.value.trim(); const desc = pr
 }
 
 function deletePromotion(id){
-  if(!confirm('Eliminar promoción?')) return;
+  if(!confirm('Eliminar promociÃ³n?')) return;
   let promos = loadPromotions();
   promos = promos.filter(p => p.id != id);
   savePromotions(promos);
   renderPromotions();
-  showToast('Promoción eliminada');
+  showToast('PromociÃ³n eliminada');
   console.log('[admin] deletePromotion: broadcast & persist updated promotions count=', promos.length);
   // Broadcast promotions change so other tabs (catalogo) update
   try{ if(window.BroadcastChannel){ const bc = new BroadcastChannel('promo_channel'); bc.postMessage({ action: 'promotions-updated', promos }); bc.close(); console.log('[admin] broadcasted promotions update after delete'); } }catch(e){ console.warn('BroadcastChannel send failed', e); }
@@ -1963,7 +2134,7 @@ if(newPromoBtn){
 }
 
 // Removed debug floating test button to declutter the UI.
-// Use the 'Añadir promoción' button in the Promotions section to open the promo modal.
+// Use the 'AÃ±adir promociÃ³n' button in the Promotions section to open the promo modal.
 if(promoModalClose) promoModalClose.onclick = ()=> closePromoModal();
 if(cancelPromoBtn) cancelPromoBtn.onclick = ()=> closePromoModal();
 if(savePromoBtn) savePromoBtn.onclick = ()=> savePromo();
@@ -1982,7 +2153,7 @@ if(exportPromosBtn) exportPromosBtn.onclick = ()=>{
 promoProductsList && promoProductsList.addEventListener('change', (e)=> { if(e.target && e.target.matches('input[type=checkbox]')) updateSavePromoBtn(); });
 promoName && promoName.addEventListener('input', updateSavePromoBtn);
 
-// ---------------------- Consumición inmediata (admin) ----------------------
+// ---------------------- ConsumiciÃ³n inmediata (admin) ----------------------
 const loadConsumosBtn = document.getElementById('loadConsumosBtn');
 const saveConsumosBtn = document.getElementById('saveConsumosBtn');
 const consumosList = document.getElementById('consumosList');
@@ -2009,7 +2180,7 @@ function renderConsumosList(products, consumos){
     const row = document.createElement('div'); row.className = 'consumo-row';
     const left = document.createElement('div'); left.className = 'left';
     const cb = document.createElement('input'); cb.type='checkbox'; cb.dataset.id = String(p.id); cb.id = 'consumo-p-' + p.id; if(map[String(p.id)] && map[String(p.id)].discount) cb.checked = true;
-    const lbl = document.createElement('label'); lbl.htmlFor = cb.id; lbl.innerText = p.name + (p.category ? ' — '+p.category : '');
+    const lbl = document.createElement('label'); lbl.htmlFor = cb.id; lbl.innerText = p.name + (p.category ? ' â€” '+p.category : '');
     left.appendChild(cb); left.appendChild(lbl);
     const right = document.createElement('div'); right.className = 'right';
     const inp = document.createElement('input'); inp.type='number'; inp.min=0; inp.max=100; inp.placeholder='Descuento %'; inp.value = (map[String(p.id)] && map[String(p.id)].discount != null) ? String(map[String(p.id)].discount) : '';
@@ -2042,7 +2213,7 @@ async function saveConsumos(){
       data.push({ id, discount, qty });
     }
     if (data.length === 0) {
-      if (!confirm('La lista de consumos está vacía. Esto eliminará todos los consumos publicados. ¿Desea continuar?')){
+      if (!confirm('La lista de consumos estÃ¡ vacÃ­a. Esto eliminarÃ¡ todos los consumos publicados. Â¿Desea continuar?')){
         showToast('Guardar cancelado', 'info');
         return;
       }
