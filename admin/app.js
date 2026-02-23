@@ -1227,6 +1227,44 @@ function formatOrderPaymentStatus(order){
   }
 }
 
+const DEFAULT_ORDER_CUTOFF_HOUR = 18;
+
+function normalizeIsoDateKey(value){
+  const raw = String(value || '').trim();
+  const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return '';
+  return m[1] + '-' + m[2] + '-' + m[3];
+}
+
+function formatIsoDateKeyWithWeekday(value){
+  const key = normalizeIsoDateKey(value);
+  if (!key) return '';
+  try{
+    const parts = key.split('-');
+    const dt = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+    if (isNaN(dt.getTime())) return key;
+    const weekday = dt.toLocaleDateString('es-AR', { weekday: 'long' });
+    const dmy = dt.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+    return weekday.charAt(0).toUpperCase() + weekday.slice(1) + ' ' + dmy;
+  }catch(_){ return key; }
+}
+
+function formatOrderScheduledDelivery(order){
+  try{
+    const dateKey = normalizeIsoDateKey(order && order.scheduled_delivery_date);
+    if (!dateKey) return '';
+    const rawCutoff = order ? Number(order.delivery_cutoff_hour) : NaN;
+    const cutoffHour = Number.isFinite(rawCutoff) ? Math.min(23, Math.max(0, Math.trunc(rawCutoff))) : DEFAULT_ORDER_CUTOFF_HOUR;
+    const cutoffApplied = order && (order.delivery_cutoff_applied === true || String(order.delivery_cutoff_applied || '').trim().toLowerCase() === 'true');
+    const label = formatIsoDateKeyWithWeekday(dateKey);
+    if (!label) return '';
+    if (cutoffApplied){
+      return label + ' (pedido despues de las ' + String(cutoffHour).padStart(2, '0') + ':00)';
+    }
+    return label;
+  }catch(_){ return ''; }
+}
+
 function findOrderRowById(id){
   try{ return Array.from(document.querySelectorAll('table[id^="ordersTable"] tbody tr')).find(r => String((r.children && r.children[0] && r.children[0].textContent) || '').trim() === String(id)); }catch(e){ return null; }
 }
@@ -1364,6 +1402,7 @@ function orderRowFor(o){
   const displayName = o.user_full_name || previewName || o.user_email;
   const userDisplay = displayName ? `${displayName}${o.user_email && displayName !== o.user_email ? ' / ' + o.user_email : ''}` : (o.user_id ? `#${o.user_id}` : '');
   const address = [o.user_barrio, o.user_calle, o.user_numeracion].filter(Boolean).join(', ');
+  const scheduledDeliveryLabel = formatOrderScheduledDelivery(o);
   const orderCustomerType = normalizeOrderCustomerType(o.customer_type);
   const orderCustomerTypeLabel = orderCustomerType === 'minorista' ? 'Minorista' : 'Mayorista';
   const fecha = o.created_at ? new Date(o.created_at).toLocaleString('es-ES', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
@@ -1389,6 +1428,7 @@ function orderRowFor(o){
         <div class="order-row-user"><strong>Cliente:</strong> ${escapeHtml(userDisplay)}</div>
         <div class="order-row-customer-type"><strong>Perfil:</strong> ${escapeHtml(orderCustomerTypeLabel)}</div>
         <div class="order-row-address"><strong>Dirección:</strong> ${escapeHtml(address || '—')}</div>
+        ${scheduledDeliveryLabel ? `<div class="order-row-address"><strong>Entrega programada:</strong> ${escapeHtml(scheduledDeliveryLabel)}</div>` : ''}
         <div class="order-row-total"><strong>Total:</strong> $${Number(o.total||0).toFixed(2)}</div>
         <div class="order-row-payment"><strong>Forma de pago:</strong> ${escapeHtml(paymentMethod)}${paymentStatus ? ` <span class="muted">(${escapeHtml(paymentStatus)})</span>` : ''}</div>
         ${paymentReference ? `<div class="order-row-payment-ref"><strong>Ref MP:</strong> ${escapeHtml(paymentReference)}</div>` : ''}
@@ -1503,6 +1543,7 @@ function showOrderDetail(order){
   const paymentMethod = formatOrderPaymentMethod(order);
   const paymentStatus = formatOrderPaymentStatus(order);
   const paymentReference = String((order && order.payment_reference) || '').trim();
+  const scheduledDeliveryLabel = formatOrderScheduledDelivery(order);
   const customerTypeLabel = normalizeOrderCustomerType(order && order.customer_type) === 'minorista' ? 'Minorista' : 'Mayorista';
   // prefer user_* fields, otherwise display token preview when available
   const previewName = order._token_preview && (order._token_preview.name || order._token_preview.email) ? (order._token_preview.name || order._token_preview.email) : null;
@@ -1512,6 +1553,7 @@ function showOrderDetail(order){
       <div><strong>Usuario:</strong> ${escapeHtml(displayName)} ${order.user_email && displayName !== order.user_email ? ' / ' + escapeHtml(order.user_email) : ''}</div>
       <div><strong>Perfil:</strong> ${escapeHtml(customerTypeLabel)}</div>
       <div><strong>Dirección:</strong> ${escapeHtml(address || '—')}</div>
+      ${scheduledDeliveryLabel ? `<div><strong>Entrega programada:</strong> ${escapeHtml(scheduledDeliveryLabel)}</div>` : ''}
       <div><strong>Total:</strong> $${Number(order.total||0).toFixed(2)}</div>
       <div><strong>Estado:</strong> ${escapeHtml(order.status||'')}</div>
       <div><strong>Forma de pago:</strong> ${escapeHtml(paymentMethod)}${paymentStatus ? ` <span class="muted">(${escapeHtml(paymentStatus)})</span>` : ''}</div>
@@ -1702,6 +1744,65 @@ function savePromotions(promos){
   try{ localStorage.setItem(PROMO_KEY, JSON.stringify(promos || [])); }catch(e){ console.warn('savePromotions failed', e); }
 }
 
+function normalizePromotionsList(list){
+  if(!Array.isArray(list)) return [];
+  return list.map((p, idx) => {
+    if(!p || typeof p !== 'object') return null;
+    const name = String(p.name || '').trim();
+    if(!name) return null;
+    const rawProductIds = Array.isArray(p.productIds) ? p.productIds : (Array.isArray(p.product_ids) ? p.product_ids : []);
+    const productIds = rawProductIds
+      .map((idVal) => {
+        const n = Number(idVal);
+        return Number.isFinite(n) ? n : null;
+      })
+      .filter((n) => n != null);
+    const type = String(p.type || 'percent').trim() || 'percent';
+    const value = (p.value == null || p.value === '') ? null : Number(p.value);
+    return {
+      id: p.id != null ? p.id : `promo_${Date.now()}_${idx}`,
+      name,
+      description: p.description != null ? String(p.description) : '',
+      productIds,
+      type,
+      value: Number.isFinite(value) ? value : null,
+      valid_until: p.valid_until || p.validUntil || null,
+    };
+  }).filter(Boolean);
+}
+
+function extractPromotionsArray(payload){
+  if(Array.isArray(payload)) return payload;
+  if(payload && Array.isArray(payload.promotions)) return payload.promotions;
+  if(payload && Array.isArray(payload.data)) return payload.data;
+  return null;
+}
+
+async function fetchAndSyncPromotionsFromServer(){
+  const tryUrls = [
+    `${API_BASE}/promotions`,
+    `${API_BASE}/catalogo/promotions.json`,
+    '/promotions',
+    '/catalogo/promotions.json',
+  ];
+  for(const url of tryUrls){
+    try{
+      const payload = await safeFetch(url, { cache: 'no-store' }).catch((err) => {
+        console.warn('fetch promotions failed for', url, err);
+        return null;
+      });
+      const rawList = extractPromotionsArray(payload);
+      if(!Array.isArray(rawList)) continue;
+      const normalized = normalizePromotionsList(rawList);
+      savePromotions(normalized);
+      return normalized;
+    }catch(e){
+      console.warn('fetchAndSyncPromotionsFromServer error for', url, e);
+    }
+  }
+  return loadPromotions();
+}
+
 function parsePromoDate(value){
   if (!value) return null;
   try{
@@ -1765,9 +1866,107 @@ function renderPromotions(){
 function loadFilters(){
   try{ const raw = localStorage.getItem(FILTERS_KEY) || '[]'; const parsed = JSON.parse(raw); return Array.isArray(parsed) ? parsed : []; }catch(e){ console.warn('loadFilters failed', e); return []; }
 }
-function saveFilters(filters){
-  try{ localStorage.setItem(FILTERS_KEY, JSON.stringify(filters || [])); }catch(e){ console.warn('saveFilters failed', e); }
-  try{ publishFilters(filters); }catch(e){ console.warn('publishFilters failed', e); }
+function normalizeFiltersList(list){
+  if(!Array.isArray(list)) return [];
+  return list.map((f, idx) => {
+    if(typeof f === 'string'){
+      const name = String(f).trim();
+      if(!name) return null;
+      return { id: `f_${idx}_${name.toLowerCase()}`, name, value: name.toLowerCase() };
+    }
+    if(!f || typeof f !== 'object') return null;
+    const name = String(f.name || f.label || f.value || f.id || '').trim();
+    const valueRaw = String(f.value || name).trim();
+    if(!name || !valueRaw) return null;
+    return {
+      id: f.id != null ? f.id : `f_${idx}_${valueRaw.toLowerCase()}`,
+      name,
+      value: valueRaw.toLowerCase(),
+    };
+  }).filter(Boolean);
+}
+
+function saveFilters(filters, options){
+  const opts = options || {};
+  const shouldPublish = opts.publish !== false;
+  const normalized = normalizeFiltersList(filters || []);
+  try{ localStorage.setItem(FILTERS_KEY, JSON.stringify(normalized)); }catch(e){ console.warn('saveFilters failed', e); }
+  if(!shouldPublish) return;
+  try{ publishFilters(normalized); }catch(e){ console.warn('publishFilters failed', e); }
+}
+
+function extractFiltersArray(payload){
+  if(Array.isArray(payload)) return payload;
+  if(payload && Array.isArray(payload.filters)) return payload.filters;
+  if(payload && Array.isArray(payload.data)) return payload.data;
+  return null;
+}
+
+async function fetchAndSyncFiltersFromServer(){
+  const tryUrls = [
+    `${API_BASE}/filters.json`,
+    `${API_BASE}/filters`,
+    '/filters.json',
+    '/filters',
+  ];
+  for(const url of tryUrls){
+    try{
+      const payload = await safeFetch(url, { cache: 'no-store' }).catch((err) => {
+        console.warn('fetch filters failed for', url, err);
+        return null;
+      });
+      const rawList = extractFiltersArray(payload);
+      if(!Array.isArray(rawList)) continue;
+      const normalized = normalizeFiltersList(rawList);
+      saveFilters(normalized, { publish: false });
+      return normalized;
+    }catch(e){
+      console.warn('fetchAndSyncFiltersFromServer error for', url, e);
+    }
+  }
+  return loadFilters();
+}
+
+function prettifyFilterName(raw){
+  const text = String(raw || '').trim();
+  if(!text) return '';
+  return text
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/\b\w/g, (m) => m.toUpperCase());
+}
+
+function deriveFiltersFromProducts(products){
+  const rows = Array.isArray(products) ? products : [];
+  const seen = new Set();
+  const out = [];
+  for(const p of rows){
+    const value = String((p && p.category) || '').trim().toLowerCase();
+    if(!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push({
+      id: `auto_${value}`,
+      name: prettifyFilterName(value),
+      value,
+    });
+  }
+  return normalizeFiltersList(out);
+}
+
+async function seedFiltersFromProductsIfMissing(){
+  const existing = loadFilters();
+  if(Array.isArray(existing) && existing.length > 0) return existing;
+  try{
+    const products = await fetchProducts().catch(() => []);
+    const derived = deriveFiltersFromProducts(products);
+    if(Array.isArray(derived) && derived.length > 0){
+      saveFilters(derived);
+      return derived;
+    }
+  }catch(e){
+    console.warn('seedFiltersFromProductsIfMissing failed', e);
+  }
+  return loadFilters();
 }
 
 // Publish filters to server so the public catalog (possibly on a different origin)
@@ -1924,22 +2123,48 @@ if(addFilterBtn) addFilterBtn.addEventListener('click', ()=>{ try{ const name = 
 // allow pressing Enter inside the input to add a filter
 if(filterNameInput) filterNameInput.addEventListener('keydown', (e)=>{ if(e.key === 'Enter'){ e.preventDefault(); try{ const name = (filterNameInput && filterNameInput.value) ? filterNameInput.value.trim() : ''; if(!name){ showToast('Escribe el nombre del filtro','warning'); return; } addFilter(name); if(filterNameInput) filterNameInput.value=''; }catch(err){ console.warn('addFilter enter failed', err); } } });
 
-if(importFiltersBtn) importFiltersBtn.addEventListener('click', async ()=>{ try{ const f = await safeFetch(`${API_BASE}/filters.json`).catch(()=>null); if(f && Array.isArray(f)){ saveFilters(f); renderFilters(); showToast('Filtros importados'); try{ if(window.BroadcastChannel){ const bc = new BroadcastChannel('filters_channel'); bc.postMessage({ action: 'filters-updated', filters: f }); bc.close(); } }catch(e){} } else showToast('Archivo de filtros inválido o no encontrado','error'); }catch(e){ console.error('importFilters failed', e); showToast('Error importando filtros','error'); } });
+if(importFiltersBtn) importFiltersBtn.addEventListener('click', async ()=>{
+  try{
+    const f = await safeFetch(`${API_BASE}/filters.json`).catch(()=>null);
+    const rawFilters = extractFiltersArray(f);
+    if(Array.isArray(rawFilters)){
+      const normalized = normalizeFiltersList(rawFilters);
+      saveFilters(normalized);
+      renderFilters();
+      showToast('Filtros importados');
+      try{
+        if(window.BroadcastChannel){
+          const bc = new BroadcastChannel('filters_channel');
+          bc.postMessage({ action: 'filters-updated', filters: normalized });
+          bc.close();
+        }
+      }catch(_){}
+    } else {
+      showToast('Archivo de filtros inválido o no encontrado','error');
+    }
+  }catch(e){
+    console.error('importFilters failed', e);
+    showToast('Error importando filtros','error');
+  }
+});
 
 // Listen for product-categories broadcast updates
 try{ if(window.BroadcastChannel){ const bcpc = new BroadcastChannel('product_categories_channel'); bcpc.onmessage = (ev) => { try{ if(ev.data && ev.data.action === 'product-categories-updated'){ console.log('[admin] product-categories updated via BroadcastChannel'); fetchAndSyncProductCategories().then(()=>refresh()).catch(()=>refresh()); } }catch(e){} }; } }catch(e){}
 
 async function bootstrapAdmin(){
   try{ await ensureApiBase(); }catch(e){ console.warn('ensureApiBase failed', e); }
+  // Pull latest server snapshots first so a fresh browser does not start empty.
+  try{ await fetchAndSyncFiltersFromServer(); }catch(e){ console.warn('initial filters sync failed', e); }
+  // If server has no filters snapshot yet, seed from current product categories.
+  try{ await seedFiltersFromProductsIfMissing(); }catch(e){ console.warn('initial filter seed failed', e); }
+  try{ await fetchAndSyncPromotionsFromServer(); }catch(e){ console.warn('initial promotions sync failed', e); }
   // ensure filters UI is initialized
   try{ renderFilters(); }catch(e){ console.warn('initial renderFilters failed', e); }
-  // ensure server has current filters snapshot when admin loads
-  try{ await publishFilters(loadFilters()); }catch(e){ console.warn('initial publishFilters failed', e); }
+  try{ renderPromotions(); }catch(e){ console.warn('initial renderPromotions failed', e); }
   // fetch product-categories snapshot (best-effort)
   try{ await fetchAndSyncProductCategories(); console.log('[admin] product-categories synced'); }catch(e){ console.warn('initial fetchAndSyncProductCategories failed', e); }
   // initial load
   try{ await refresh(); }catch(e){ console.warn('initial refresh failed', e); }
-  try{ renderPromotions(); }catch(e){ console.warn('initial renderPromotions failed', e); }
   // restore any locally-inserted order previews (persisted across reloads)
   try{ loadLocalOrderCache(); }catch(e){ console.warn('loadLocalOrderCache failed', e); }
   try{ await refreshOrders('web'); }catch(e){ console.warn('refreshOrders web failed', e); }
