@@ -13,6 +13,62 @@ import traceback
 import datetime
 import os
 from sqlalchemy.exc import InternalError
+from zoneinfo import ZoneInfo
+
+
+def _normalize_cutoff_hour(raw_value, default_value=18):
+    try:
+        value = int(str(raw_value).strip())
+    except Exception:
+        value = default_value
+    if value < 0:
+        return 0
+    if value > 23:
+        return 23
+    return value
+
+
+def _compute_delivery_schedule_snapshot(
+    now_utc: Optional[datetime.datetime] = None,
+    cutoff_hour: Optional[int] = None,
+    timezone_name: Optional[str] = None,
+):
+    """Compute delivery scheduling metadata with cutoff-hour logic.
+
+    Rule:
+    - Before cutoff: deliver next day (+1).
+    - On/after cutoff: add one extra day (+2 total).
+    """
+    tz_name = str(
+        timezone_name
+        or os.environ.get('ORDER_DELIVERY_TIMEZONE')
+        or os.environ.get('ORDER_EMAIL_TIMEZONE')
+        or 'America/Argentina/Buenos_Aires'
+    ).strip() or 'America/Argentina/Buenos_Aires'
+    cutoff = _normalize_cutoff_hour(
+        cutoff_hour if cutoff_hour is not None else os.environ.get('ORDER_CUTOFF_HOUR', 18),
+        default_value=18,
+    )
+    base_utc = now_utc or datetime.datetime.now(datetime.timezone.utc)
+    if base_utc.tzinfo is None:
+        base_utc = base_utc.replace(tzinfo=datetime.timezone.utc)
+
+    try:
+        tzinfo = ZoneInfo(tz_name)
+    except Exception:
+        tz_name = 'UTC'
+        tzinfo = datetime.timezone.utc
+
+    local_now = base_utc.astimezone(tzinfo)
+    cutoff_applied = local_now.hour >= cutoff
+    days_to_add = 2 if cutoff_applied else 1
+    scheduled_date = (local_now + datetime.timedelta(days=days_to_add)).date().isoformat()
+    return {
+        'scheduled_delivery_date': scheduled_date,
+        'delivery_cutoff_applied': bool(cutoff_applied),
+        'delivery_timezone': tz_name,
+        'delivery_cutoff_hour': int(cutoff),
+    }
 
 
 def _safe_execute_fetchall(db, stmt, params=None):
@@ -939,6 +995,17 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
     except Exception:
         total_val = 0.0
 
+    # Compute delivery schedule snapshot with cutoff-hour rule.
+    try:
+        delivery_schedule = _compute_delivery_schedule_snapshot()
+    except Exception:
+        delivery_schedule = {
+            'scheduled_delivery_date': None,
+            'delivery_cutoff_applied': None,
+            'delivery_timezone': None,
+            'delivery_cutoff_hour': None,
+        }
+
 
     # --- FUERZA source a 'app' o 'web' ---
     # Si el payload no trae source, o viene como None, o string vacío, se fuerza a 'web' (o 'app' si se detecta)
@@ -962,7 +1029,11 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
         'total': total_val,
         'status': 'nuevo',
         'source': src,
-        'customer_type': customer_type
+        'customer_type': customer_type,
+        'scheduled_delivery_date': delivery_schedule.get('scheduled_delivery_date'),
+        'delivery_cutoff_applied': delivery_schedule.get('delivery_cutoff_applied'),
+        'delivery_timezone': delivery_schedule.get('delivery_timezone'),
+        'delivery_cutoff_hour': delivery_schedule.get('delivery_cutoff_hour'),
     }
     # Mark that this order included pre-allocated consumos (best-effort flag)
     try:
@@ -974,7 +1045,8 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
         'customer_type',
         'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
         '_token_received', '_token_preview',
-        'payment_method', 'payment_status', 'payment_reference'
+        'payment_method', 'payment_status', 'payment_reference',
+        'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
     ]
     try:
         bind = db.get_bind()
@@ -1044,6 +1116,15 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                 kwargs['payment_reference'] = pr[:200]
             else:
                 kwargs.pop('payment_reference', None)
+    except Exception:
+        pass
+
+    # Keep delivery scheduling server-authoritative even if client sends overrides.
+    try:
+        kwargs['scheduled_delivery_date'] = delivery_schedule.get('scheduled_delivery_date')
+        kwargs['delivery_cutoff_applied'] = delivery_schedule.get('delivery_cutoff_applied')
+        kwargs['delivery_timezone'] = delivery_schedule.get('delivery_timezone')
+        kwargs['delivery_cutoff_hour'] = delivery_schedule.get('delivery_cutoff_hour')
     except Exception:
         pass
 
@@ -1281,7 +1362,8 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                 'customer_type',
                 'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
                 '_token_received', '_token_preview',
-                'payment_method', 'payment_status', 'payment_reference'
+                'payment_method', 'payment_status', 'payment_reference',
+                'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
             ]
             for c in optional_cols:
                 if c in existing:
@@ -1333,7 +1415,8 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                 'customer_type',
                 'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
                 '_token_received', '_token_preview',
-                'payment_method', 'payment_status', 'payment_reference'
+                'payment_method', 'payment_status', 'payment_reference',
+                'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
             ]:
                 if f in kwargs:
                     objd[f] = kwargs.get(f)
@@ -1497,7 +1580,8 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                         'customer_type',
                         'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
                         '_token_received', '_token_preview',
-                        'payment_method', 'payment_status', 'payment_reference'
+                        'payment_method', 'payment_status', 'payment_reference',
+                        'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
                     ]:
                         if f in kwargs:
                             objd[f] = kwargs.get(f)
@@ -1538,7 +1622,11 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
     # Ensure the response object carries recent metadata even when selected via
     # fallback queries that only fetched minimal columns.
     try:
-        for _col in ('source', 'customer_type', 'payment_method', 'payment_status', 'payment_reference'):
+        for _col in (
+            'source', 'customer_type',
+            'payment_method', 'payment_status', 'payment_reference',
+            'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
+        ):
             if getattr(obj, _col, None) is None and kwargs.get(_col) is not None:
                 setattr(obj, _col, kwargs.get(_col))
     except Exception:
@@ -1619,7 +1707,8 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
             for col in (
                 'user_id','user_full_name','user_email','user_barrio','user_calle','user_numeracion',
                 '_token_preview','_token_received',
-                'payment_method','payment_status','payment_reference'
+                'payment_method','payment_status','payment_reference',
+                'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
             ):
                 if col not in existing_cols:
                     continue
@@ -1692,7 +1781,8 @@ def get_orders(db: Session, skip: int = 0, limit: int = 200, source: Optional[st
         'customer_type',
         'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
         '_token_received', '_token_preview', 'source',
-        'payment_method', 'payment_status', 'payment_reference'
+        'payment_method', 'payment_status', 'payment_reference',
+        'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
     ]
     for c in optional:
         if c in existing:

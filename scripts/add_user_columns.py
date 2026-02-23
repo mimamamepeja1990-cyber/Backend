@@ -27,6 +27,10 @@ COLS = [
     ("payment_method", "VARCHAR(50)"),
     ("payment_status", "VARCHAR(50)"),
     ("payment_reference", "VARCHAR(200)"),
+    ("scheduled_delivery_date", "VARCHAR(10)"),
+    ("delivery_cutoff_applied", "BOOLEAN"),
+    ("delivery_timezone", "VARCHAR(80)"),
+    ("delivery_cutoff_hour", "INTEGER"),
 ]
 
 def main():

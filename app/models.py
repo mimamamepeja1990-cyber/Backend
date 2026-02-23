@@ -52,6 +52,12 @@ class Order(Base):
     payment_method = Column(String(50), nullable=True)
     payment_status = Column(String(50), nullable=True)
     payment_reference = Column(String(200), nullable=True)
+    # Delivery scheduling snapshot (computed at order creation time).
+    # Date is persisted as YYYY-MM-DD in the business timezone.
+    scheduled_delivery_date = Column(String(10), nullable=True)
+    delivery_cutoff_applied = Column(Boolean, nullable=True, default=False)
+    delivery_timezone = Column(String(80), nullable=True)
+    delivery_cutoff_hour = Column(Integer, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

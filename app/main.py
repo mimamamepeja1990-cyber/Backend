@@ -219,6 +219,10 @@ async def lifespan(app: FastAPI):
                 'payment_method': 'VARCHAR(50)',
                 'payment_status': 'VARCHAR(50)',
                 'payment_reference': 'VARCHAR(200)',
+                'scheduled_delivery_date': 'VARCHAR(10)',
+                'delivery_cutoff_applied': 'BOOLEAN',
+                'delivery_timezone': 'VARCHAR(80)',
+                'delivery_cutoff_hour': 'INTEGER',
             }
 
             try:
@@ -564,6 +568,10 @@ def _enrich_order_contact_fields(order_data: Optional[Dict[str, Any]]) -> Dict[s
         for field in ('user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion'):
             if not payload.get(field) and candidate.get(field):
                 payload[field] = candidate.get(field)
+        for field in ('scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour'):
+            current = payload.get(field)
+            if (current is None or (isinstance(current, str) and not current.strip())) and (field in candidate):
+                payload[field] = candidate.get(field)
 
         token_preview = candidate.get('_token_preview')
         if isinstance(token_preview, dict):
@@ -694,16 +702,164 @@ def _order_payment_ui(order_data: Dict[str, Any]) -> Dict[str, str]:
     }
 
 
+def _parse_bool_like(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    raw = str(value).strip().lower()
+    if not raw:
+        return None
+    if raw in ('1', 'true', 'yes', 'si', 'on'):
+        return True
+    if raw in ('0', 'false', 'no', 'off'):
+        return False
+    return None
+
+
+def _normalize_iso_date_key(value: Any) -> str:
+    raw = str(value or '').strip()
+    if not raw:
+        return ''
+    candidate = raw[:10]
+    try:
+        parsed = datetime.date.fromisoformat(candidate)
+        return parsed.isoformat()
+    except Exception:
+        return ''
+
+
+def _parse_datetime_utc(value: Any) -> Optional[datetime.datetime]:
+    if value is None:
+        return None
+    try:
+        parsed = value if isinstance(value, datetime.datetime) else datetime.datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+    except Exception:
+        return None
+    try:
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+        return parsed.astimezone(datetime.timezone.utc)
+    except Exception:
+        return None
+
+
+def _resolve_delivery_schedule(order_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    data = order_data if isinstance(order_data, dict) else {}
+    timezone_name = str(
+        data.get('delivery_timezone')
+        or os.environ.get('ORDER_DELIVERY_TIMEZONE')
+        or os.environ.get('ORDER_EMAIL_TIMEZONE')
+        or 'America/Argentina/Buenos_Aires'
+    ).strip() or 'America/Argentina/Buenos_Aires'
+
+    raw_cutoff_hour = data.get('delivery_cutoff_hour')
+    if raw_cutoff_hour is None or str(raw_cutoff_hour).strip() == '':
+        raw_cutoff_hour = os.environ.get('ORDER_CUTOFF_HOUR', 18)
+    try:
+        cutoff_hour = int(str(raw_cutoff_hour).strip())
+    except Exception:
+        cutoff_hour = 18
+    cutoff_hour = max(0, min(23, cutoff_hour))
+
+    scheduled_delivery_date = _normalize_iso_date_key(data.get('scheduled_delivery_date'))
+    delivery_cutoff_applied = _parse_bool_like(data.get('delivery_cutoff_applied'))
+
+    if not scheduled_delivery_date or delivery_cutoff_applied is None:
+        base_dt_utc = _parse_datetime_utc(data.get('created_at')) or datetime.datetime.now(datetime.timezone.utc)
+        try:
+            computed = crud._compute_delivery_schedule_snapshot(
+                now_utc=base_dt_utc,
+                cutoff_hour=cutoff_hour,
+                timezone_name=timezone_name,
+            )
+        except Exception:
+            computed = {}
+        if not scheduled_delivery_date:
+            scheduled_delivery_date = _normalize_iso_date_key(computed.get('scheduled_delivery_date'))
+        if delivery_cutoff_applied is None and 'delivery_cutoff_applied' in computed:
+            try:
+                delivery_cutoff_applied = bool(computed.get('delivery_cutoff_applied'))
+            except Exception:
+                delivery_cutoff_applied = None
+        try:
+            tz_computed = str(computed.get('delivery_timezone') or '').strip()
+            if tz_computed:
+                timezone_name = tz_computed
+        except Exception:
+            pass
+        try:
+            computed_cutoff = int(computed.get('delivery_cutoff_hour'))
+            cutoff_hour = max(0, min(23, computed_cutoff))
+        except Exception:
+            pass
+
+    if delivery_cutoff_applied is None:
+        delivery_cutoff_applied = False
+
+    return {
+        'scheduled_delivery_date': scheduled_delivery_date,
+        'delivery_cutoff_applied': bool(delivery_cutoff_applied),
+        'delivery_timezone': timezone_name,
+        'delivery_cutoff_hour': int(cutoff_hour),
+    }
+
+
+def _extract_delivery_time_window_text() -> str:
+    configured = str(os.environ.get('ORDER_DELIVERY_TIME_WINDOW') or '').strip()
+    if configured:
+        return configured
+    legacy = str(os.environ.get('ORDER_SEEN_DELIVERY_WINDOW') or '').strip()
+    if not legacy:
+        return ''
+    legacy = legacy.replace('manana', 'ma\u00f1ana')
+    lower = legacy.lower()
+    if 'entre' in lower:
+        return legacy[lower.find('entre'):].strip()
+    return ''
+
+
+def _format_delivery_schedule_label(order_data: Optional[Dict[str, Any]]) -> str:
+    schedule = _resolve_delivery_schedule(order_data)
+    date_key = _normalize_iso_date_key(schedule.get('scheduled_delivery_date'))
+    if not date_key:
+        legacy = str(os.environ.get('ORDER_SEEN_DELIVERY_WINDOW') or '').strip().replace('manana', 'ma\u00f1ana')
+        return legacy or 'A confirmar'
+
+    try:
+        parsed_date = datetime.date.fromisoformat(date_key)
+        weekday_map = ['lunes', 'martes', 'miercoles', 'jueves', 'viernes', 'sabado', 'domingo']
+        weekday = weekday_map[parsed_date.weekday()] if 0 <= parsed_date.weekday() < 7 else ''
+        if weekday:
+            label = weekday.capitalize() + ' ' + parsed_date.strftime('%d/%m/%Y')
+        else:
+            label = parsed_date.strftime('%d/%m/%Y')
+    except Exception:
+        label = date_key
+
+    try:
+        cutoff_hour = max(0, min(23, int(schedule.get('delivery_cutoff_hour'))))
+    except Exception:
+        cutoff_hour = 18
+
+    if schedule.get('delivery_cutoff_applied'):
+        label = label + f" (pedido despues de las {cutoff_hour:02d}:00)"
+
+    delivery_window = _extract_delivery_time_window_text()
+    if delivery_window:
+        if delivery_window.lower().startswith('entre'):
+            label = label + ' ' + delivery_window
+        else:
+            label = label + ' (' + delivery_window + ')'
+
+    return label
+
+
 def _build_order_seen_html(order_data: Dict[str, Any]) -> str:
     brand_name = html_escape(str(os.environ.get('RESEND_BRAND_NAME') or 'DistriAr'))
     order_id = html_escape(str(order_data.get('id') or 'sin-id'))
     customer_name = html_escape(str(order_data.get('user_full_name') or 'cliente'))
-    delivery_window_raw = str(
-        os.environ.get('ORDER_SEEN_DELIVERY_WINDOW') or 'ma\u00f1ana entre las 9:00 y las 15:00'
-    )
-    # Keep old env values compatible while fixing "manana" typo in customer-facing text.
-    delivery_window_raw = delivery_window_raw.replace('manana', 'ma\u00f1ana')
-    delivery_window = html_escape(delivery_window_raw)
+    delivery_window = html_escape(_format_delivery_schedule_label(order_data))
 
     created_at_raw = order_data.get('created_at')
     created_at_text = ''
@@ -851,7 +1007,7 @@ def _build_order_seen_html(order_data: Dict[str, Any]) -> str:
         f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Forma de pago</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:700;'>{payment_method_text}</td></tr>"
         f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Estado del pago</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:700;'>{payment_status_badge}</td></tr>"
         f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Referencia</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:600;'>{payment_ref_text}</td></tr>"
-        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Ventana estimada</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:700;'>{delivery_window}</td></tr>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Entrega programada</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:700;'>{delivery_window}</td></tr>"
         "</table>"
         "<div style='font-size:14px;font-weight:700;color:#0f172a;margin-bottom:8px;'>Productos solicitados</div>"
         "<table role='presentation' width='100%' cellspacing='0' cellpadding='0' "
@@ -930,6 +1086,7 @@ def _build_order_confirmation_html(order_data: Dict[str, Any]) -> str:
     if barrio:
         address_parts.append(f"Barrio {str(barrio).strip()}")
     delivery_address = html_escape(', '.join([p for p in address_parts if p])) if address_parts else '-'
+    delivery_window = html_escape(_format_delivery_schedule_label(order_data))
 
     items = order_data.get('items') if isinstance(order_data.get('items'), list) else []
     rows: List[str] = []
@@ -1004,6 +1161,7 @@ def _build_order_confirmation_html(order_data: Dict[str, Any]) -> str:
         f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Total</td><td style='padding:10px 12px;text-align:right;font-size:15px;color:#0f172a;font-weight:700;'>{total_text}</td></tr>"
         f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Email</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:600;'>{email_text}</td></tr>"
         f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Entrega</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:600;'>{delivery_address}</td></tr>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Entrega programada</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:700;'>{delivery_window}</td></tr>"
         f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Forma de pago</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:700;'>{payment_method_text}</td></tr>"
         f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Estado del pago</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:700;'>{payment_status_badge}</td></tr>"
         f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Referencia</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:600;'>{payment_ref_text}</td></tr>"
@@ -1677,6 +1835,10 @@ def _run_add_user_columns() -> dict:
         ('payment_method', 'VARCHAR(50)'),
         ('payment_status', 'VARCHAR(50)'),
         ('payment_reference', 'VARCHAR(200)'),
+        ('scheduled_delivery_date', 'VARCHAR(10)'),
+        ('delivery_cutoff_applied', 'BOOLEAN'),
+        ('delivery_timezone', 'VARCHAR(80)'),
+        ('delivery_cutoff_hour', 'INTEGER'),
     ]
     dialect = engine.dialect.name if engine and getattr(engine, 'dialect', None) else ''
     try:
@@ -4678,7 +4840,8 @@ def list_orders(skip: int = 0, limit: int = 200, source: Optional[str] = None, d
                     'id', 'items', 'total', 'status', 'customer_type', 'user_id', 'user_full_name', 'user_email',
                     'user_barrio', 'user_calle', 'user_numeracion', 'created_at',
                     '_token_received', '_token_preview', 'source',
-                    'payment_method', 'payment_status', 'payment_reference'
+                    'payment_method', 'payment_status', 'payment_reference',
+                    'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
                 ]
             }
             customer_type_value = _normalize_customer_type(od.get('customer_type'))
@@ -4697,6 +4860,21 @@ def list_orders(skip: int = 0, limit: int = 200, source: Optional[str] = None, d
                 inferred_ct = _infer_customer_type_from_items(od.get('items'))
                 if inferred_ct in ('mayorista', 'minorista'):
                     customer_type_value = inferred_ct
+            if not od.get('scheduled_delivery_date') and od.get('id'):
+                try:
+                    cached_delivery = ORDER_PAYLOAD_CACHE.get(str(od.get('id')))
+                    if cached_delivery and isinstance(cached_delivery.get('payload'), dict):
+                        cp = cached_delivery['payload']
+                        for f in (
+                            'scheduled_delivery_date',
+                            'delivery_cutoff_applied',
+                            'delivery_timezone',
+                            'delivery_cutoff_hour',
+                        ):
+                            if od.get(f) is None and cp.get(f) is not None:
+                                od[f] = cp.get(f)
+                except Exception:
+                    pass
             cached_used = False
             # If user fields missing try to merge from cached pushed payload
             if (not od.get('user_full_name') and not od.get('user_email')) and od.get('id'):
@@ -4710,7 +4888,8 @@ def list_orders(skip: int = 0, limit: int = 200, source: Optional[str] = None, d
                         for f in (
                             'customer_type',
                             'user_full_name','user_email','user_barrio','user_calle','user_numeracion','user_id',
-                            'source','payment_method','payment_status','payment_reference'
+                            'source','payment_method','payment_status','payment_reference',
+                            'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
                         ):
                             if not od.get(f) and p.get(f):
                                 od[f] = p.get(f)
@@ -4927,7 +5106,8 @@ async def update_order_status(order_id: str, request: Request):
         'customer_type',
         'user_id','user_full_name','user_email','user_barrio','user_calle','user_numeracion',
         '_token_received','_token_preview','source',
-        'payment_method','payment_status','payment_reference'
+        'payment_method','payment_status','payment_reference',
+        'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
     ]
     for c in optional:
         if c in existing:

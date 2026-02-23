@@ -110,6 +110,11 @@ class OrderCreate(BaseModel):
     payment_method: Optional[str] = None
     payment_status: Optional[str] = None
     payment_reference: Optional[str] = None
+    # delivery scheduling snapshot
+    scheduled_delivery_date: Optional[str] = None
+    delivery_cutoff_applied: Optional[bool] = None
+    delivery_timezone: Optional[str] = None
+    delivery_cutoff_hour: Optional[int] = None
 
 class OrderResponse(BaseModel):
     id: int
@@ -131,6 +136,10 @@ class OrderResponse(BaseModel):
     payment_method: Optional[str] = None
     payment_status: Optional[str] = None
     payment_reference: Optional[str] = None
+    scheduled_delivery_date: Optional[str] = None
+    delivery_cutoff_applied: Optional[bool] = None
+    delivery_timezone: Optional[str] = None
+    delivery_cutoff_hour: Optional[int] = None
 
     model_config = { 'from_attributes': True }
 
