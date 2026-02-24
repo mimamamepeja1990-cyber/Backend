@@ -35,6 +35,7 @@
         <a data-section="promo-images">Imágenes Promocionales</a>
         <a data-section="filters">Filtros</a>
         <a data-section="orders">Pedidos</a>
+        <a data-section="preparations">Preparaciones</a>
       </nav>
       <div class="footer-controls">
       </div>
@@ -231,6 +232,18 @@
           </table>
         </div>
         </section>
+      </section>
+
+      <section id="preparations" class="section hidden">
+        <h2>Preparaciones</h2>
+        <p>Pedidos organizados automáticamente por día de salida según horario de corte.</p>
+        <div class="controls center">
+          <input id="preparationsSearch" placeholder="Buscar por pedido, cliente o producto..." />
+          <input id="preparationsDate" type="date" title="Filtrar por día de salida" />
+          <button id="clearPreparationsDate" class="btn">Limpiar fecha</button>
+          <button id="refreshPreparationsBtn" class="btn">Actualizar preparaciones</button>
+        </div>
+        <div id="preparationsList" class="preparations-list"></div>
       </section>
 
       <!-- Order Detail Modal -->

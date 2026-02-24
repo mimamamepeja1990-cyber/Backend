@@ -756,6 +756,7 @@ document.querySelectorAll('.sidebar nav a').forEach(a => a.onclick = () => {
     'promo-images': 'Imágenes Promocionales',
     'filters': 'Filtros',
     'orders': 'Pedidos',
+    'preparations': 'Preparaciones',
   };
   document.getElementById('title').textContent = sectionTitles[a.dataset.section] || 'Administración';
   document.querySelectorAll('.section').forEach(s=>s.classList.add('hidden'));
@@ -764,6 +765,7 @@ document.querySelectorAll('.sidebar nav a').forEach(a => a.onclick = () => {
   // If promo-images tab activated, ensure we load images
   try{ if(a.dataset.section === 'promo-images') fetchPromoImages(); }catch(e){ console.warn('fetchPromoImages guard failed', e); }
   try{ if(a.dataset.section === 'retail-prices') refreshRetailPrices(); }catch(e){ console.warn('refreshRetailPrices guard failed', e); }
+  try{ if(a.dataset.section === 'preparations') refreshPreparations(false); }catch(e){ console.warn('refreshPreparations guard failed', e); }
 });
 
 // Theme toggle
@@ -866,6 +868,9 @@ document.addEventListener('DOMContentLoaded', () => {
       if (toShow === 'retail-prices'){
         setTimeout(()=>{ try{ refreshRetailPrices(); }catch(e){ /* ignore */ } }, 40);
       }
+      if (toShow === 'preparations'){
+        setTimeout(()=>{ try{ refreshPreparations(false); }catch(e){ /* ignore */ } }, 40);
+      }
       // If promoImagesList exists but is empty, show a helpful hint so UI isn't blank
       if(promoImagesList && promoImagesList.children.length === 0){
         promoImagesList.innerHTML = '<div class="empty-note">Seleccione la pestaña o recargue la página para gestionar imágenes promocionales.</div>';
@@ -935,12 +940,24 @@ const ordersTypeTabMayorista = document.getElementById('ordersTypeTab_mayorista'
 const ordersTypeTabMinorista = document.getElementById('ordersTypeTab_minorista');
 const badgeTypeMayorista = document.getElementById('badge_type_mayorista');
 const badgeTypeMinorista = document.getElementById('badge_type_minorista');
+const preparationsSearch = document.getElementById('preparationsSearch');
+const preparationsDate = document.getElementById('preparationsDate');
+const clearPreparationsDate = document.getElementById('clearPreparationsDate');
+const refreshPreparationsBtn = document.getElementById('refreshPreparationsBtn');
+const preparationsList = document.getElementById('preparationsList');
 let currentOrderCustomerType = 'mayorista';
 let lastOrdersBaseWeb = [];
+let lastPreparationsBase = [];
 
 function normalizeOrderCustomerType(value){
   const v = String(value || '').trim().toLowerCase();
   return v === 'minorista' ? 'minorista' : 'mayorista';
+}
+
+function normalizeOrderStatus(value){
+  const v = String(value || '').trim().toLowerCase();
+  if (!v) return 'nuevo';
+  return v;
 }
 
 function applyOrdersCustomerTypeTabState(){
@@ -957,6 +974,8 @@ function updateOrdersCustomerTypeBadges(list){
     let mayoristaCount = 0;
     let minoristaCount = 0;
     rows.forEach((o) => {
+      const statusNorm = normalizeOrderStatus(o && o.status);
+      if (statusNorm === 'visto' || statusNorm === 'preparado') return;
       const t = normalizeOrderCustomerType(o && o.customer_type);
       if (t === 'minorista') minoristaCount += 1;
       else mayoristaCount += 1;
@@ -1249,20 +1268,118 @@ function formatIsoDateKeyWithWeekday(value){
   }catch(_){ return key; }
 }
 
-function formatOrderScheduledDelivery(order){
+function normalizeOrderCutoffHour(rawValue, fallbackValue = DEFAULT_ORDER_CUTOFF_HOUR){
   try{
-    const dateKey = normalizeIsoDateKey(order && order.scheduled_delivery_date);
+    const parsed = Number(rawValue);
+    if (!Number.isFinite(parsed)) return fallbackValue;
+    if (parsed < 0) return 0;
+    if (parsed > 23) return 23;
+    return Math.trunc(parsed);
+  }catch(_){ return fallbackValue; }
+}
+
+function isOrderCutoffApplied(rawValue){
+  if (rawValue === true) return true;
+  const normalized = String(rawValue || '').trim().toLowerCase();
+  return normalized === 'true' || normalized === '1';
+}
+
+function addDaysToIsoDateKey(dateKey, daysToAdd){
+  const key = normalizeIsoDateKey(dateKey);
+  if (!key) return '';
+  try{
+    const parts = key.split('-');
+    const dt = new Date(Date.UTC(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2])));
+    if (isNaN(dt.getTime())) return '';
+    dt.setUTCDate(dt.getUTCDate() + Number(daysToAdd || 0));
+    return [
+      dt.getUTCFullYear(),
+      String(dt.getUTCMonth() + 1).padStart(2, '0'),
+      String(dt.getUTCDate()).padStart(2, '0'),
+    ].join('-');
+  }catch(_){ return ''; }
+}
+
+function getDatePartsForTimeZone(dateObj, timeZone){
+  try{
+    if (!(dateObj instanceof Date) || isNaN(dateObj.getTime())) return null;
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+      timeZone: String(timeZone || ''),
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    });
+    const parts = formatter.formatToParts(dateObj);
+    const out = {};
+    parts.forEach((p) => {
+      if (!p || !p.type) return;
+      if (p.type === 'year' || p.type === 'month' || p.type === 'day' || p.type === 'hour' || p.type === 'minute'){
+        out[p.type] = Number(p.value);
+      }
+    });
+    if (!Number.isFinite(out.year) || !Number.isFinite(out.month) || !Number.isFinite(out.day)) return null;
+    if (!Number.isFinite(out.hour)) out.hour = 0;
+    if (!Number.isFinite(out.minute)) out.minute = 0;
+    return out;
+  }catch(_){ return null; }
+}
+
+function resolveOrderScheduleInfo(order){
+  const cutoffHour = normalizeOrderCutoffHour(order && order.delivery_cutoff_hour, DEFAULT_ORDER_CUTOFF_HOUR);
+  const explicitDateKey = normalizeIsoDateKey(order && order.scheduled_delivery_date);
+  if (explicitDateKey){
+    return {
+      dateKey: explicitDateKey,
+      cutoffApplied: isOrderCutoffApplied(order && order.delivery_cutoff_applied),
+      cutoffHour,
+    };
+  }
+  try{
+    const rawCreated = order && order.created_at ? new Date(String(order.created_at)) : null;
+    if (!rawCreated || isNaN(rawCreated.getTime())){
+      return { dateKey: '', cutoffApplied: false, cutoffHour };
+    }
+    const tzName = String((order && order.delivery_timezone) || 'America/Argentina/Buenos_Aires').trim() || 'America/Argentina/Buenos_Aires';
+    const localParts = getDatePartsForTimeZone(rawCreated, tzName);
+    if (!localParts){
+      return { dateKey: '', cutoffApplied: false, cutoffHour };
+    }
+    const baseDateKey = [
+      String(localParts.year).padStart(4, '0'),
+      String(localParts.month).padStart(2, '0'),
+      String(localParts.day).padStart(2, '0'),
+    ].join('-');
+    const cutoffApplied = Number(localParts.hour || 0) >= cutoffHour;
+    const resolvedDateKey = addDaysToIsoDateKey(baseDateKey, cutoffApplied ? 2 : 1);
+    return {
+      dateKey: resolvedDateKey,
+      cutoffApplied,
+      cutoffHour,
+    };
+  }catch(_){
+    return { dateKey: '', cutoffApplied: false, cutoffHour };
+  }
+}
+
+function formatScheduleInfoLabel(scheduleInfo){
+  try{
+    const dateKey = normalizeIsoDateKey(scheduleInfo && scheduleInfo.dateKey);
     if (!dateKey) return '';
-    const rawCutoff = order ? Number(order.delivery_cutoff_hour) : NaN;
-    const cutoffHour = Number.isFinite(rawCutoff) ? Math.min(23, Math.max(0, Math.trunc(rawCutoff))) : DEFAULT_ORDER_CUTOFF_HOUR;
-    const cutoffApplied = order && (order.delivery_cutoff_applied === true || String(order.delivery_cutoff_applied || '').trim().toLowerCase() === 'true');
     const label = formatIsoDateKeyWithWeekday(dateKey);
     if (!label) return '';
-    if (cutoffApplied){
+    const cutoffHour = normalizeOrderCutoffHour(scheduleInfo && scheduleInfo.cutoffHour, DEFAULT_ORDER_CUTOFF_HOUR);
+    if (scheduleInfo && scheduleInfo.cutoffApplied){
       return label + ' (pedido despues de las ' + String(cutoffHour).padStart(2, '0') + ':00)';
     }
     return label;
   }catch(_){ return ''; }
+}
+
+function formatOrderScheduledDelivery(order){
+  return formatScheduleInfoLabel(resolveOrderScheduleInfo(order));
 }
 
 function findOrderRowById(id){
@@ -1294,6 +1411,13 @@ function renderOrders(list, source, dateFilter){
   try{
     const selectedType = normalizeOrderCustomerType(currentOrderCustomerType);
     list = (list || []).filter(o => normalizeOrderCustomerType(o && o.customer_type) === selectedType);
+  }catch(_){ }
+  // En "Pedidos" se muestran solo pedidos pendientes de revision.
+  try{
+    list = (list || []).filter((o) => {
+      const statusNorm = normalizeOrderStatus(o && o.status);
+      return statusNorm !== 'visto' && statusNorm !== 'preparado';
+    });
   }catch(_){ }
   // Agrupar por día y deduplicar por id (siempre mostrar solo una vez por tabla)
   const groups = new Map();
@@ -1381,10 +1505,318 @@ function renderOrders(list, source, dateFilter){
       const updated = await safeFetch(API_BASE + '/orders/' + encodeURIComponent(id) + '/status', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: targetStatus }) });
       try{ if(row && row.children && row.children[5]) row.children[5].textContent = updated.status || ''; if(btn){ btn.textContent = updated.status === 'visto' ? 'Visto' : 'Marcar visto'; btn.classList.remove('updating'); } if(row) row.classList.remove('updating'); }catch(_){ }
       if(document.getElementById('orderModal') && document.getElementById('orderModal').classList.contains('hidden')===false) try{ showOrderDetail(updated); }catch(_){ }
-      showToast('Pedido actualizado');
+      try{
+        const uid = String((updated && updated.id) || id);
+        lastPreparationsBase = (lastPreparationsBase || []).map((entry) => String(entry && entry.id) === uid ? Object.assign({}, entry, updated) : entry);
+        if (isPreparationsSectionActive()) renderPreparations(lastPreparationsBase);
+      }catch(_){ }
+      try{ await refreshOrders('web'); }catch(_){ }
+      if (String((updated && updated.status) || targetStatus).toLowerCase() === 'visto') showToast('Pedido marcado como visto y movido a Preparaciones');
+      else showToast('Pedido actualizado');
     }catch(e){ console.error('mark seen failed', e); try{ if(row && row.children && row.children[5]) row.children[5].textContent = oldStatus; }catch(_){ } try{ if(btn) btn.textContent = oldBtnText; }catch(_){ } try{ if(btn) btn.classList.remove('updating'); if(row) row.classList.remove('updating'); }catch(_){ } showToast('No se pudo actualizar estado', 'error'); }
     finally{ try{ if(btn) btn.disabled = false; }catch(_){ } }
   }));
+}
+
+function isWebOrderEntry(order){
+  try{
+    const src = (order && typeof order.source !== 'undefined' && order.source !== null && String(order.source).trim() !== '')
+      ? String(order.source)
+      : 'web';
+    return String(src).toLowerCase() === 'web';
+  }catch(_){ return true; }
+}
+
+function isPreparationsSectionActive(){
+  try{
+    const section = document.getElementById('preparations');
+    return !!(section && !section.classList.contains('hidden'));
+  }catch(_){ return false; }
+}
+
+function getOrderDisplayName(order){
+  try{
+    const previewName = order && order._token_preview && (order._token_preview.name || order._token_preview.email)
+      ? (order._token_preview.name || order._token_preview.email)
+      : null;
+    const displayName = (order && (order.user_full_name || previewName || order.user_email)) || '';
+    if (!displayName && order && order.user_id) return '#' + String(order.user_id);
+    if (order && order.user_email && displayName && displayName !== order.user_email){
+      return displayName + ' / ' + order.user_email;
+    }
+    return displayName || '—';
+  }catch(_){ return '—'; }
+}
+
+function getOrderAddress(order){
+  try{
+    const parts = [order && order.user_barrio, order && order.user_calle, order && order.user_numeracion].filter(Boolean);
+    return parts.length ? parts.join(', ') : '—';
+  }catch(_){ return '—'; }
+}
+
+function getOrderCreatedAtLabel(order){
+  try{
+    if (!order || !order.created_at) return 'Sin fecha de pedido';
+    const dt = new Date(String(order.created_at));
+    if (isNaN(dt.getTime())) return 'Sin fecha de pedido';
+    return dt.toLocaleString('es-AR', {
+      weekday: 'short',
+      day: '2-digit',
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  }catch(_){ return 'Sin fecha de pedido'; }
+}
+
+function getOrderItemPlainName(it){
+  try{
+    if (!it) return '';
+    if (typeof it === 'string') return it;
+    const meta = it && it.meta && typeof it.meta === 'object' ? it.meta : {};
+    return String(meta.name || it.id || '').trim();
+  }catch(_){ return ''; }
+}
+
+function getOrderItemsSummary(order){
+  try{
+    const itemsArr = safeParseItems(order && order.items ? order.items : []);
+    if (!Array.isArray(itemsArr) || itemsArr.length === 0) return 'Sin items';
+    const labels = itemsArr.map((it) => {
+      const name = getOrderItemPlainName(it) || 'Item';
+      const qty = formatOrderQty(it);
+      return name + ' x' + qty;
+    });
+    if (labels.length <= 3) return labels.join(' · ');
+    return labels.slice(0, 3).join(' · ') + ' · +' + String(labels.length - 3) + ' más';
+  }catch(_){ return 'Sin items'; }
+}
+
+function buildPreparationsSearchIndex(order){
+  try{
+    const itemsArr = safeParseItems(order && order.items ? order.items : []);
+    const itemNames = (itemsArr || []).map((it) => getOrderItemPlainName(it)).join(' ');
+    return [
+      order && order.id,
+      order && order.status,
+      order && order.user_full_name,
+      order && order.user_email,
+      order && order.user_barrio,
+      order && order.user_calle,
+      order && order.user_numeracion,
+      itemNames,
+    ].join(' ').toLowerCase();
+  }catch(_){ return ''; }
+}
+
+function syncPreparationsSnapshot(list){
+  try{
+    const rows = Array.isArray(list) ? list : [];
+    const seen = new Set();
+    const deduped = [];
+    rows.forEach((order) => {
+      if (!isWebOrderEntry(order)) return;
+      const id = String((order && order.id) || '').trim();
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      deduped.push(order);
+    });
+    lastPreparationsBase = deduped;
+  }catch(_){
+    lastPreparationsBase = Array.isArray(list) ? list.slice() : [];
+  }
+}
+
+function renderPreparations(list){
+  if (!preparationsList) return;
+  const rows = Array.isArray(list) ? list.slice() : [];
+  const q = preparationsSearch && preparationsSearch.value ? preparationsSearch.value.trim().toLowerCase() : '';
+  const dateFilter = normalizeIsoDateKey(preparationsDate && preparationsDate.value ? preparationsDate.value : '');
+  const filtered = [];
+  rows.forEach((order) => {
+    if (!isWebOrderEntry(order)) return;
+    const statusNorm = normalizeOrderStatus(order && order.status);
+    if (statusNorm !== 'visto' && statusNorm !== 'preparado') return;
+    const scheduleInfo = resolveOrderScheduleInfo(order);
+    const scheduleDateKey = normalizeIsoDateKey(scheduleInfo && scheduleInfo.dateKey);
+    if (dateFilter && scheduleDateKey !== dateFilter) return;
+    if (q){
+      const searchIndex = buildPreparationsSearchIndex(order);
+      if (!searchIndex.includes(q)) return;
+    }
+    filtered.push({ order, scheduleInfo, scheduleDateKey: scheduleDateKey || 'sin_fecha', statusNorm });
+  });
+
+  preparationsList.innerHTML = '';
+  if (!filtered.length){
+    preparationsList.innerHTML = '<div class="empty-note">No hay pedidos para preparar con los filtros actuales.</div>';
+    return;
+  }
+
+  const summary = document.createElement('div');
+  summary.className = 'preparations-summary';
+  const validDateGroups = new Set(filtered.map((entry) => entry.scheduleDateKey)).size;
+  summary.textContent = String(filtered.length) + ' pedidos agrupados en ' + String(validDateGroups) + ' día(s) de salida';
+  preparationsList.appendChild(summary);
+
+  const groups = new Map();
+  filtered.forEach((entry) => {
+    if (!groups.has(entry.scheduleDateKey)) groups.set(entry.scheduleDateKey, []);
+    groups.get(entry.scheduleDateKey).push(entry);
+  });
+  const sortedKeys = Array.from(groups.keys()).sort((a, b) => {
+    if (a === 'sin_fecha') return 1;
+    if (b === 'sin_fecha') return -1;
+    if (a === b) return 0;
+    return a > b ? 1 : -1;
+  });
+  const byId = new Map(filtered.map((entry) => [String(entry.order.id), entry.order]));
+
+  sortedKeys.forEach((key) => {
+    const dayEntries = groups.get(key) || [];
+    dayEntries.sort((a, b) => {
+      const ta = a.order && a.order.created_at ? new Date(String(a.order.created_at)).getTime() : 0;
+      const tb = b.order && b.order.created_at ? new Date(String(b.order.created_at)).getTime() : 0;
+      return ta - tb;
+    });
+
+    const dayBlock = document.createElement('section');
+    dayBlock.className = 'preparation-day-block';
+
+    const head = document.createElement('div');
+    head.className = 'preparation-day-head';
+    const title = key === 'sin_fecha' ? 'Sin fecha de salida' : formatIsoDateKeyWithWeekday(key);
+    head.innerHTML = `<div class="preparation-day-title">${escapeHtml(title)}</div><span class="badge-pill">${dayEntries.length}</span>`;
+    dayBlock.appendChild(head);
+
+    const cards = document.createElement('div');
+    cards.className = 'preparation-cards';
+    dayEntries.forEach((entry) => {
+      const order = entry.order || {};
+      const statusNorm = normalizeOrderStatus(order && order.status);
+      const isPrepared = statusNorm === 'preparado';
+      const card = document.createElement('article');
+      card.className = 'preparation-card';
+      const scheduleLabel = formatScheduleInfoLabel(entry.scheduleInfo) || (key === 'sin_fecha' ? 'Sin fecha de salida' : formatIsoDateKeyWithWeekday(key));
+      const customerTypeLabel = normalizeOrderCustomerType(order.customer_type) === 'minorista' ? 'Minorista' : 'Mayorista';
+      card.innerHTML = `
+        <div class="preparation-card-top">
+          <span class="order-id">#${escapeHtml(order.id)}</span>
+          <span class="order-date">${escapeHtml(getOrderCreatedAtLabel(order))}</span>
+        </div>
+        <div class="preparation-row"><strong>Salida:</strong> ${escapeHtml(scheduleLabel)}</div>
+        <div class="preparation-row"><strong>Cliente:</strong> ${escapeHtml(getOrderDisplayName(order))}</div>
+        <div class="preparation-row"><strong>Perfil:</strong> ${escapeHtml(customerTypeLabel)}</div>
+        <div class="preparation-row"><strong>Dirección:</strong> ${escapeHtml(getOrderAddress(order))}</div>
+        <div class="preparation-row"><strong>Items:</strong> ${escapeHtml(getOrderItemsSummary(order))}</div>
+        <div class="preparation-row"><strong>Total:</strong> $${Number(order.total || 0).toFixed(2)}</div>
+        <div class="preparation-row"><strong>Estado:</strong> ${escapeHtml(String(order.status || 'nuevo'))}</div>
+        <div class="preparation-actions">
+          <button class="btn small prepViewOrderBtn" data-id="${escapeHtml(order.id)}">Ver detalle</button>
+          <button class="btn small primary prepMarkPreparedBtn" data-id="${escapeHtml(order.id)}" ${isPrepared ? 'disabled title="Este pedido ya fue marcado como preparado"' : ''}>${isPrepared ? 'Preparado' : 'Marcar preparado'}</button>
+        </div>
+      `;
+      cards.appendChild(card);
+    });
+    dayBlock.appendChild(cards);
+    preparationsList.appendChild(dayBlock);
+  });
+
+  preparationsList.querySelectorAll('.prepViewOrderBtn').forEach((btn) => {
+    btn.onclick = async () => {
+      const id = btn && btn.dataset ? String(btn.dataset.id || '') : '';
+      if (!id) return;
+      const existing = byId.get(id);
+      if (existing){
+        showOrderDetail(existing);
+        return;
+      }
+      try{
+        const fetched = await fetchOrders(String(id));
+        const order = (fetched || []).find((x) => String(x.id) === id) || (fetched && fetched[0]);
+        if (order) showOrderDetail(order);
+      }catch(_){ }
+    };
+  });
+
+  preparationsList.querySelectorAll('.prepMarkPreparedBtn').forEach((btn) => {
+    btn.onclick = async () => {
+      try{
+        const id = btn && btn.dataset ? String(btn.dataset.id || '') : '';
+        if (!id) return;
+        btn.disabled = true;
+        btn.textContent = 'Guardando...';
+        const updated = await safeFetch(
+          API_BASE + '/orders/' + encodeURIComponent(id) + '/status',
+          {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ status: 'preparado' }),
+          },
+        );
+        const uid = String((updated && updated.id) || id);
+        let replacedInPreparations = false;
+        lastPreparationsBase = (lastPreparationsBase || []).map((entry) => {
+          if (String(entry && entry.id) === uid){
+            replacedInPreparations = true;
+            return Object.assign({}, entry, updated);
+          }
+          return entry;
+        });
+        if (!replacedInPreparations && updated && updated.id != null){
+          lastPreparationsBase = [updated, ...(lastPreparationsBase || [])];
+        }
+        let replacedInOrders = false;
+        lastOrdersBaseWeb = (lastOrdersBaseWeb || []).map((entry) => {
+          if (String(entry && entry.id) === uid){
+            replacedInOrders = true;
+            return Object.assign({}, entry, updated);
+          }
+          return entry;
+        });
+        if (!replacedInOrders && updated && updated.id != null){
+          lastOrdersBaseWeb = [updated, ...(lastOrdersBaseWeb || [])];
+        }
+        try{
+          const modal = document.getElementById('orderModal');
+          if (modal && !modal.classList.contains('hidden')){
+            const title = document.getElementById('orderModalTitle');
+            if (title && String(title.textContent || '').includes('#' + uid)){
+              showOrderDetail(Object.assign({}, byId.get(uid) || {}, updated));
+            }
+          }
+        }catch(_){ }
+        renderPreparations(lastPreparationsBase);
+        showToast('Pedido marcado como preparado');
+      }catch(e){
+        console.error('prepMarkPrepared failed', e);
+        showToast('No se pudo marcar como preparado', 'error');
+        try{
+          btn.disabled = false;
+          btn.textContent = 'Marcar preparado';
+        }catch(_){ }
+      }
+    };
+  });
+}
+
+async function refreshPreparations(forceFetch){
+  try{
+    const shouldFetch = !!forceFetch || !Array.isArray(lastPreparationsBase) || lastPreparationsBase.length === 0;
+    if (shouldFetch){
+      const fetched = await fetchOrders('', '', 'web');
+      if (fetched === null){
+        showToast('No se pudo actualizar preparaciones (se mantiene la vista actual)', 'warning');
+      } else {
+        syncPreparationsSnapshot(fetched);
+      }
+    }
+    renderPreparations(lastPreparationsBase);
+  }catch(e){
+    console.error('refreshPreparations failed', e);
+    showToast('Error al cargar preparaciones', 'error');
+  }
 }
 
 function orderRowFor(o){
@@ -1405,6 +1837,8 @@ function orderRowFor(o){
   const scheduledDeliveryLabel = formatOrderScheduledDelivery(o);
   const orderCustomerType = normalizeOrderCustomerType(o.customer_type);
   const orderCustomerTypeLabel = orderCustomerType === 'minorista' ? 'Minorista' : 'Mayorista';
+  const orderStatusNorm = normalizeOrderStatus(o && o.status);
+  const isPreparedStatus = orderStatusNorm === 'preparado';
   const fecha = o.created_at ? new Date(o.created_at).toLocaleString('es-ES', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
   // Solo mostrar 'pendiente' si NO tiene created_at y está en el caché local como pending
   let isPending = false;
@@ -1435,7 +1869,7 @@ function orderRowFor(o){
         ${isPending ? '<div class="order-row-pending"> pendiente</div>' : ''}
         <div class="order-row-actions">
           <button data-id="${o.id}" class="viewOrderBtn btn">Ver</button>
-          <button data-id="${o.id}" class="markSeenBtn btn">${o.status === 'visto' ? 'Visto' : 'Marcar visto'}</button>
+          <button data-id="${o.id}" class="markSeenBtn btn" ${isPreparedStatus ? 'disabled title="Pedido ya preparado"' : ''}>${isPreparedStatus ? 'Preparado' : (o.status === 'visto' ? 'Visto' : 'Marcar visto')}</button>
         </div>
       </div>
     </td>
@@ -1478,6 +1912,9 @@ function insertOrderAtTop(o, source){
       const prev = Array.isArray(lastOrdersBaseWeb) ? lastOrdersBaseWeb.filter(x => String((x && x.id) || '') !== oid) : [];
       lastOrdersBaseWeb = [incoming, ...prev];
       updateOrdersCustomerTypeBadges(lastOrdersBaseWeb);
+      const prepPrev = Array.isArray(lastPreparationsBase) ? lastPreparationsBase.filter(x => String((x && x.id) || '') !== oid) : [];
+      lastPreparationsBase = [incoming, ...prepPrev];
+      if (isPreparationsSectionActive()) renderPreparations(lastPreparationsBase);
     }catch(_){ }
 
     try{
@@ -1566,7 +2003,14 @@ function showOrderDetail(order){
   try{
     const actionWrap = document.createElement('div'); actionWrap.style.marginTop = '10px';
     const markBtn = document.createElement('button'); markBtn.className = 'btn'; markBtn.textContent = order.status === 'visto' ? 'Visto' : 'Marcar visto';
+    const isPreparedStatus = normalizeOrderStatus(order && order.status) === 'preparado';
+    if (isPreparedStatus){
+      markBtn.textContent = 'Preparado';
+      markBtn.disabled = true;
+      markBtn.title = 'Pedido ya preparado';
+    }
     markBtn.onclick = async () => {
+      if (isPreparedStatus) return;
       // Optimistic update in modal + table
       const targetStatus = order.status === 'visto' ? 'nuevo' : 'visto';
       const oldStatus = order.status;
@@ -1598,8 +2042,15 @@ function showOrderDetail(order){
           if(!row2) row2 = findOrderRowById(order.id);
           if(row2){ row2.children[5].textContent = updated.status || ''; row2.classList.remove('updating'); const rowBtn2 = row2.querySelector('.markSeenBtn'); if(rowBtn2) rowBtn2.textContent = updated.status === 'visto' ? 'Visto' : 'Marcar visto'; }
         }catch(_){ }
+        try{
+          const uid = String((updated && updated.id) || order.id);
+          lastPreparationsBase = (lastPreparationsBase || []).map((entry) => String(entry && entry.id) === uid ? Object.assign({}, entry, updated) : entry);
+          if (isPreparationsSectionActive()) renderPreparations(lastPreparationsBase);
+        }catch(_){ }
+        try{ await refreshOrders('web'); }catch(_){ }
         markBtn.classList.remove('updating');
-        showToast('Estado actualizado');
+        if (String((updated && updated.status) || targetStatus).toLowerCase() === 'visto') showToast('Pedido marcado como visto y movido a Preparaciones');
+        else showToast('Estado actualizado');
       }catch(e){
         console.error('modal mark seen failed', e);
         // revert modal and table to previous state
@@ -1635,6 +2086,7 @@ async function refreshOrders(source){
       showToast('No se pudo actualizar pedidos (conservando la vista actual)', 'warning');
       return;
     }
+    syncPreparationsSnapshot(list);
     const dateFilter = date || '';
     let toRender = list;
     if(dateFilter){ try{ toRender = (list || []).filter(o => { try{ return (o.created_at || '').slice(0,10) === dateFilter; }catch(_){ return false; } }); }catch(e){ toRender = list; } }
@@ -1642,6 +2094,7 @@ async function refreshOrders(source){
     updateOrdersCustomerTypeBadges(lastOrdersBaseWeb);
     applyOrdersCustomerTypeTabState();
     renderOrders(toRender, source, date);
+    if (isPreparationsSectionActive()) renderPreparations(lastPreparationsBase);
   }catch(e){ console.error('refreshOrders failed', e); showToast('Error al cargar pedidos', 'error'); }
 }
 
@@ -1666,6 +2119,10 @@ try{
 if(orderSearch_web) orderSearch_web.addEventListener('input', ()=> refreshOrders('web'));
 if(orderDate_web) orderDate_web.addEventListener('change', ()=> refreshOrders('web'));
 if(clearOrderDate_web) clearOrderDate_web.addEventListener('click', ()=> { if(orderDate_web) orderDate_web.value = ''; refreshOrders('web'); });
+if(preparationsSearch) preparationsSearch.addEventListener('input', ()=> renderPreparations(lastPreparationsBase));
+if(preparationsDate) preparationsDate.addEventListener('change', ()=> renderPreparations(lastPreparationsBase));
+if(clearPreparationsDate) clearPreparationsDate.addEventListener('click', ()=> { if(preparationsDate) preparationsDate.value = ''; renderPreparations(lastPreparationsBase); });
+if(refreshPreparationsBtn) refreshPreparationsBtn.addEventListener('click', ()=> refreshPreparations(true));
 
 // Tabs and badges wiring (web only)
 const ordersSection = document.getElementById('orders');

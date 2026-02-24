@@ -647,6 +647,13 @@ def _build_order_seen_subject(order_data: Dict[str, Any]) -> str:
     return f'Tu pedido #{order_id} ya fue visto por administracion'
 
 
+def _build_order_prepared_subject(order_data: Dict[str, Any]) -> str:
+    order_id = order_data.get('id')
+    if order_id is None:
+        return 'Tu pedido ya fue preparado'
+    return f'Tu pedido #{order_id} ya fue preparado'
+
+
 def _order_payment_ui(order_data: Dict[str, Any]) -> Dict[str, str]:
     method_raw = str(order_data.get('payment_method') or '').strip().lower()
     status_raw = str(order_data.get('payment_status') or '').strip().lower()
@@ -1031,6 +1038,83 @@ def _build_order_seen_html(order_data: Dict[str, Any]) -> str:
     )
 
 
+def _build_order_prepared_html(order_data: Dict[str, Any]) -> str:
+    brand_name = html_escape(str(os.environ.get('RESEND_BRAND_NAME') or 'DistriAr'))
+    order_id = html_escape(str(order_data.get('id') or 'sin-id'))
+    customer_name = html_escape(str(order_data.get('user_full_name') or 'cliente'))
+    delivery_window = html_escape(_format_delivery_schedule_label(order_data))
+
+    prepared_at_text = ''
+    try:
+        timezone_name = str(os.environ.get('ORDER_EMAIL_TIMEZONE') or 'America/Argentina/Buenos_Aires').strip()
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        prepared_dt = now_utc
+        if timezone_name:
+            try:
+                from zoneinfo import ZoneInfo
+                prepared_dt = now_utc.astimezone(ZoneInfo(timezone_name))
+            except Exception:
+                prepared_dt = now_utc
+        prepared_at_text = prepared_dt.strftime('%Y-%m-%d %H:%M')
+    except Exception:
+        try:
+            prepared_at_text = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M')
+        except Exception:
+            prepared_at_text = ''
+    prepared_at_text = html_escape(prepared_at_text) if prepared_at_text else '-'
+
+    total_raw = order_data.get('total')
+    try:
+        total_text = f"${float(total_raw or 0):,.2f}"
+    except Exception:
+        total_text = f"${html_escape(str(total_raw or '0'))}"
+
+    support_email = html_escape(str(os.environ.get('RESEND_REPLY_TO') or ''))
+    support_line = (
+        f"<p style='margin:16px 0 0 0;font-size:13px;color:#64748b;'>"
+        f"Si tenes dudas, respondenos a {support_email}."
+        f"</p>"
+        if support_email else
+        "<p style='margin:16px 0 0 0;font-size:13px;color:#64748b;'>"
+        "Si tenes dudas, respondenos a este correo."
+        "</p>"
+    )
+
+    return (
+        "<!doctype html>"
+        "<html><body style='margin:0;padding:0;background:#f3f5f7;font-family:Arial,sans-serif;color:#0f172a;'>"
+        "<table role='presentation' width='100%' cellspacing='0' cellpadding='0' style='background:#f3f5f7;'>"
+        "<tr><td align='center' style='padding:24px 12px;'>"
+        "<table role='presentation' width='640' cellspacing='0' cellpadding='0' "
+        "style='max-width:640px;width:100%;background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden;'>"
+        "<tr><td style='padding:22px 26px;background:#0f172a;color:#f8fafc;'>"
+        "<div style='font-size:20px;font-weight:700;'>Pedido preparado</div>"
+        "<div style='margin-top:6px;font-size:14px;color:#cbd5e1;'>Tu pedido ya fue preparado por administracion.</div>"
+        "</td></tr>"
+        "<tr><td style='padding:24px 26px;'>"
+        f"<p style='margin:0 0 12px 0;font-size:15px;'>Hola {customer_name},</p>"
+        "<p style='margin:0 0 14px 0;font-size:15px;'>"
+        "tu pedido ya fue preparado y llegara segun esta programacion:"
+        "</p>"
+        "<table role='presentation' width='100%' cellspacing='0' cellpadding='0' "
+        "style='border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;margin-bottom:16px;'>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Pedido</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:600;'>#{order_id}</td></tr>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Preparado el</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:600;'>{prepared_at_text}</td></tr>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Entrega programada</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:700;'>{delivery_window}</td></tr>"
+        f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Total</td><td style='padding:10px 12px;text-align:right;font-size:15px;color:#0f172a;font-weight:700;'>{total_text}</td></tr>"
+        "</table>"
+        "<p style='margin:0;font-size:15px;'>Gracias por tu compra.</p>"
+        f"{support_line}"
+        "</td></tr>"
+        "<tr><td style='padding:12px 26px;border-top:1px solid #e5e7eb;color:#64748b;font-size:12px;'>"
+        f"{brand_name} - Actualizacion automatica de pedido"
+        "</td></tr>"
+        "</table>"
+        "</td></tr></table>"
+        "</body></html>"
+    )
+
+
 def _build_order_confirmation_html(order_data: Dict[str, Any]) -> str:
     brand_name = html_escape(str(os.environ.get('RESEND_BRAND_NAME') or 'DistriAr'))
     logo_url = (os.environ.get('RESEND_BRAND_LOGO_URL') or '').strip()
@@ -1402,6 +1486,111 @@ async def _send_order_seen_notification_email(order_data: Optional[Dict[str, Any
     return True
 
 
+async def _send_order_prepared_notification_email(order_data: Optional[Dict[str, Any]]) -> bool:
+    def _masked_key(v: str) -> str:
+        if not v:
+            return ''
+        if len(v) <= 8:
+            return '*' * len(v)
+        return f"{v[:4]}...{v[-4:]}"
+
+    enabled_raw = (os.environ.get('RESEND_ORDER_PREPARED_EMAIL_ENABLED') or 'true').strip().lower()
+    if enabled_raw in ('0', 'false', 'no', 'off'):
+        logger.info('RESEND_ORDER_PREPARED_EMAIL_ENABLED disabled. Skipping prepared-notification email.')
+        return False
+
+    api_key = (os.environ.get('RESEND_API_KEY') or '').strip()
+    if not api_key:
+        logger.warning('RESEND_API_KEY is not configured. Skipping prepared-notification email.')
+        return False
+    if api_key == 're_xxxxxxxxx':
+        logger.warning("RESEND_API_KEY is still 're_xxxxxxxxx'. Replace it with your real API key.")
+        return False
+
+    order_payload = _enrich_order_contact_fields(order_data if isinstance(order_data, dict) else {})
+    to_email = _extract_customer_email_for_order(order_payload, order_payload, None)
+    force_to_email = _normalize_email(os.environ.get('RESEND_FORCE_TO_EMAIL'))
+    if force_to_email:
+        logger.info(
+            'RESEND_FORCE_TO_EMAIL active: overriding recipient %s -> %s for prepared-notification order id=%s',
+            to_email,
+            force_to_email,
+            order_payload.get('id'),
+        )
+        to_email = force_to_email
+    if not to_email:
+        logger.info(
+            'Skipping prepared-notification email: no customer email found for order id=%s',
+            order_payload.get('id'),
+        )
+        return False
+
+    from_email = (os.environ.get('RESEND_FROM_EMAIL') or 'onboarding@resend.dev').strip()
+    logger.info(
+        'Resend prepared-notification send attempt order id=%s to=%s from=%s key=%s',
+        order_payload.get('id'),
+        to_email,
+        from_email,
+        _masked_key(api_key),
+    )
+
+    send_payload = {
+        'from': from_email,
+        'to': [to_email],
+        'subject': _build_order_prepared_subject(order_payload),
+        'html': _build_order_prepared_html(order_payload),
+    }
+    reply_to = _normalize_email(os.environ.get('RESEND_REPLY_TO'))
+    if reply_to:
+        send_payload['reply_to'] = reply_to
+
+    try:
+        timeout_seconds = float(os.environ.get('RESEND_TIMEOUT_SECONDS') or '12')
+    except Exception:
+        timeout_seconds = 12.0
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            response = await client.post(
+                'https://api.resend.com/emails',
+                headers={
+                    'Authorization': f'Bearer {api_key}',
+                    'Content-Type': 'application/json',
+                },
+                json=send_payload,
+            )
+    except Exception as e:
+        logger.warning('Resend request failed for prepared-notification order id=%s: %s', order_payload.get('id'), e)
+        return False
+
+    if response.status_code >= 400:
+        try:
+            body_preview = response.text[:300]
+        except Exception:
+            body_preview = '<unavailable>'
+        logger.warning(
+            'Resend prepared-notification failed for order id=%s status=%s body=%s',
+            order_payload.get('id'),
+            response.status_code,
+            body_preview,
+        )
+        return False
+
+    resend_id = None
+    try:
+        resend_id = (response.json() or {}).get('id')
+    except Exception:
+        resend_id = None
+
+    logger.info(
+        'Resend prepared-notification sent for order id=%s to=%s resend_id=%s',
+        order_payload.get('id'),
+        to_email,
+        resend_id,
+    )
+    return True
+
+
 def _resend_status_snapshot() -> Dict[str, Any]:
     api_key = (os.environ.get('RESEND_API_KEY') or '').strip()
     from_email = (os.environ.get('RESEND_FROM_EMAIL') or 'onboarding@resend.dev').strip()
@@ -1410,9 +1599,12 @@ def _resend_status_snapshot() -> Dict[str, Any]:
     enabled = enabled_raw not in ('0', 'false', 'no', 'off')
     seen_enabled_raw = (os.environ.get('RESEND_ORDER_SEEN_EMAIL_ENABLED') or 'true').strip().lower()
     seen_enabled = seen_enabled_raw not in ('0', 'false', 'no', 'off')
+    prepared_enabled_raw = (os.environ.get('RESEND_ORDER_PREPARED_EMAIL_ENABLED') or 'true').strip().lower()
+    prepared_enabled = prepared_enabled_raw not in ('0', 'false', 'no', 'off')
     return {
         'enabled': enabled,
         'seen_enabled': seen_enabled,
+        'prepared_enabled': prepared_enabled,
         'api_key_present': bool(api_key),
         'api_key_placeholder': api_key == 're_xxxxxxxxx',
         'from_email': from_email,
@@ -5173,7 +5365,7 @@ async def update_order_status(order_id: str, request: Request):
     except Exception:
         pass
 
-    # Notify customer when order status is marked as "visto".
+    # Notify customer when order status changes to user-facing milestones.
     try:
         status_norm = str((od.get('status') or status or '')).strip().lower()
         if status_norm == 'visto':
@@ -5185,8 +5377,17 @@ async def update_order_status(order_id: str, request: Request):
                 od['_seen_email_sent'] = bool(send_ok)
             except Exception:
                 pass
+        elif status_norm == 'preparado':
+            payload_for_prepared = _enrich_order_contact_fields(
+                dict(od) if isinstance(od, dict) else {'id': id_param, 'status': status}
+            )
+            send_ok = await _send_order_prepared_notification_email(payload_for_prepared)
+            try:
+                od['_prepared_email_sent'] = bool(send_ok)
+            except Exception:
+                pass
     except Exception:
-        logger.exception('Could not schedule seen-notification email for order id=%s', id_param)
+        logger.exception('Could not schedule status notification email for order id=%s', id_param)
 
     headers = _cors_headers_for_request(request)
     return JSONResponse(status_code=200, content=jsonable_encoder(od), headers=headers)

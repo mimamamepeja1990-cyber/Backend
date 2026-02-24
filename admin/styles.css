@@ -289,6 +289,72 @@ body.dark input, body.dark textarea{background:#071231;color:#e6eef8;border-colo
 .day-label .badge-pill { background:#fff; border-radius:999px; padding:5px 10px; font-size:13px; color:var(--accent-2); box-shadow:0 8px 24px rgba(79,70,229,0.06); border:1px solid rgba(79,70,229,0.06); font-weight:800 }
 .day-label small{ display:block; font-size:12px; color:var(--muted); font-weight:600; margin-left:6px }
 
+/* Preparaciones */
+.preparations-list{ display:flex; flex-direction:column; gap:14px; margin-top:12px; }
+.preparations-summary{
+  background:linear-gradient(90deg, rgba(79,70,229,0.07), rgba(124,58,237,0.05));
+  border:1px solid rgba(79,70,229,0.10);
+  color:var(--accent-2);
+  font-weight:700;
+  border-radius:10px;
+  padding:10px 12px;
+}
+.preparation-day-block{
+  background:var(--card);
+  border-radius:12px;
+  box-shadow:0 8px 24px rgba(2,6,23,0.06);
+  border:1px solid rgba(15,23,42,0.05);
+  padding:12px;
+}
+.preparation-day-head{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  margin-bottom:10px;
+}
+.preparation-day-title{
+  font-size:16px;
+  font-weight:800;
+  color:var(--accent-2);
+  text-transform:capitalize;
+}
+.preparation-cards{
+  display:grid;
+  grid-template-columns:repeat(auto-fit, minmax(300px, 1fr));
+  gap:10px;
+}
+.preparation-card{
+  background:#fff;
+  border-radius:10px;
+  border-left:5px solid var(--accent);
+  box-shadow:0 4px 14px rgba(11,15,28,0.05);
+  padding:12px 14px;
+}
+.preparation-card-top{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:10px;
+  margin-bottom:8px;
+}
+.preparation-row{
+  font-size:14px;
+  color:#1f2937;
+  margin:4px 0;
+}
+.preparation-row strong{
+  color:var(--accent);
+  font-weight:700;
+}
+.preparation-actions{
+  margin-top:8px;
+  display:flex;
+  justify-content:flex-end;
+  gap:8px;
+  flex-wrap:wrap;
+}
+
 /* Tidy up table row spacing for order tables (other tables use normal rows) */
 #ordersTable_todos tbody tr:hover, #ordersTable_web tbody tr:hover, #ordersTable_app tbody tr:hover{ transform:translateY(-6px); box-shadow:0 22px 50px rgba(2,6,23,0.12); }
 /* cell paddings for grid/card layout (applies to all tables) */
@@ -353,6 +419,8 @@ tr.pending-sync td{ background:linear-gradient(90deg, rgba(255,249,230,0.5), rgb
   .controls{flex-direction:column;align-items:stretch}
   .controls input, .controls select, .controls button, .controls .btn{width:100%}
   #ordersTabs .btn{width:100%;justify-content:center}
+  .preparation-cards{grid-template-columns:1fr}
+  .preparation-card-top{flex-direction:column;align-items:flex-start}
 
   .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
   .table-wrap table{display:block;width:100%}
