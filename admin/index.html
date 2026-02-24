@@ -14,7 +14,7 @@
     #clearOrderCache { background: #fff; border: 1px solid #e5e7eb; }
   </style>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=3">
   <!-- Fix: use admin-scoped image path so the favicon is served by the /admin static mount -->
   <link rel="icon" type="image/png" href="icon.png">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -399,6 +399,6 @@
     window.addEventListener('error', function(e){ try{ window.adminFallback('JS error: ' + (e && e.message ? e.message : e)); }catch(_){} });
     window.addEventListener('unhandledrejection', function(e){ try{ var r = e && e.reason ? (e.reason.message || JSON.stringify(e.reason)) : e; window.adminFallback('Unhandled promise rejection: ' + r); }catch(_){} });
   </script>
-  <script src="app.js"></script>
+  <script src="app.js?v=3"></script>
 </body>
 </html>
