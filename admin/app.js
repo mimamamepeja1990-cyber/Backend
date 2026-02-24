@@ -979,6 +979,7 @@ const badgeTypeMayorista = document.getElementById('badge_type_mayorista');
 const badgeTypeMinorista = document.getElementById('badge_type_minorista');
 const preparationsSearch = document.getElementById('preparationsSearch');
 const preparationsDate = document.getElementById('preparationsDate');
+const filterPreparationsTomorrowBtn = document.getElementById('filterPreparationsTomorrow');
 const clearPreparationsDate = document.getElementById('clearPreparationsDate');
 const refreshPreparationsBtn = document.getElementById('refreshPreparationsBtn');
 const preparationsList = document.getElementById('preparationsList');
@@ -1214,7 +1215,7 @@ function renderOrderItemLabel(it){
     if(typeof it === 'string') return escapeHtml(it);
     const name = getOrderItemPlainName(it) || ((it && it.id) ? String(it.id) : '');
     const code = getOrderItemCode(it);
-    const baseLabel = code ? `[${code}] "${name}"` : name;
+    const baseLabel = code ? `[${code}] ${name}` : name;
     const isConsumo = isOrderItemConsumo(it);
     const promoName = getOrderItemPromoName(it);
     let badges = '';
@@ -1345,6 +1346,19 @@ function normalizeIsoDateKey(value){
   const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) return '';
   return m[1] + '-' + m[2] + '-' + m[3];
+}
+
+function getTomorrowIsoDateKey(){
+  try{
+    const dt = new Date();
+    dt.setHours(0, 0, 0, 0);
+    dt.setDate(dt.getDate() + 1);
+    return [
+      dt.getFullYear(),
+      String(dt.getMonth() + 1).padStart(2, '0'),
+      String(dt.getDate()).padStart(2, '0'),
+    ].join('-');
+  }catch(_){ return ''; }
 }
 
 function formatIsoDateKeyWithWeekday(value){
@@ -1719,7 +1733,7 @@ function getOrderItemSummaryLabel(it){
   try{
     const name = getOrderItemPlainName(it) || 'Item';
     const code = getOrderItemCode(it);
-    return code ? `[${code}] "${name}"` : name;
+    return code ? `[${code}] ${name}` : name;
   }catch(_){ return 'Item'; }
 }
 
@@ -2279,6 +2293,11 @@ if(orderDate_web) orderDate_web.addEventListener('change', ()=> refreshOrders('w
 if(clearOrderDate_web) clearOrderDate_web.addEventListener('click', ()=> { if(orderDate_web) orderDate_web.value = ''; refreshOrders('web'); });
 if(preparationsSearch) preparationsSearch.addEventListener('input', ()=> renderPreparations(lastPreparationsBase));
 if(preparationsDate) preparationsDate.addEventListener('change', ()=> renderPreparations(lastPreparationsBase));
+if(filterPreparationsTomorrowBtn) filterPreparationsTomorrowBtn.addEventListener('click', ()=> {
+  const tomorrowKey = getTomorrowIsoDateKey();
+  if(preparationsDate && tomorrowKey) preparationsDate.value = tomorrowKey;
+  renderPreparations(lastPreparationsBase);
+});
 if(clearPreparationsDate) clearPreparationsDate.addEventListener('click', ()=> { if(preparationsDate) preparationsDate.value = ''; renderPreparations(lastPreparationsBase); });
 if(refreshPreparationsBtn) refreshPreparationsBtn.addEventListener('click', ()=> refreshPreparations(true));
 
