@@ -1580,6 +1580,30 @@ function getOrderDisplayName(order){
   }catch(_){ return '—'; }
 }
 
+function getOrderPrimaryName(order){
+  try{
+    const previewName = order && order._token_preview && order._token_preview.name
+      ? String(order._token_preview.name).trim()
+      : '';
+    const explicitName = order && order.user_full_name ? String(order.user_full_name).trim() : '';
+    if (explicitName) return explicitName;
+    if (previewName) return previewName;
+    if (order && order.user_id) return '#' + String(order.user_id);
+    if (order && order.user_email) return String(order.user_email).trim();
+    return '—';
+  }catch(_){ return '—'; }
+}
+
+function getOrderEmail(order){
+  try{
+    const previewEmail = order && order._token_preview && order._token_preview.email
+      ? String(order._token_preview.email).trim()
+      : '';
+    const explicitEmail = order && order.user_email ? String(order.user_email).trim() : '';
+    return explicitEmail || previewEmail || '—';
+  }catch(_){ return '—'; }
+}
+
 function getOrderAddress(order){
   try{
     const tokenPreview = order && order._token_preview && typeof order._token_preview === 'object'
@@ -1597,6 +1621,14 @@ function getOrderAddress(order){
     if (String(rawAddress || '').trim()) return String(rawAddress).trim();
     return '—';
   }catch(_){ return '—'; }
+}
+
+function getOrderCreatedTimestamp(order){
+  try{
+    if (!order || !order.created_at) return 0;
+    const ts = new Date(String(order.created_at)).getTime();
+    return isNaN(ts) ? 0 : ts;
+  }catch(_){ return 0; }
 }
 
 function getOrderCreatedAtLabel(order){
@@ -1713,16 +1745,16 @@ function renderPreparations(list){
     if (a === 'sin_fecha') return 1;
     if (b === 'sin_fecha') return -1;
     if (a === b) return 0;
-    return a > b ? 1 : -1;
+    return a > b ? -1 : 1;
   });
   const byId = new Map(filtered.map((entry) => [String(entry.order.id), entry.order]));
 
   sortedKeys.forEach((key) => {
     const dayEntries = groups.get(key) || [];
     dayEntries.sort((a, b) => {
-      const ta = a.order && a.order.created_at ? new Date(String(a.order.created_at)).getTime() : 0;
-      const tb = b.order && b.order.created_at ? new Date(String(b.order.created_at)).getTime() : 0;
-      return ta - tb;
+      const ta = getOrderCreatedTimestamp(a.order);
+      const tb = getOrderCreatedTimestamp(b.order);
+      return tb - ta;
     });
 
     const dayBlock = document.createElement('section');
@@ -1740,28 +1772,36 @@ function renderPreparations(list){
       const order = entry.order || {};
       const statusNorm = normalizeOrderStatus(order && order.status);
       const isPrepared = statusNorm === 'preparado';
+      const customerName = getOrderPrimaryName(order);
+      const customerEmail = getOrderEmail(order);
+      const statusLabel = isPrepared ? 'Preparado' : 'Visto';
       const card = document.createElement('article');
       card.className = 'preparation-card';
       const scheduleLabel = formatScheduleInfoLabel(entry.scheduleInfo) || (key === 'sin_fecha' ? 'Sin fecha de salida' : formatIsoDateKeyWithWeekday(key));
       const customerTypeLabel = normalizeOrderCustomerType(order.customer_type) === 'minorista' ? 'Minorista' : 'Mayorista';
       card.innerHTML = `
         <div class="preparation-card-top">
-          <span class="order-id">#${escapeHtml(order.id)}</span>
+          <div class="preparation-card-identity">
+            <span class="order-id">#${escapeHtml(order.id)}</span>
+            <span class="prep-profile-chip">${escapeHtml(customerTypeLabel)}</span>
+          </div>
           <span class="order-date">${escapeHtml(getOrderCreatedAtLabel(order))}</span>
         </div>
-        <div class="preparation-row"><strong>Salida:</strong> ${escapeHtml(scheduleLabel)}</div>
-        <div class="preparation-row"><strong>Cliente:</strong> ${escapeHtml(getOrderDisplayName(order))}</div>
-        <div class="preparation-row"><strong>Perfil:</strong> ${escapeHtml(customerTypeLabel)}</div>
-        <div class="preparation-row"><strong>Dirección:</strong> ${escapeHtml(getOrderAddress(order))}</div>
-        <div class="preparation-row"><strong>Items:</strong> ${escapeHtml(getOrderItemsSummary(order))}</div>
-        <div class="preparation-row"><strong>Total:</strong> $${Number(order.total || 0).toFixed(2)}</div>
-        <div class="preparation-row"><strong>Estado:</strong> ${escapeHtml(String(order.status || 'nuevo'))}</div>
-        <div class="preparation-actions">
-          <button class="btn small prepViewOrderBtn" data-id="${escapeHtml(order.id)}">Ver detalle</button>
-          ${isPrepared
-            ? '<span class="prep-status-chip">Preparado</span>'
-            : `<button class="btn small primary prepMarkPreparedBtn" data-id="${escapeHtml(order.id)}">Marcar preparado</button>`
-          }
+        <div class="preparation-row prep-row-highlight"><span class="prep-label">Salida</span><span class="prep-value">${escapeHtml(scheduleLabel)}</span></div>
+        <div class="preparation-row"><span class="prep-label">Cliente</span><span class="prep-value">${escapeHtml(customerName)}</span></div>
+        <div class="preparation-row"><span class="prep-label">Email</span><span class="prep-value">${escapeHtml(customerEmail)}</span></div>
+        <div class="preparation-row"><span class="prep-label">Dirección</span><span class="prep-value">${escapeHtml(getOrderAddress(order))}</span></div>
+        <div class="preparation-row"><span class="prep-label">Items</span><span class="prep-value">${escapeHtml(getOrderItemsSummary(order))}</span></div>
+        <div class="preparation-row"><span class="prep-label">Total</span><span class="prep-value prep-value-total">$${Number(order.total || 0).toFixed(2)}</span></div>
+        <div class="preparation-footer">
+          <span class="prep-status-badge ${isPrepared ? 'is-prepared' : 'is-seen'}">${escapeHtml(statusLabel)}</span>
+          <div class="preparation-actions">
+            <button class="btn small prepViewOrderBtn" data-id="${escapeHtml(order.id)}">Ver detalle</button>
+            ${isPrepared
+              ? '<span class="prep-status-chip">Preparado</span>'
+              : `<button class="btn small prepMarkPreparedBtn prep-mark-btn" data-id="${escapeHtml(order.id)}">Marcar preparado</button>`
+            }
+          </div>
         </div>
       `;
       cards.appendChild(card);

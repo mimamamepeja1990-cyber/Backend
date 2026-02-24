@@ -292,19 +292,19 @@ body.dark input, body.dark textarea{background:#071231;color:#e6eef8;border-colo
 /* Preparaciones */
 .preparations-list{ display:flex; flex-direction:column; gap:14px; margin-top:12px; }
 .preparations-summary{
-  background:linear-gradient(90deg, rgba(79,70,229,0.07), rgba(124,58,237,0.05));
-  border:1px solid rgba(79,70,229,0.10);
-  color:var(--accent-2);
-  font-weight:700;
-  border-radius:10px;
-  padding:10px 12px;
+  background:linear-gradient(90deg, rgba(79,70,229,0.11), rgba(124,58,237,0.08));
+  border:1px solid rgba(79,70,229,0.16);
+  color:#4338ca;
+  font-weight:800;
+  border-radius:12px;
+  padding:11px 14px;
 }
 .preparation-day-block{
   background:var(--card);
-  border-radius:12px;
-  box-shadow:0 8px 24px rgba(2,6,23,0.06);
+  border-radius:14px;
+  box-shadow:0 12px 28px rgba(2,6,23,0.08);
   border:1px solid rgba(15,23,42,0.05);
-  padding:12px;
+  padding:14px;
 }
 .preparation-day-head{
   display:flex;
@@ -321,52 +321,135 @@ body.dark input, body.dark textarea{background:#071231;color:#e6eef8;border-colo
 }
 .preparation-cards{
   display:grid;
-  grid-template-columns:repeat(auto-fit, minmax(300px, 1fr));
-  gap:10px;
+  grid-template-columns:repeat(auto-fit, minmax(320px, 1fr));
+  gap:12px;
 }
 .preparation-card{
-  background:#fff;
-  border-radius:10px;
-  border-left:5px solid var(--accent);
-  box-shadow:0 4px 14px rgba(11,15,28,0.05);
-  padding:12px 14px;
+  background:linear-gradient(180deg, #ffffff 0%, #fafbff 100%);
+  border-radius:12px;
+  border:1px solid rgba(79,70,229,0.14);
+  box-shadow:0 8px 18px rgba(11,15,28,0.08);
+  padding:12px;
+  display:flex;
+  flex-direction:column;
+  gap:8px;
 }
 .preparation-card-top{
   display:flex;
   justify-content:space-between;
-  align-items:center;
+  align-items:flex-start;
   gap:10px;
-  margin-bottom:8px;
+  border-bottom:1px solid rgba(15,23,42,0.08);
+  padding-bottom:8px;
+}
+.preparation-card-identity{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  flex-wrap:wrap;
+}
+.prep-profile-chip{
+  display:inline-flex;
+  align-items:center;
+  border-radius:999px;
+  padding:5px 10px;
+  background:rgba(79,70,229,0.1);
+  border:1px solid rgba(79,70,229,0.24);
+  color:#4338ca;
+  font-size:11px;
+  font-weight:800;
+  text-transform:uppercase;
+  letter-spacing:0.02em;
 }
 .preparation-row{
+  display:grid;
+  grid-template-columns:88px 1fr;
+  gap:8px;
+  align-items:start;
   font-size:14px;
   color:#1f2937;
-  margin:4px 0;
+  margin:0;
 }
-.preparation-row strong{
-  color:var(--accent);
-  font-weight:700;
+.prep-row-highlight{
+  background:rgba(79,70,229,0.08);
+  border:1px solid rgba(79,70,229,0.16);
+  border-radius:10px;
+  padding:8px 9px;
+}
+.prep-label{
+  color:#6366f1;
+  font-weight:800;
+  font-size:11px;
+  text-transform:uppercase;
+  letter-spacing:0.03em;
+}
+.prep-value{
+  color:#111827;
+  font-weight:600;
+  line-height:1.35;
+  word-break:break-word;
+}
+.prep-value-total{
+  color:#0f172a;
+  font-size:16px;
+  font-weight:900;
+}
+.preparation-footer{
+  margin-top:2px;
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:10px;
+  flex-wrap:wrap;
+}
+.prep-status-badge{
+  display:inline-flex;
+  align-items:center;
+  border-radius:999px;
+  padding:6px 11px;
+  font-size:12px;
+  font-weight:800;
+  border:1px solid transparent;
+}
+.prep-status-badge.is-seen{
+  background:#eff6ff;
+  border-color:rgba(37,99,235,0.28);
+  color:#1d4ed8;
+}
+.prep-status-badge.is-prepared{
+  background:#ecfdf3;
+  border-color:rgba(22,101,52,0.3);
+  color:#166534;
 }
 .preparation-actions{
-  margin-top:8px;
   display:flex;
   justify-content:flex-end;
   gap:8px;
   flex-wrap:wrap;
 }
-.preparation-actions .btn.primary{
-  color:#fff;
+.preparation-actions .btn{
+  min-height:36px;
 }
 .prep-status-chip{
   display:inline-flex;
   align-items:center;
-  padding:7px 11px;
+  padding:8px 12px;
   border-radius:999px;
   font-size:12px;
   font-weight:800;
   background:#ecfdf3;
   color:#166534;
   border:1px solid rgba(22,101,52,0.25);
+}
+.preparation-actions .btn.prep-mark-btn{
+  background:linear-gradient(90deg,#0f766e,#0d9488);
+  color:#ffffff;
+  border:1px solid rgba(13,148,136,0.45);
+  font-weight:800;
+}
+.preparation-actions .btn.prep-mark-btn:hover{
+  filter:brightness(1.02);
+  box-shadow:0 12px 20px rgba(13,148,136,0.3);
 }
 
 /* Tidy up table row spacing for order tables (other tables use normal rows) */
@@ -435,6 +518,9 @@ tr.pending-sync td{ background:linear-gradient(90deg, rgba(255,249,230,0.5), rgb
   #ordersTabs .btn{width:100%;justify-content:center}
   .preparation-cards{grid-template-columns:1fr}
   .preparation-card-top{flex-direction:column;align-items:flex-start}
+  .preparation-row{grid-template-columns:1fr;gap:4px}
+  .preparation-footer{align-items:flex-start}
+  .preparation-actions{width:100%;justify-content:flex-start}
 
   .table-wrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
   .table-wrap table{display:block;width:100%}
