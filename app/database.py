@@ -6,12 +6,68 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 
 # app/
 BASE_DIR = Path(__file__).resolve().parent
+ROOT_DIR = BASE_DIR.parent
 
-# Backend/data/
-DATA_DIR = BASE_DIR.parent / 'data'
-DATA_DIR.mkdir(exist_ok=True)
 
-DB_PATH = DATA_DIR / 'database.db'
+def _is_running_on_render() -> bool:
+    return bool(
+        os.environ.get('RENDER')
+        or os.environ.get('RENDER_SERVICE_ID')
+        or os.environ.get('RENDER_EXTERNAL_HOSTNAME')
+    )
+
+
+def _resolve_data_dir() -> Path:
+    """Resolve a writable data directory, preferring persistent Render disk paths."""
+    candidates = []
+
+    # Explicit app overrides first.
+    for key in ('DATA_DIR', 'PERSISTENT_DATA_DIR'):
+        val = str(os.environ.get(key) or '').strip()
+        if val:
+            candidates.append(Path(val))
+
+    # Common Render disk env vars (if configured).
+    for key in ('RENDER_DISK_MOUNT_PATH', 'RENDER_DISK_PATH', 'RENDER_PERSISTENT_DISK_PATH'):
+        val = str(os.environ.get(key) or '').strip()
+        if val:
+            candidates.append(Path(val))
+
+    # Render default mount path.
+    if _is_running_on_render():
+        candidates.append(Path('/var/data'))
+
+    # Local fallback inside repo.
+    candidates.append(ROOT_DIR / 'data')
+
+    for candidate in candidates:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            probe = candidate / '.rw_probe'
+            with open(probe, 'w', encoding='utf-8') as f:
+                f.write('ok')
+            try:
+                probe.unlink()
+            except Exception:
+                pass
+            return candidate
+        except Exception:
+            continue
+
+    # Last-resort fallback.
+    fallback = ROOT_DIR / 'data'
+    fallback.mkdir(parents=True, exist_ok=True)
+    return fallback
+
+
+DATA_DIR = _resolve_data_dir()
+
+db_path_env = str(os.environ.get('DB_PATH') or '').strip()
+if db_path_env:
+    db_path = Path(db_path_env)
+    DB_PATH = db_path if db_path.is_absolute() else (DATA_DIR / db_path)
+else:
+    DB_PATH = DATA_DIR / 'database.db'
 
 # Allow overriding the DB with a managed DATABASE_URL (Postgres, etc.) via env var.
 # Use `str(DB_PATH)` to ensure a proper path string is embedded in the sqlite URL.

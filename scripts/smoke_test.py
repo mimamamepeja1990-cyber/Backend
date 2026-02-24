@@ -24,6 +24,9 @@ def main():
 
     db = SessionLocal()
     created = None
+    prom_path = os.path.join(CATALOG_DIR, 'promotions.json')
+    previous_promotions = None
+    promotions_existed = False
     try:
         # Create a test product
         p = models.Product(name='SMOKETEST', price=1.23, description='Prueba', category='Test', image_url=None, active=True)
@@ -43,10 +46,15 @@ def main():
         else:
             print('products.json NOT FOUND')
 
-        # Write promotions snapshot
+        # Preserve current promotions snapshot to avoid polluting real data.
+        promotions_existed = os.path.exists(prom_path)
+        if promotions_existed:
+            with open(prom_path, 'r', encoding='utf-8') as f:
+                previous_promotions = f.read()
+
+        # Write a temporary promotions snapshot just for smoke verification.
         promos = [{ 'id': 999999, 'name': 'SMOKE PROMO', 'description': 'Auto', 'productIds': [created], 'type': 'percent', 'value': 10 }]
         write_promotions_snapshot(promos)
-        prom_path = os.path.join(CATALOG_DIR, 'promotions.json')
         if os.path.exists(prom_path):
             with open(prom_path, 'r', encoding='utf-8') as f:
                 pitems = json.load(f)
@@ -66,6 +74,16 @@ def main():
                     db.delete(obj)
                     db.commit()
                     print('Cleaned up test product')
+        except Exception:
+            pass
+        try:
+            if promotions_existed:
+                with open(prom_path, 'w', encoding='utf-8') as f:
+                    f.write(previous_promotions or '[]')
+                print('Restored original promotions snapshot')
+            elif os.path.exists(prom_path):
+                os.remove(prom_path)
+                print('Removed temporary promotions snapshot')
         except Exception:
             pass
         db.close()

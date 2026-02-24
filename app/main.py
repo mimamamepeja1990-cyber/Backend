@@ -349,19 +349,50 @@ async def lifespan(app: FastAPI):
             logger.info('Database connection test succeeded')
         except Exception as e:
             logger.exception('Database connection test failed: %s', e)
-        # If running on a PaaS like Render and no managed DATABASE_URL is set,
-        # using the bundled SQLite file will not survive deploys/restarts.
-        # Fail early to force configuration of a managed database.
-        try:
-            running_on_render = bool(os.environ.get('RENDER') or os.environ.get('RENDER_SERVICE_ID') or os.environ.get('RENDER_EXTERNAL_HOSTNAME'))
-            using_sqlite = (db_env is None) or (str(db_env).strip() == '') or (str(db_env).lower().startswith('sqlite'))
-            if running_on_render and using_sqlite:
-                logger.error('Detected Render environment but no managed DATABASE_URL configured. Using SQLite on Render is ephemeral and will lose data on deploys. Set DATABASE_URL to a managed Postgres database.')
-                # Raise to stop startup and make the problem obvious in logs
-                raise RuntimeError('Render deployment requires a managed DATABASE_URL (Postgres). Set the DATABASE_URL env var.')
-        except Exception:
-            # If detection fails, continue but we've already logged above
-            pass
+        # If running on Render with SQLite, require a persistent disk path.
+        # Otherwise data (users/addresses/orders) is lost on redeploy.
+        running_on_render = bool(
+            os.environ.get('RENDER')
+            or os.environ.get('RENDER_SERVICE_ID')
+            or os.environ.get('RENDER_EXTERNAL_HOSTNAME')
+        )
+        using_sqlite = (db_env is None) or (str(db_env).strip() == '') or (str(db_env).lower().startswith('sqlite'))
+        if running_on_render and using_sqlite:
+            engine_url = str(getattr(engine, 'url', '') or '')
+            env_markers = [
+                str(os.environ.get('RENDER_DISK_MOUNT_PATH') or '').strip(),
+                str(os.environ.get('RENDER_DISK_PATH') or '').strip(),
+                str(os.environ.get('RENDER_PERSISTENT_DISK_PATH') or '').strip(),
+                str(os.environ.get('DB_PATH') or '').strip(),
+                str(os.environ.get('DATA_DIR') or '').strip(),
+                str(os.environ.get('PERSISTENT_DATA_DIR') or '').strip(),
+            ]
+            mount_markers = []
+            for marker in ('/var/data',):
+                try:
+                    if os.path.ismount(marker):
+                        mount_markers.append(marker)
+                except Exception:
+                    continue
+            persistent_markers = [m for m in (env_markers + mount_markers) if m]
+            sqlite_on_persistent_disk = any(marker in engine_url for marker in persistent_markers)
+            if not sqlite_on_persistent_disk:
+                logger.error(
+                    'Detected Render + SQLite without persistent disk path in DB URL (%s). '
+                    'Configure DATABASE_URL (Postgres) or mount persistent disk and point DB_PATH/DATA_DIR to it.',
+                    engine_url,
+                )
+                raise RuntimeError(
+                    'Render deployment requires persistent storage for the database. '
+                    'Configure DATABASE_URL (Postgres) or set DB_PATH/DATA_DIR to a persistent disk mount.'
+                )
+            logger.warning(
+                'Running on Render with SQLite backed by persistent disk path (%s). '
+                'For production resilience, Postgres is still recommended.',
+                engine_url,
+            )
+    except RuntimeError:
+        raise
     except Exception:
         logger.exception('Database startup check failed')
 

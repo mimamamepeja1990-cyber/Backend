@@ -960,6 +960,47 @@ function normalizeOrderStatus(value){
   return v;
 }
 
+function hasMeaningfulOrderValue(value){
+  if (value === null || typeof value === 'undefined') return false;
+  if (typeof value === 'string') return String(value).trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  if (typeof value === 'object') return Object.keys(value).length > 0;
+  return true;
+}
+
+function mergeOrderRecord(existing, incoming){
+  const prev = existing && typeof existing === 'object' ? existing : {};
+  const next = incoming && typeof incoming === 'object' ? incoming : {};
+  const merged = Object.assign({}, prev, next);
+  const keepIfIncomingMissing = [
+    'items',
+    'created_at',
+    'total',
+    'customer_type',
+    'user_id',
+    'user_full_name',
+    'user_email',
+    'user_barrio',
+    'user_calle',
+    'user_numeracion',
+    '_token_preview',
+    '_token_received',
+    'payment_method',
+    'payment_status',
+    'payment_reference',
+    'scheduled_delivery_date',
+    'delivery_cutoff_applied',
+    'delivery_timezone',
+    'delivery_cutoff_hour',
+  ];
+  keepIfIncomingMissing.forEach((field) => {
+    if (!hasMeaningfulOrderValue(next[field]) && hasMeaningfulOrderValue(prev[field])){
+      merged[field] = prev[field];
+    }
+  });
+  return merged;
+}
+
 function applyOrdersCustomerTypeTabState(){
   try{
     const isMinorista = currentOrderCustomerType === 'minorista';
@@ -974,8 +1015,6 @@ function updateOrdersCustomerTypeBadges(list){
     let mayoristaCount = 0;
     let minoristaCount = 0;
     rows.forEach((o) => {
-      const statusNorm = normalizeOrderStatus(o && o.status);
-      if (statusNorm === 'visto' || statusNorm === 'preparado') return;
       const t = normalizeOrderCustomerType(o && o.customer_type);
       if (t === 'minorista') minoristaCount += 1;
       else mayoristaCount += 1;
@@ -1412,13 +1451,6 @@ function renderOrders(list, source, dateFilter){
     const selectedType = normalizeOrderCustomerType(currentOrderCustomerType);
     list = (list || []).filter(o => normalizeOrderCustomerType(o && o.customer_type) === selectedType);
   }catch(_){ }
-  // En "Pedidos" se muestran solo pedidos pendientes de revision.
-  try{
-    list = (list || []).filter((o) => {
-      const statusNorm = normalizeOrderStatus(o && o.status);
-      return statusNorm !== 'visto' && statusNorm !== 'preparado';
-    });
-  }catch(_){ }
   // Agrupar por día y deduplicar por id (siempre mostrar solo una vez por tabla)
   const groups = new Map();
   const seenIds = new Set();
@@ -1507,7 +1539,7 @@ function renderOrders(list, source, dateFilter){
       if(document.getElementById('orderModal') && document.getElementById('orderModal').classList.contains('hidden')===false) try{ showOrderDetail(updated); }catch(_){ }
       try{
         const uid = String((updated && updated.id) || id);
-        lastPreparationsBase = (lastPreparationsBase || []).map((entry) => String(entry && entry.id) === uid ? Object.assign({}, entry, updated) : entry);
+        lastPreparationsBase = (lastPreparationsBase || []).map((entry) => String(entry && entry.id) === uid ? mergeOrderRecord(entry, updated) : entry);
         if (isPreparationsSectionActive()) renderPreparations(lastPreparationsBase);
       }catch(_){ }
       try{ await refreshOrders('web'); }catch(_){ }
@@ -1550,8 +1582,20 @@ function getOrderDisplayName(order){
 
 function getOrderAddress(order){
   try{
-    const parts = [order && order.user_barrio, order && order.user_calle, order && order.user_numeracion].filter(Boolean);
-    return parts.length ? parts.join(', ') : '—';
+    const tokenPreview = order && order._token_preview && typeof order._token_preview === 'object'
+      ? order._token_preview
+      : {};
+    const nestedAddress = tokenPreview && tokenPreview.address && typeof tokenPreview.address === 'object'
+      ? tokenPreview.address
+      : {};
+    const barrio = (order && order.user_barrio) || tokenPreview.barrio || nestedAddress.barrio || tokenPreview.neighborhood || '';
+    const calle = (order && order.user_calle) || tokenPreview.calle || nestedAddress.calle || tokenPreview.street || nestedAddress.street || '';
+    const numeracion = (order && order.user_numeracion) || tokenPreview.numeracion || nestedAddress.numeracion || tokenPreview.number || nestedAddress.number || '';
+    const rawAddress = (order && order.user_address) || tokenPreview.user_address || tokenPreview.direccion || nestedAddress.direccion || '';
+    const parts = [barrio, calle, numeracion].filter((p) => String(p || '').trim());
+    if (parts.length) return parts.join(', ');
+    if (String(rawAddress || '').trim()) return String(rawAddress).trim();
+    return '—';
   }catch(_){ return '—'; }
 }
 
@@ -1714,7 +1758,10 @@ function renderPreparations(list){
         <div class="preparation-row"><strong>Estado:</strong> ${escapeHtml(String(order.status || 'nuevo'))}</div>
         <div class="preparation-actions">
           <button class="btn small prepViewOrderBtn" data-id="${escapeHtml(order.id)}">Ver detalle</button>
-          <button class="btn small primary prepMarkPreparedBtn" data-id="${escapeHtml(order.id)}" ${isPrepared ? 'disabled title="Este pedido ya fue marcado como preparado"' : ''}>${isPrepared ? 'Preparado' : 'Marcar preparado'}</button>
+          ${isPrepared
+            ? '<span class="prep-status-chip">Preparado</span>'
+            : `<button class="btn small primary prepMarkPreparedBtn" data-id="${escapeHtml(order.id)}">Marcar preparado</button>`
+          }
         </div>
       `;
       cards.appendChild(card);
@@ -1760,7 +1807,7 @@ function renderPreparations(list){
         lastPreparationsBase = (lastPreparationsBase || []).map((entry) => {
           if (String(entry && entry.id) === uid){
             replacedInPreparations = true;
-            return Object.assign({}, entry, updated);
+            return mergeOrderRecord(entry, updated);
           }
           return entry;
         });
@@ -1771,7 +1818,7 @@ function renderPreparations(list){
         lastOrdersBaseWeb = (lastOrdersBaseWeb || []).map((entry) => {
           if (String(entry && entry.id) === uid){
             replacedInOrders = true;
-            return Object.assign({}, entry, updated);
+            return mergeOrderRecord(entry, updated);
           }
           return entry;
         });
@@ -1787,6 +1834,7 @@ function renderPreparations(list){
             }
           }
         }catch(_){ }
+        try{ await refreshOrders('web'); }catch(_){ }
         renderPreparations(lastPreparationsBase);
         showToast('Pedido marcado como preparado');
       }catch(e){
@@ -2044,7 +2092,7 @@ function showOrderDetail(order){
         }catch(_){ }
         try{
           const uid = String((updated && updated.id) || order.id);
-          lastPreparationsBase = (lastPreparationsBase || []).map((entry) => String(entry && entry.id) === uid ? Object.assign({}, entry, updated) : entry);
+          lastPreparationsBase = (lastPreparationsBase || []).map((entry) => String(entry && entry.id) === uid ? mergeOrderRecord(entry, updated) : entry);
           if (isPreparationsSectionActive()) renderPreparations(lastPreparationsBase);
         }catch(_){ }
         try{ await refreshOrders('web'); }catch(_){ }
