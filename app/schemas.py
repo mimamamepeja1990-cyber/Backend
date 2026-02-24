@@ -3,6 +3,7 @@ from typing import Optional, List, Union
 from datetime import datetime
 
 class ProductBase(BaseModel):
+    code: Optional[str] = None
     name: str
     price: float
     price_retail: Optional[float] = None
@@ -20,6 +21,7 @@ class ProductCreate(ProductBase):
     pass
 
 class ProductUpdate(BaseModel):
+    code: Optional[str] = None
     name: Optional[str] = None
     price: Optional[float] = None
     price_retail: Optional[float] = None

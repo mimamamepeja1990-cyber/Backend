@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from fastapi import HTTPException
 import os
 from typing import Optional, List
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
 import logging
@@ -258,9 +258,20 @@ def _append_server_log(msg, tb=None):
 
 def get_products(db: Session, skip: int = 0, limit: int = 100, q: Optional[str]=None, category: Optional[str]=None, active: Optional[bool]=None, sort: Optional[str]=None) -> List[models.Product]:
     try:
+        try:
+            _ensure_product_columns(db)
+        except Exception:
+            pass
         query = db.query(models.Product)
         if q:
-            query = query.filter(models.Product.name.ilike(f"%{q}%"))
+            needle = f"%{str(q).strip()}%"
+            query = query.filter(
+                or_(
+                    models.Product.name.ilike(needle),
+                    models.Product.description.ilike(needle),
+                    models.Product.code.ilike(needle),
+                )
+            )
         if category:
             query = query.filter(models.Product.category == category)
         if active is not None:
@@ -281,6 +292,8 @@ def get_products(db: Session, skip: int = 0, limit: int = 100, q: Optional[str]=
         except Exception:
             existing = set()
         cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
+        if 'code' in existing:
+            cols.append('code')
         if 'price_retail' in existing:
             cols.append('price_retail')
         # only include optional columns if they exist
@@ -298,7 +311,10 @@ def get_products(db: Session, skip: int = 0, limit: int = 100, q: Optional[str]=
         where = []
         params = {'skip': skip, 'limit': limit}
         if q:
-            where.append("LOWER(name) LIKE :q")
+            match_parts = ["LOWER(COALESCE(name, '')) LIKE :q", "LOWER(COALESCE(description, '')) LIKE :q"]
+            if 'code' in existing:
+                match_parts.append("LOWER(COALESCE(code, '')) LIKE :q")
+            where.append("(" + " OR ".join(match_parts) + ")")
             params['q'] = f"%{q.lower()}%"
         if category:
             where.append("category = :category")
@@ -337,6 +353,7 @@ def _ensure_product_columns(db: Session, existing_cols: Optional[set] = None) ->
         dialect_name = 'sqlite'
 
     col_defs = {
+        'code': 'VARCHAR(100)',
         'stock': 'INTEGER DEFAULT 0',
         'stock_kg': 'REAL DEFAULT 0',
         'kg_per_unit': 'REAL DEFAULT 1',
@@ -381,7 +398,7 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
         insp = inspect(bind)
         existing_cols = {c['name'] for c in insp.get_columns('products')}
     except Exception:
-        existing_cols = {'id', 'name', 'price', 'description', 'category', 'image_url', 'active', 'created_at', 'updated_at', 'stock', 'stock_kg', 'kg_per_unit', 'discount', 'sale_unit', 'price_retail'}
+        existing_cols = {'id', 'code', 'name', 'price', 'description', 'category', 'image_url', 'active', 'created_at', 'updated_at', 'stock', 'stock_kg', 'kg_per_unit', 'discount', 'sale_unit', 'price_retail'}
     
     existing_cols = _ensure_product_columns(db, existing_cols)
     logger.info('Existing columns: %s', existing_cols)
@@ -415,6 +432,7 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
         price_retail = None
 
     data = {
+        'code': str(getattr(payload, 'code', '') or '').strip() or None,
         'name': payload.name,
         'price': payload.price,
         'price_retail': price_retail,
@@ -459,16 +477,18 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
     
     # Fetch the inserted product
     try:
-        # Build an explicit column list that includes optional `stock` and `discount` if present
-        cols = ['id', 'name', 'price', 'description', 'category', 'image_url', 'active', 'created_at', 'updated_at']
-        if 'price_retail' in existing:
-            cols.append('price_retail')
         try:
             bind = db.get_bind()
             insp = inspect(bind)
             existing = {c['name'] for c in insp.get_columns('products')}
         except Exception:
             existing = set()
+        # Build an explicit column list that includes optional fields only when present.
+        cols = ['id', 'name', 'price', 'description', 'category', 'image_url', 'active', 'created_at', 'updated_at']
+        if 'code' in existing:
+            cols.append('code')
+        if 'price_retail' in existing:
+            cols.append('price_retail')
         if 'stock' in existing:
             cols.append('stock')
         if 'stock_kg' in existing:
@@ -519,6 +539,7 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
         fallback_price_retail = None
     return {
         'id': None,
+        'code': str(getattr(payload, 'code', '') or '').strip() or None,
         'name': payload.name,
         'price': float(payload.price) if getattr(payload, 'price', None) is not None else 0.0,
         'price_retail': fallback_price_retail,
@@ -545,6 +566,8 @@ def get_product(db: Session, product_id: int) -> Optional[models.Product]:
         except Exception:
             existing = set()
         cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
+        if 'code' in existing:
+            cols.append('code')
         if 'price_retail' in existing:
             cols.append('price_retail')
         if 'stock' in existing:
@@ -597,6 +620,13 @@ def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate)
             updates['price_retail'] = float(updates['price_retail']) if updates['price_retail'] is not None else None
         except Exception:
             updates.pop('price_retail', None)
+    if 'code' in updates:
+        try:
+            updates['code'] = str(updates['code']).strip() if updates['code'] is not None else None
+            if updates['code'] == '':
+                updates['code'] = None
+        except Exception:
+            updates.pop('code', None)
 
     set_cols = [k for k in updates.keys() if (not existing) or (k in existing)]
     if not set_cols:
@@ -624,6 +654,8 @@ def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate)
 
     # Fetch updated row safely (only request existing columns)
     cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
+    if 'code' in existing:
+        cols.append('code')
     if 'price_retail' in existing:
         cols.append('price_retail')
     if 'stock' in existing:

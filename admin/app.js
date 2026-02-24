@@ -234,6 +234,7 @@ const saleUnitSelect = document.getElementById('sale_unit');
 const kgPerUnitField = document.getElementById('kgPerUnitField');
 const stockLabel = document.getElementById('stockLabel');
 const priceLabel = document.getElementById('priceLabel');
+const productCodeInput = document.getElementById('code');
 const retailPriceInput = document.getElementById('price_retail');
 const retailPricesTableBody = document.querySelector('#retailPricesTable tbody');
 const retailPriceSearch = document.getElementById('retailPriceSearch');
@@ -243,6 +244,7 @@ let currentEditId = null;
 let imageUrl = null;
 let selectedFile = null;
 let retailProductsCache = [];
+let productLookupById = new Map();
 const PROMO_KEY = 'admin_promotions_v1';
 const FILTERS_KEY = 'admin_filters_v1';
 const PRODUCT_CATEGORIES_KEY = 'admin_product_categories_v1';
@@ -325,6 +327,28 @@ function normalizeSaleUnit(val){
   const v = String(val || '').trim().toLowerCase();
   if (v === 'kg' || v === 'kilo' || v === 'kilos' || v === 'kilogram' || v === 'kilograms' || v === 'kilogramo' || v === 'kilogramos') return 'kg';
   return 'unit';
+}
+
+function normalizeProductCode(value){
+  const code = String(value || '').trim();
+  return code || '';
+}
+
+function syncProductLookup(products){
+  const list = Array.isArray(products) ? products : [];
+  const next = new Map();
+  list.forEach((p) => {
+    const key = String((p && (p.id ?? p._id)) || '').trim();
+    if (!key) return;
+    next.set(key, p || {});
+  });
+  productLookupById = next;
+}
+
+function getCachedProductById(productId){
+  const key = String(productId || '').trim();
+  if (!key) return null;
+  return productLookupById.get(key) || null;
 }
 
 function getProductStockKg(p){
@@ -507,6 +531,8 @@ async function refresh(){
   const prevText = refreshBtn.textContent;
   refreshBtn.disabled = true; refreshBtn.textContent = 'Cargando...';
   const products = await fetchProducts(q, cat, sort);
+  allProductsCache = Array.isArray(products) ? products.slice() : [];
+  syncProductLookup(allProductsCache);
   renderProducts(products);
   updateStats(products);
   try{
@@ -526,6 +552,7 @@ function renderProducts(products){
   const productCats = loadProductCategories();
   for(const p of products){
     categories.add(p.category || '');
+    const productCode = normalizeProductCode(p.code || p.codigo);
     const assigned = (productCats && (productCats[String(p.id)] || productCats[String(p.name)])) || [];
     const catsDisplay = (assigned && assigned.length) ? assigned.map(x => `<span class="pc-tag">${escapeHtml(x)}</span>`).join(' ') : (p.category || '');
     const tr = document.createElement('tr');
@@ -549,7 +576,8 @@ function renderProducts(products){
       : '';
     tr.innerHTML = `
       <td>${imgSrc ? `<img src="${imgSrc}" alt="${p.name}" width="60" onerror="this.onerror=null;this.src='../images/default.png'">` : ''}</td>
-      <td>${p.name}</td>
+      <td>${escapeHtml(p.name || '')}</td>
+      <td>${productCode ? escapeHtml(productCode) : '<span class="muted">—</span>'}</td>
       <td>${catsDisplay}</td>
       <td>$${parseFloat(p.price).toFixed(2)}${unitSuffix}</td>
       <td>${(p.price_retail === null || p.price_retail === undefined || p.price_retail === '') ? '<span class="muted"></span>' : ('$' + parseFloat(p.price_retail).toFixed(2) + unitSuffix)}</td>
@@ -783,7 +811,15 @@ async function handleSave(ev){
   // maintain compatibility: set hidden category to first selected or existing value
   productForm.category.value = (selectedCats && selectedCats.length) ? String(selectedCats[0]) : (productForm.category.value || '');
 
-  const payload = { name: productForm.name.value.trim(), price: Number(productForm.price.value), description: productForm.description.value.trim(), category: productForm.category.value.trim() || null, image_url: imageUrl, active: true };
+  const payload = {
+    code: normalizeProductCode(productCodeInput ? productCodeInput.value : '') || null,
+    name: productForm.name.value.trim(),
+    price: Number(productForm.price.value),
+    description: productForm.description.value.trim(),
+    category: productForm.category.value.trim() || null,
+    image_url: imageUrl,
+    active: true
+  };
   try{
     const retailRaw = retailPriceInput ? String(retailPriceInput.value || '').trim() : '';
     payload.price_retail = retailRaw === '' ? null : Number(retailRaw);
@@ -885,6 +921,7 @@ async function onEdit(id){
     const p = await res.json();
     currentEditId = id;
     productForm.name.value = p.name;
+    if (productCodeInput) productCodeInput.value = normalizeProductCode(p.code || p.codigo);
     productForm.price.value = p.price;
     if (retailPriceInput) retailPriceInput.value = (p.price_retail === null || p.price_retail === undefined || p.price_retail === '') ? '' : String(p.price_retail);
     productForm.category.value = p.category;
@@ -1157,11 +1194,27 @@ function safeParseItems(items){
   }
 }
 
+function getOrderItemCode(it){
+  try{
+    if (!it || typeof it !== 'object') return '';
+    const meta = (it.meta && typeof it.meta === 'object') ? it.meta : {};
+    const fromMeta = normalizeProductCode(meta.code || meta.codigo);
+    if (fromMeta) return fromMeta;
+    const fromItem = normalizeProductCode(it.code || it.codigo);
+    if (fromItem) return fromItem;
+    const prod = getCachedProductById(it.id);
+    if (prod) return normalizeProductCode(prod.code || prod.codigo);
+    return '';
+  }catch(_){ return ''; }
+}
+
 function renderOrderItemLabel(it){
   try{
     if(it === null || typeof it === 'undefined') return '';
     if(typeof it === 'string') return escapeHtml(it);
-    const name = (it && it.meta && it.meta.name) ? it.meta.name : (it && it.id) ? it.id : '';
+    const name = getOrderItemPlainName(it) || ((it && it.id) ? String(it.id) : '');
+    const code = getOrderItemCode(it);
+    const baseLabel = code ? `[${code}] "${name}"` : name;
     const isConsumo = isOrderItemConsumo(it);
     const promoName = getOrderItemPromoName(it);
     let badges = '';
@@ -1171,7 +1224,7 @@ function renderOrderItemLabel(it){
     if (promoName) {
       badges += ' <span style="margin-left:6px;padding:2px 6px;border-radius:999px;background:#ecfeff;border:1px solid rgba(8,145,178,0.25);color:#0e7490;font-weight:700;font-size:11px;vertical-align:middle">Promo: ' + escapeHtml(promoName) + '</span>';
     }
-    return `${escapeHtml(name)}${badges}`;
+    return `${escapeHtml(baseLabel)}${badges}`;
   }catch(_){
     return '';
   }
@@ -1649,10 +1702,25 @@ function getOrderCreatedAtLabel(order){
 function getOrderItemPlainName(it){
   try{
     if (!it) return '';
-    if (typeof it === 'string') return it;
+    if (typeof it === 'string') return String(it).trim();
     const meta = it && it.meta && typeof it.meta === 'object' ? it.meta : {};
-    return String(meta.name || it.id || '').trim();
+    const explicit = String(meta.name || '').trim();
+    if (explicit) return explicit;
+    const prod = getCachedProductById(it.id);
+    if (prod) {
+      const cachedName = String((prod && (prod.name || prod.nombre)) || '').trim();
+      if (cachedName) return cachedName;
+    }
+    return String(it.id || '').trim();
   }catch(_){ return ''; }
+}
+
+function getOrderItemSummaryLabel(it){
+  try{
+    const name = getOrderItemPlainName(it) || 'Item';
+    const code = getOrderItemCode(it);
+    return code ? `[${code}] "${name}"` : name;
+  }catch(_){ return 'Item'; }
 }
 
 function getOrderItemsSummary(order){
@@ -1660,7 +1728,7 @@ function getOrderItemsSummary(order){
     const itemsArr = safeParseItems(order && order.items ? order.items : []);
     if (!Array.isArray(itemsArr) || itemsArr.length === 0) return 'Sin items';
     const labels = itemsArr.map((it) => {
-      const name = getOrderItemPlainName(it) || 'Item';
+      const name = getOrderItemSummaryLabel(it);
       const qty = formatOrderQty(it);
       return name + ' x' + qty;
     });
@@ -1672,7 +1740,8 @@ function getOrderItemsSummary(order){
 function buildPreparationsSearchIndex(order){
   try{
     const itemsArr = safeParseItems(order && order.items ? order.items : []);
-    const itemNames = (itemsArr || []).map((it) => getOrderItemPlainName(it)).join(' ');
+    const itemNames = (itemsArr || []).map((it) => getOrderItemSummaryLabel(it)).join(' ');
+    const itemCodes = (itemsArr || []).map((it) => getOrderItemCode(it)).join(' ');
     return [
       order && order.id,
       order && order.status,
@@ -1682,6 +1751,7 @@ function buildPreparationsSearchIndex(order){
       order && order.user_calle,
       order && order.user_numeracion,
       itemNames,
+      itemCodes,
     ].join(' ').toLowerCase();
   }catch(_){ return ''; }
 }
@@ -1921,7 +1991,7 @@ function orderRowFor(o){
   const previewName = o._token_preview && (o._token_preview.name || o._token_preview.email) ? (o._token_preview.name || o._token_preview.email) : null;
   const displayName = o.user_full_name || previewName || o.user_email;
   const userDisplay = displayName ? `${displayName}${o.user_email && displayName !== o.user_email ? ' / ' + o.user_email : ''}` : (o.user_id ? `#${o.user_id}` : '');
-  const address = [o.user_barrio, o.user_calle, o.user_numeracion].filter(Boolean).join(', ');
+  const address = getOrderAddress(o);
   const scheduledDeliveryLabel = formatOrderScheduledDelivery(o);
   const orderCustomerType = normalizeOrderCustomerType(o.customer_type);
   const orderCustomerTypeLabel = orderCustomerType === 'minorista' ? 'Minorista' : 'Mayorista';
@@ -2064,7 +2134,7 @@ function showOrderDetail(order){
   const itemsArr = safeParseItems(order.items || []);
   const hasConsumo = (itemsArr || []).some(it => isOrderItemConsumo(it));
   const itemsHtml = (itemsArr || []).map(it=>`<li><strong>${renderOrderItemLabel(it)}</strong>  ${escapeHtml(formatOrderQty(it))}  $${Number(it.meta?.price||0).toFixed(2)}</li>`).join('') || '<li>(sin tems)</li>';
-  const address = [order.user_barrio, order.user_calle, order.user_numeracion].filter(Boolean).join(', ');
+  const address = getOrderAddress(order);
   const paymentMethod = formatOrderPaymentMethod(order);
   const paymentStatus = formatOrderPaymentStatus(order);
   const paymentReference = String((order && order.payment_reference) || '').trim();
@@ -2902,6 +2972,7 @@ async function openPromoModal(editId){
     try{ const resp = await fetch('../catalogo/products.json'); if(resp.ok){ products = await resp.json(); } }catch(e){}
   }
   allProductsCache = (products || []);
+  syncProductLookup(allProductsCache);
   if(!allProductsCache.length){ if(promoProductsList) promoProductsList.innerHTML = '<div class="empty">No se encontraron productos</div>'; }
   else { renderPromoProductsList(allProductsCache); }
   if(editId){

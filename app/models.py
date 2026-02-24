@@ -6,6 +6,8 @@ from app.database import Base
 class Product(Base):
     __tablename__ = "products"
     id = Column(Integer, primary_key=True, index=True)
+    # Internal ERP/product code shown in admin and used for search.
+    code = Column(String(100), nullable=True)
     name = Column(String(200), nullable=False)
     price = Column(Float, nullable=False, default=0.0)
     # Retail price (minorista). If null, frontend falls back to wholesale `price`.

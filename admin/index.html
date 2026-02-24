@@ -96,7 +96,7 @@
 
         <section id="catalog" class="section hidden">
         <div class="controls">
-          <input id="searchInput" placeholder="Buscar producto por nombre o descripción..." />
+          <input id="searchInput" placeholder="Buscar por nombre, descripción o código..." />
           <select id="categoryFilter"><option value="">Todas</option></select>
           <select id="sortSelect"><option value="">Ordenar</option><option value="price_asc">Precio ↑</option><option value="price_desc">Precio ↓</option><option value="name_asc">Nombre A-Z</option><option value="name_desc">Nombre Z-A</option></select>
         </div>
@@ -106,6 +106,7 @@
               <tr>
                 <th>Imagen</th>
                 <th>Nombre</th>
+                <th>Código</th>
                 <th>Categoria</th>
                 <th>Precio mayorista</th>
                 <th>Precio minorista</th>
@@ -271,6 +272,10 @@
           <div class="field">
             <label for="name">Nombre</label>
             <input id="name" name="name" required placeholder="Nombre del producto" />
+          </div>
+          <div class="field">
+            <label for="code">Código</label>
+            <input id="code" name="code" placeholder="Ej: 144" />
           </div>
           <div class="field">
             <label id="priceLabel" for="price">Precio mayorista</label>

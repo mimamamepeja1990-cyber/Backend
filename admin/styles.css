@@ -540,11 +540,13 @@ tr.pending-sync td{ background:linear-gradient(90deg, rgba(255,249,230,0.5), rgb
   /* Responsive table labels */
   #productsTable tbody td:nth-child(1)::before{content:"Imagen"}
   #productsTable tbody td:nth-child(2)::before{content:"Nombre"}
-  #productsTable tbody td:nth-child(3)::before{content:"Categoria"}
-  #productsTable tbody td:nth-child(4)::before{content:"Precio"}
-  #productsTable tbody td:nth-child(5)::before{content:"Stock"}
-  #productsTable tbody td:nth-child(6)::before{content:"Activo"}
-  #productsTable tbody td:nth-child(7)::before{content:"Acciones"}
+  #productsTable tbody td:nth-child(3)::before{content:"Codigo"}
+  #productsTable tbody td:nth-child(4)::before{content:"Categoria"}
+  #productsTable tbody td:nth-child(5)::before{content:"Precio mayorista"}
+  #productsTable tbody td:nth-child(6)::before{content:"Precio minorista"}
+  #productsTable tbody td:nth-child(7)::before{content:"Stock"}
+  #productsTable tbody td:nth-child(8)::before{content:"Activo"}
+  #productsTable tbody td:nth-child(9)::before{content:"Acciones"}
 
   #promotionsTable tbody td:nth-child(1)::before{content:"Nombre"}
   #promotionsTable tbody td:nth-child(2)::before{content:"Tipo"}
