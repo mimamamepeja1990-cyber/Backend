@@ -1023,6 +1023,8 @@ function mergeOrderRecord(existing, incoming){
     'user_numeracion',
     'user_address',
     'user_direccion',
+    'user_lat',
+    'user_lon',
     'delivery_address',
     'user_full_address',
     '_token_preview',
@@ -1708,14 +1710,36 @@ function getOrderAddressSnapshot(order){
       nestedAddress.full_text ||
       nestedAddress.display_name ||
       '';
+    const latCandidates = [
+      order && (order.user_lat || order.user_latitude || order.delivery_lat || order.lat),
+      tokenPreview && (tokenPreview.user_lat || tokenPreview.lat || tokenPreview.latitude || tokenPreview.delivery_lat),
+      nestedAddress && (nestedAddress.lat || nestedAddress.latitude)
+    ];
+    const lonCandidates = [
+      order && (order.user_lon || order.user_lng || order.user_longitude || order.delivery_lon || order.delivery_lng || order.lon || order.lng),
+      tokenPreview && (tokenPreview.user_lon || tokenPreview.user_lng || tokenPreview.lon || tokenPreview.lng || tokenPreview.longitude || tokenPreview.delivery_lon || tokenPreview.delivery_lng),
+      nestedAddress && (nestedAddress.lon || nestedAddress.lng || nestedAddress.longitude)
+    ];
+    let lat = null;
+    let lon = null;
+    for (const candidate of latCandidates){
+      const n = Number(candidate);
+      if (Number.isFinite(n)){ lat = Number(n.toFixed(6)); break; }
+    }
+    for (const candidate of lonCandidates){
+      const n = Number(candidate);
+      if (Number.isFinite(n)){ lon = Number(n.toFixed(6)); break; }
+    }
     return {
       barrio: String(barrio || '').trim(),
       calle: String(calle || '').trim(),
       numeracion: String(numeracion || '').trim(),
-      rawAddress: String(rawAddress || '').trim()
+      rawAddress: String(rawAddress || '').trim(),
+      lat,
+      lon
     };
   }catch(_){
-    return { barrio: '', calle: '', numeracion: '', rawAddress: '' };
+    return { barrio: '', calle: '', numeracion: '', rawAddress: '', lat: null, lon: null };
   }
 }
 
@@ -1733,11 +1757,28 @@ function getOrderAddress(order){
 function buildOrderGoogleMapsUrl(order){
   try{
     const addr = getOrderAddressSnapshot(order);
+    if (Number.isFinite(addr.lat) && Number.isFinite(addr.lon)){
+      const q = `${Number(addr.lat).toFixed(6)},${Number(addr.lon).toFixed(6)}`;
+      return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(q);
+    }
     const street = [addr.calle, addr.numeracion].filter(Boolean).join(' ').trim();
-    let query = addr.rawAddress || [street, addr.barrio].filter(Boolean).join(', ');
+    const queryParts = [];
+    const pushPart = (value) => {
+      const part = String(value || '').replace(/\s+/g, ' ').trim();
+      if (!part) return;
+      const normalized = part.toLowerCase();
+      if (queryParts.some((p) => p.toLowerCase() === normalized)) return;
+      queryParts.push(part);
+    };
+    pushPart(street);
+    pushPart(addr.barrio);
+    pushPart(addr.rawAddress);
+    let query = queryParts.join(', ');
     query = String(query || '').replace(/\s+/g, ' ').trim();
     if (!query) return '';
-    if (!/mendoza/i.test(query)) query = query + ', Mendoza, Argentina';
+    if (!/las heras/i.test(query) && /las heras/i.test(addr.rawAddress || '')) query = query + ', Las Heras';
+    if (!/mendoza/i.test(query)) query = query + ', Mendoza';
+    if (!/argentina/i.test(query)) query = query + ', Argentina';
     return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(query);
   }catch(_){ return ''; }
 }
