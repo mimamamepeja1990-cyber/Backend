@@ -389,6 +389,49 @@ body.dark input, body.dark textarea{background:#071231;color:#e6eef8;border-colo
   line-height:1.35;
   word-break:break-word;
 }
+.preparation-row-items{
+  align-items:flex-start;
+}
+.prep-items-value{
+  min-width:0;
+}
+.prep-items-list{
+  margin:0;
+  padding-left:18px;
+  display:flex;
+  flex-direction:column;
+  gap:4px;
+}
+.prep-items-list li{
+  color:#111827;
+  font-weight:600;
+  line-height:1.35;
+}
+.prep-items-more{
+  list-style:none;
+  margin-top:2px;
+}
+.prep-more-btn{
+  border:0;
+  background:transparent;
+  padding:0;
+  color:#4338ca;
+  font-size:12px;
+  font-weight:800;
+  text-decoration:underline;
+  cursor:pointer;
+}
+.prep-more-btn:hover{
+  text-decoration:none;
+}
+.prep-item-name{
+  color:#111827;
+}
+.prep-item-qty{
+  margin-left:6px;
+  color:#4b5563;
+  font-weight:800;
+}
 .prep-value-total{
   color:#0f172a;
   font-size:16px;

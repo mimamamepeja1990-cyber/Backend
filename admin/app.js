@@ -1340,6 +1340,7 @@ function formatOrderPaymentStatus(order){
 }
 
 const DEFAULT_ORDER_CUTOFF_HOUR = 18;
+const PREPARATIONS_ITEMS_PREVIEW_LIMIT = 4;
 
 function normalizeIsoDateKey(value){
   const raw = String(value || '').trim();
@@ -1751,6 +1752,28 @@ function getOrderItemsSummary(order){
   }catch(_){ return 'Sin items'; }
 }
 
+function getPreparationItemsListHtml(order){
+  try{
+    const itemsArr = safeParseItems(order && order.items ? order.items : []);
+    if (!Array.isArray(itemsArr) || itemsArr.length === 0){
+      return '<span class="muted">Sin items</span>';
+    }
+    const visibleItems = itemsArr.slice(0, PREPARATIONS_ITEMS_PREVIEW_LIMIT);
+    const hiddenCount = Math.max(0, itemsArr.length - visibleItems.length);
+    const listItems = visibleItems.map((it) => {
+      const name = getOrderItemSummaryLabel(it) || 'Item';
+      const qty = formatOrderQty(it);
+      return `<li><span class="prep-item-name">${escapeHtml(name)}</span><span class="prep-item-qty">x${escapeHtml(qty)}</span></li>`;
+    }).join('');
+    const moreRow = hiddenCount > 0
+      ? `<li class="prep-items-more"><button type="button" class="prep-more-btn prepOpenFullOrderBtn" data-id="${escapeHtml(order && order.id)}">+${hiddenCount} más (ver pedido completo)</button></li>`
+      : '';
+    return `<ul class="prep-items-list">${listItems}${moreRow}</ul>`;
+  }catch(_){
+    return '<span class="muted">Sin items</span>';
+  }
+}
+
 function buildPreparationsSearchIndex(order){
   try{
     const itemsArr = safeParseItems(order && order.items ? order.items : []);
@@ -1875,12 +1898,12 @@ function renderPreparations(list){
         <div class="preparation-row"><span class="prep-label">Cliente</span><span class="prep-value">${escapeHtml(customerName)}</span></div>
         <div class="preparation-row"><span class="prep-label">Email</span><span class="prep-value">${escapeHtml(customerEmail)}</span></div>
         <div class="preparation-row"><span class="prep-label">Dirección</span><span class="prep-value">${escapeHtml(getOrderAddress(order))}</span></div>
-        <div class="preparation-row"><span class="prep-label">Items</span><span class="prep-value">${escapeHtml(getOrderItemsSummary(order))}</span></div>
+        <div class="preparation-row preparation-row-items"><span class="prep-label">Items</span><div class="prep-value prep-items-value">${getPreparationItemsListHtml(order)}</div></div>
         <div class="preparation-row"><span class="prep-label">Total</span><span class="prep-value prep-value-total">$${Number(order.total || 0).toFixed(2)}</span></div>
         <div class="preparation-footer">
           <span class="prep-status-badge ${isPrepared ? 'is-prepared' : 'is-seen'}">${escapeHtml(statusLabel)}</span>
           <div class="preparation-actions">
-            <button class="btn small prepViewOrderBtn" data-id="${escapeHtml(order.id)}">Ver detalle</button>
+            <button class="btn small prepViewOrderBtn" data-id="${escapeHtml(order.id)}">Ver pedido completo</button>
             ${isPrepared
               ? '<span class="prep-status-chip">Preparado</span>'
               : `<button class="btn small prepMarkPreparedBtn prep-mark-btn" data-id="${escapeHtml(order.id)}">Marcar preparado</button>`
@@ -1894,20 +1917,25 @@ function renderPreparations(list){
     preparationsList.appendChild(dayBlock);
   });
 
-  preparationsList.querySelectorAll('.prepViewOrderBtn').forEach((btn) => {
+  const openPreparationOrderDetail = async (idRaw) => {
+    const id = String(idRaw || '').trim();
+    if (!id) return;
+    const existing = byId.get(id);
+    if (existing){
+      showOrderDetail(existing);
+      return;
+    }
+    try{
+      const fetched = await fetchOrders(String(id));
+      const order = (fetched || []).find((x) => String(x.id) === id) || (fetched && fetched[0]);
+      if (order) showOrderDetail(order);
+    }catch(_){ }
+  };
+
+  preparationsList.querySelectorAll('.prepViewOrderBtn, .prepOpenFullOrderBtn').forEach((btn) => {
     btn.onclick = async () => {
       const id = btn && btn.dataset ? String(btn.dataset.id || '') : '';
-      if (!id) return;
-      const existing = byId.get(id);
-      if (existing){
-        showOrderDetail(existing);
-        return;
-      }
-      try{
-        const fetched = await fetchOrders(String(id));
-        const order = (fetched || []).find((x) => String(x.id) === id) || (fetched && fetched[0]);
-        if (order) showOrderDetail(order);
-      }catch(_){ }
+      await openPreparationOrderDetail(id);
     };
   });
 
