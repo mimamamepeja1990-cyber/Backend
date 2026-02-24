@@ -399,6 +399,6 @@
     window.addEventListener('error', function(e){ try{ window.adminFallback('JS error: ' + (e && e.message ? e.message : e)); }catch(_){} });
     window.addEventListener('unhandledrejection', function(e){ try{ var r = e && e.reason ? (e.reason.message || JSON.stringify(e.reason)) : e; window.adminFallback('Unhandled promise rejection: ' + r); }catch(_){} });
   </script>
-  <script src="app.js?v=4"></script>
+  <script src="app.js?v=5"></script>
 </body>
 </html>

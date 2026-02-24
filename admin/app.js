@@ -1757,28 +1757,50 @@ function getOrderAddress(order){
 function buildOrderGoogleMapsUrl(order){
   try{
     const addr = getOrderAddressSnapshot(order);
-    if (Number.isFinite(addr.lat) && Number.isFinite(addr.lon)){
-      const q = `${Number(addr.lat).toFixed(6)},${Number(addr.lon).toFixed(6)}`;
+    const parseCoord = (value) => {
+      if (value === null || typeof value === 'undefined') return NaN;
+      if (typeof value === 'string'){
+        const normalized = value.trim().replace(',', '.');
+        return Number(normalized);
+      }
+      return Number(value);
+    };
+    const lat = parseCoord(addr.lat);
+    const lon = parseCoord(addr.lon);
+    if (Number.isFinite(lat) && Number.isFinite(lon)){
+      const q = `${Number(lat).toFixed(6)},${Number(lon).toFixed(6)}`;
       return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(q);
     }
-    const street = [addr.calle, addr.numeracion].filter(Boolean).join(' ').trim();
-    const queryParts = [];
+    let street = [addr.calle, addr.numeracion].filter(Boolean).join(' ').trim();
+    if (!street){
+      const first = String(addr.rawAddress || '').split(',')[0] || '';
+      if (/\d/.test(first)) street = first.trim();
+    }
+    const barrioClean = String(addr.barrio || '')
+      .replace(/\bM\d{4}\b/ig, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const combinedArea = `${barrioClean} ${String(addr.rawAddress || '')}`.toLowerCase();
+    const localityHint = /las heras/i.test(combinedArea) ? 'Las Heras' : '';
+    const structuredParts = [];
     const pushPart = (value) => {
       const part = String(value || '').replace(/\s+/g, ' ').trim();
       if (!part) return;
       const normalized = part.toLowerCase();
-      if (queryParts.some((p) => p.toLowerCase() === normalized)) return;
-      queryParts.push(part);
+      if (structuredParts.some((p) => p.toLowerCase() === normalized)) return;
+      structuredParts.push(part);
     };
     pushPart(street);
-    pushPart(addr.barrio);
-    pushPart(addr.rawAddress);
-    let query = queryParts.join(', ');
-    query = String(query || '').replace(/\s+/g, ' ').trim();
+    pushPart(barrioClean);
+    if (localityHint) pushPart(localityHint);
+    let query = structuredParts.join(', ');
+    if (!query){
+      query = String(addr.rawAddress || '').replace(/\s+/g, ' ').trim();
+    }
     if (!query) return '';
-    if (!/las heras/i.test(query) && /las heras/i.test(addr.rawAddress || '')) query = query + ', Las Heras';
-    if (!/mendoza/i.test(query)) query = query + ', Mendoza';
-    if (!/argentina/i.test(query)) query = query + ', Argentina';
+    if (localityHint && !/las heras/i.test(query)) query = `${query}, Las Heras`;
+    if (!/mendoza/i.test(query)) query = `${query}, Mendoza`;
+    if (!/argentina/i.test(query)) query = `${query}, Argentina`;
     return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(query);
   }catch(_){ return ''; }
 }
