@@ -12,6 +12,7 @@ logger = logging.getLogger('catalog_api.crud')
 import traceback
 import datetime
 import os
+import re
 from sqlalchemy.exc import InternalError
 from zoneinfo import ZoneInfo
 
@@ -242,6 +243,26 @@ def _safe_execute(db, stmt, params=None):
                 pass
             return db.execute(text(stmt), params)
         raise
+
+
+def _extract_missing_column_from_error(msg: str) -> Optional[str]:
+    try:
+        raw = str(msg or '')
+        if not raw:
+            return None
+        patterns = (
+            r'column\s+"([^"]+)"',
+            r"column\s+'([^']+)'",
+            r"unknown column\s+'([^']+)'",
+            r'no such column:\s*([A-Za-z0-9_]+)',
+        )
+        for pattern in patterns:
+            m = re.search(pattern, raw, flags=re.IGNORECASE)
+            if m and m.group(1):
+                return str(m.group(1)).strip()
+        return None
+    except Exception:
+        return None
 
 
 def _append_server_log(msg, tb=None):
@@ -1074,11 +1095,13 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
     except Exception:
         pass
     optional = [
+        'source',
         'customer_type',
         'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
         '_token_received', '_token_preview',
         'payment_method', 'payment_status', 'payment_reference',
         'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
+        'contains_consumos',
     ]
     try:
         bind = db.get_bind()
@@ -1220,9 +1243,14 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
     try:
         # Ensure we have a set of existing columns (fallback to conservative set)
         insert_cols = [c for c in kwargs.keys() if (not existing_cols) or (c in existing_cols)]
-        # Always ensure required columns are present
+        # Always ensure required columns are present. If we know the DB schema
+        # and a required column is missing there, do not force it.
         for req in ('items', 'total', 'status'):
-            if req not in insert_cols and req in kwargs:
+            if req not in kwargs:
+                continue
+            if existing_cols and req not in existing_cols:
+                continue
+            if req not in insert_cols:
                 insert_cols.insert(0, req)
 
         if not insert_cols:
@@ -1576,15 +1604,29 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
             for f in optional:
                 if f in kwargs:
                     kwargs.pop(f, None)
+            # If the DB explicitly reported a missing column, drop it from the
+            # retry payload even if it was not part of `optional`.
+            try:
+                missing_col = _extract_missing_column_from_error(msg)
+                if missing_col and missing_col in kwargs:
+                    kwargs.pop(missing_col, None)
+            except Exception:
+                pass
             # Recompute insert_cols
             insert_cols = [c for c in kwargs.keys() if (not existing_cols) or (c in existing_cols)]
+            for req in ('items', 'total', 'status'):
+                if req not in kwargs:
+                    continue
+                if existing_cols and req not in existing_cols:
+                    continue
+                if req not in insert_cols:
+                    insert_cols.insert(0, req)
             cols_sql = ', '.join(insert_cols)
             vals_sql = ', '.join(':' + c for c in insert_cols)
             sql = f'INSERT INTO orders ({cols_sql}) VALUES ({vals_sql}){returning}'
             params = {k: kwargs[k] for k in insert_cols}
             try:
                 res = _safe_execute(db, sql, params)
-                db.commit()
                 if 'postgres' in dialect_name:
                     try:
                         row = res.fetchone()
@@ -1600,6 +1642,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                     except Exception:
                         new_id = None
                         new_created_at = None
+                db.commit()
                 if new_id is not None:
                     objd = {
                         'id': new_id,
@@ -1645,6 +1688,25 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                 raise
         else:
             raise
+
+    # Build a minimal fallback object if DB retrieval unexpectedly returned None.
+    if obj is None:
+        try:
+            guessed_id = None
+            try:
+                guessed_id = _safe_scalar(db, "SELECT MAX(id) FROM orders")
+            except Exception:
+                guessed_id = None
+            obj = SimpleNamespace(
+                id=int(guessed_id) if guessed_id is not None else 0,
+                items=items_list,
+                total=total_val,
+                status=kwargs.get('status', 'nuevo'),
+                source=kwargs.get('source'),
+                customer_type=kwargs.get('customer_type'),
+            )
+        except Exception:
+            raise HTTPException(status_code=500, detail='Could not create order')
 
     # ensure returned object exposes `items` as a Python list (not a JSON string)
     try:
@@ -1794,6 +1856,149 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
     except Exception:
         pass
     return obj
+
+
+def create_order_minimal(db: Session, raw_payload: dict, current_user: Optional[dict] = None):
+    """Emergency order persistence path.
+
+    Stores a minimal order snapshot without stock-side effects, used only as a
+    fallback when the full `create_order` flow raises unexpectedly.
+    """
+    data = raw_payload if isinstance(raw_payload, dict) else {}
+    items_input = data.get('items') if isinstance(data.get('items'), list) else []
+    items_list = []
+    for it in items_input:
+        try:
+            if isinstance(it, dict):
+                item_id = it.get('id', '')
+                item_qty = it.get('qty', 1)
+                item_meta = it.get('meta') if isinstance(it.get('meta'), dict) else {}
+            else:
+                item_id = getattr(it, 'id', '')
+                item_qty = getattr(it, 'qty', 1)
+                item_meta = getattr(it, 'meta', {}) if isinstance(getattr(it, 'meta', {}), dict) else {}
+            items_list.append({
+                'id': str(item_id or ''),
+                'qty': float(item_qty or 1),
+                'meta': item_meta or {},
+            })
+        except Exception:
+            continue
+
+    try:
+        total_val = float(data.get('total', 0) or 0)
+    except Exception:
+        total_val = 0.0
+
+    source = str(data.get('source') or 'web').strip().lower()
+    if source not in ('web', 'app'):
+        source = 'web'
+
+    customer_type = str(data.get('customer_type') or 'mayorista').strip().lower()
+    if customer_type not in ('mayorista', 'minorista'):
+        customer_type = 'mayorista'
+
+    kwargs = {
+        'items': _json.dumps(items_list, ensure_ascii=False),
+        'total': total_val,
+        'status': str(data.get('status') or 'nuevo'),
+        'source': source,
+        'customer_type': customer_type,
+    }
+
+    for fld in (
+        'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
+        'payment_method', 'payment_status', 'payment_reference',
+        'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
+    ):
+        try:
+            val = data.get(fld)
+        except Exception:
+            val = None
+        if val is None:
+            continue
+        kwargs[fld] = val
+
+    # token fallback for missing user snapshot values
+    try:
+        if current_user and not kwargs.get('user_email'):
+            kwargs['user_email'] = current_user.get('email') or current_user.get('sub')
+        if current_user and not kwargs.get('user_full_name'):
+            kwargs['user_full_name'] = current_user.get('full_name') or current_user.get('name')
+    except Exception:
+        pass
+
+    try:
+        bind = db.get_bind()
+        insp = inspect(bind)
+        existing_cols = {c['name'] for c in insp.get_columns('orders')}
+    except Exception:
+        existing_cols = set()
+
+    insert_cols = [c for c in kwargs.keys() if (not existing_cols) or (c in existing_cols)]
+    for req in ('items', 'total', 'status'):
+        if req in kwargs and (not existing_cols or req in existing_cols) and req not in insert_cols:
+            insert_cols.insert(0, req)
+
+    if not insert_cols:
+        raise RuntimeError('No columns available for minimal order insert')
+
+    cols_sql = ', '.join(insert_cols)
+    vals_sql = ', '.join(':' + c for c in insert_cols)
+
+    bind = db.get_bind()
+    dialect_name = getattr(bind, 'dialect', None).name if bind and getattr(bind, 'dialect', None) else ''
+    returning = ' RETURNING id, created_at' if 'postgres' in dialect_name else ''
+    sql = f'INSERT INTO orders ({cols_sql}) VALUES ({vals_sql}){returning}'
+
+    params = {k: kwargs[k] for k in insert_cols}
+    if 'postgres' in dialect_name and 'items' in params:
+        try:
+            params['items'] = _json.dumps(items_list, ensure_ascii=False)
+        except Exception:
+            pass
+
+    res = _safe_execute(db, sql, params)
+    new_id = None
+    new_created_at = None
+    if 'postgres' in dialect_name:
+        try:
+            row = res.fetchone()
+            if row is not None:
+                new_id = row[0]
+                try:
+                    new_created_at = row[1]
+                except Exception:
+                    new_created_at = None
+        except Exception:
+            new_id = None
+            new_created_at = None
+    db.commit()
+
+    if new_id is None:
+        try:
+            new_id = _safe_scalar(db, 'SELECT MAX(id) FROM orders')
+        except Exception:
+            new_id = 0
+
+    objd = {
+        'id': int(new_id or 0),
+        'items': items_list,
+        'total': total_val,
+        'status': kwargs.get('status', 'nuevo'),
+        'created_at': new_created_at,
+        'source': kwargs.get('source', source),
+        'customer_type': kwargs.get('customer_type', customer_type),
+    }
+    for fld in (
+        'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
+        'payment_method', 'payment_status', 'payment_reference',
+        'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
+    ):
+        if fld in kwargs:
+            objd[fld] = kwargs.get(fld)
+
+    return SimpleNamespace(**objd)
 
 
 def get_orders(db: Session, skip: int = 0, limit: int = 200, source: Optional[str] = None):
