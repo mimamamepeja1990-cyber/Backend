@@ -277,6 +277,127 @@ def _append_server_log(msg, tb=None):
         pass
 
 
+def _orders_items_char_limit(columns_meta) -> Optional[int]:
+    """Infer max character length for orders.items when DB uses VARCHAR."""
+    try:
+        cols = columns_meta or []
+        for col in cols:
+            try:
+                if str(col.get('name') or '').strip().lower() != 'items':
+                    continue
+                ctype = col.get('type')
+                length = getattr(ctype, 'length', None)
+                if isinstance(length, int) and length > 0:
+                    return int(length)
+                ctype_txt = str(ctype or '').lower()
+                m = re.search(r'varchar\((\d+)\)', ctype_txt)
+                if m:
+                    return int(m.group(1))
+            except Exception:
+                continue
+        return None
+    except Exception:
+        return None
+
+
+def _compact_order_item_for_storage(item, include_meta: bool = True):
+    out = {}
+    try:
+        out['id'] = str((item or {}).get('id', '')).strip()[:80]
+    except Exception:
+        out['id'] = ''
+    try:
+        qty_val = float((item or {}).get('qty', 1) or 1)
+    except Exception:
+        qty_val = 1.0
+    out['qty'] = qty_val
+
+    if not include_meta:
+        return out
+
+    try:
+        meta = (item or {}).get('meta')
+    except Exception:
+        meta = None
+    if not isinstance(meta, dict) or not meta:
+        return out
+
+    keep = (
+        'name', 'price', 'code', 'codigo',
+        'unit_type', 'sale_unit', 'kg_per_unit', 'ordered_weight_kg',
+        'qty_label', 'key', 'consumo', 'force_regular', 'price_mode',
+        'promo_id', 'consumo_id',
+    )
+    compact_meta = {}
+    for key in keep:
+        if key not in meta:
+            continue
+        val = meta.get(key)
+        if isinstance(val, str):
+            max_len = 140 if key in ('name', 'qty_label') else 80
+            compact_meta[key] = val[:max_len]
+        elif isinstance(val, (int, float, bool)) or val is None:
+            compact_meta[key] = val
+    if compact_meta:
+        out['meta'] = compact_meta
+    return out
+
+
+def _serialize_order_items_for_storage(items_list, max_chars: Optional[int] = None) -> str:
+    """Serialize items JSON, shrinking metadata when the DB column is constrained."""
+    def _dump(payload):
+        return _json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
+
+    try:
+        max_len = int(max_chars) if max_chars is not None else None
+    except Exception:
+        max_len = None
+    if max_len is not None and max_len <= 0:
+        max_len = None
+
+    safe_items = items_list if isinstance(items_list, list) else []
+    candidates = [
+        safe_items,
+        [_compact_order_item_for_storage(it, include_meta=True) for it in safe_items],
+        [_compact_order_item_for_storage(it, include_meta=False) for it in safe_items],
+    ]
+
+    for candidate in candidates:
+        try:
+            payload = candidate if isinstance(candidate, list) else []
+            dumped = _dump(payload)
+            if max_len is None or len(dumped) <= max_len:
+                return dumped
+        except Exception:
+            continue
+
+    # Hard-cap fallback: keep as many minimal rows as fit.
+    minimal = candidates[-1] if isinstance(candidates[-1], list) else []
+    if max_len is None:
+        return _dump(minimal)
+
+    fitted = []
+    for row in minimal:
+        trial = fitted + [row]
+        trial_dumped = _dump(trial)
+        if len(trial_dumped) <= max_len:
+            fitted = trial
+            continue
+        break
+
+    if len(fitted) < len(minimal):
+        truncated = max(0, len(minimal) - len(fitted))
+        marker = {'id': '__truncated__', 'qty': float(truncated)}
+        trial = fitted + [marker]
+        while trial and len(_dump(trial)) > max_len:
+            trial.pop()
+        fitted = trial
+
+    if fitted:
+        return _dump(fitted)
+    return _dump([])
+
+
 def get_products(db: Session, skip: int = 0, limit: int = 100, q: Optional[str]=None, category: Optional[str]=None, active: Optional[bool]=None, sort: Optional[str]=None) -> List[models.Product]:
     try:
         try:
@@ -901,7 +1022,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
     except Exception:
         items_list = []
 
-    items_json = _json.dumps(items_list, ensure_ascii=False)
+    items_json = _serialize_order_items_for_storage(items_list, max_chars=None)
 
     # Validate stock availability: consider near-expiry consumos and total stock.
     # Read consumos.json to get available near-expiry quantities (best-effort, file may not exist).
@@ -967,7 +1088,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
 
         items_list, pre_alloc_consumos, consumos_map = _prealloc_consumos(items_list)
         try:
-            items_json = _json.dumps(items_list, ensure_ascii=False)
+            items_json = _serialize_order_items_for_storage(items_list, max_chars=None)
         except Exception:
             pass
     except Exception:
@@ -1037,11 +1158,6 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
             bind_check = None
     except Exception:
         bind_check = None
-    # We'll determine dialect later (after we have a bind). For now do a safe truncation
-    # for non-Postgres backends that store JSON as TEXT to avoid excessively large values.
-    if len(items_json) > 16000:
-        items_json = items_json[:16000]
-
     # ensure total is numeric
     try:
         total_val = float(getattr(payload, 'total', 0) or 0)
@@ -1106,9 +1222,24 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
     try:
         bind = db.get_bind()
         insp = inspect(bind)
-        existing_cols = {c['name'] for c in insp.get_columns('orders')}
+        order_columns = insp.get_columns('orders')
+        existing_cols = {c['name'] for c in order_columns}
     except Exception:
+        order_columns = []
         existing_cols = set()
+
+    try:
+        items_char_limit = _orders_items_char_limit(order_columns)
+    except Exception:
+        items_char_limit = None
+    try:
+        items_json = _serialize_order_items_for_storage(items_list, max_chars=items_char_limit)
+    except Exception:
+        try:
+            items_json = _serialize_order_items_for_storage(items_list, max_chars=None)
+        except Exception:
+            items_json = _json.dumps(items_list, ensure_ascii=False)
+    kwargs['items'] = items_json
 
     preview_candidate = {}
     for f in optional:
@@ -1268,15 +1399,8 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
         # driver stores JSONB. Detect dialect and convert `items` param when
         # appropriate. For SQLite/text backends leave it as a JSON string.
         try:
-            # For Postgres drivers, ensure the `items` parameter is a JSON string
-            # so psycopg2 can adapt it reliably into JSONB. Sending a raw Python
-            # list-of-dicts can trigger "can't adapt type 'dict'" errors.
             if 'postgres' in dialect_name and 'items' in params:
-                try:
-                    params['items'] = _json.dumps(items_list, ensure_ascii=False)
-                except Exception:
-                    # fallback to string conversion
-                    params['items'] = str(items_list)
+                params['items'] = kwargs.get('items')
         except Exception:
             pass
 
@@ -1626,6 +1750,11 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
             sql = f'INSERT INTO orders ({cols_sql}) VALUES ({vals_sql}){returning}'
             params = {k: kwargs[k] for k in insert_cols}
             try:
+                if 'postgres' in dialect_name and 'items' in params:
+                    params['items'] = kwargs.get('items')
+            except Exception:
+                pass
+            try:
                 res = _safe_execute(db, sql, params)
                 if 'postgres' in dialect_name:
                     try:
@@ -1899,7 +2028,7 @@ def create_order_minimal(db: Session, raw_payload: dict, current_user: Optional[
         customer_type = 'mayorista'
 
     kwargs = {
-        'items': _json.dumps(items_list, ensure_ascii=False),
+        'items': _serialize_order_items_for_storage(items_list, max_chars=None),
         'total': total_val,
         'status': str(data.get('status') or 'nuevo'),
         'source': source,
@@ -1931,9 +2060,20 @@ def create_order_minimal(db: Session, raw_payload: dict, current_user: Optional[
     try:
         bind = db.get_bind()
         insp = inspect(bind)
-        existing_cols = {c['name'] for c in insp.get_columns('orders')}
+        order_columns = insp.get_columns('orders')
+        existing_cols = {c['name'] for c in order_columns}
     except Exception:
+        order_columns = []
         existing_cols = set()
+
+    try:
+        items_char_limit = _orders_items_char_limit(order_columns)
+    except Exception:
+        items_char_limit = None
+    try:
+        kwargs['items'] = _serialize_order_items_for_storage(items_list, max_chars=items_char_limit)
+    except Exception:
+        kwargs['items'] = _serialize_order_items_for_storage(items_list, max_chars=None)
 
     insert_cols = [c for c in kwargs.keys() if (not existing_cols) or (c in existing_cols)]
     for req in ('items', 'total', 'status'):
@@ -1953,10 +2093,7 @@ def create_order_minimal(db: Session, raw_payload: dict, current_user: Optional[
 
     params = {k: kwargs[k] for k in insert_cols}
     if 'postgres' in dialect_name and 'items' in params:
-        try:
-            params['items'] = _json.dumps(items_list, ensure_ascii=False)
-        except Exception:
-            pass
+        params['items'] = kwargs.get('items')
 
     res = _safe_execute(db, sql, params)
     new_id = None
