@@ -103,6 +103,8 @@ class OrderCreate(BaseModel):
     user_barrio: Optional[str] = None
     user_calle: Optional[str] = None
     user_numeracion: Optional[str] = None
+    user_postal_code: Optional[str] = None
+    user_department: Optional[str] = None
     # token preview fields (may be populated server-side when a bearer token is provided)
     _token_received: Optional[bool] = None
     _token_preview: Optional[dict] = None
@@ -130,6 +132,9 @@ class OrderResponse(BaseModel):
     user_barrio: Optional[str] = None
     user_calle: Optional[str] = None
     user_numeracion: Optional[str] = None
+    user_postal_code: Optional[str] = None
+    user_department: Optional[str] = None
+    maps_url: Optional[str] = None
     created_at: Optional[datetime] = None
     # Optional token preview fields (added so GET /orders can return token previews)
     _token_received: Optional[bool] = None

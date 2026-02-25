@@ -248,12 +248,47 @@ let productLookupById = new Map();
 const PROMO_KEY = 'admin_promotions_v1';
 const FILTERS_KEY = 'admin_filters_v1';
 const PRODUCT_CATEGORIES_KEY = 'admin_product_categories_v1';
-const ORDER_MAPS_COORD_CACHE_KEY = 'admin_order_maps_coords_v4';
+const ORDER_MAPS_COORD_CACHE_KEY = 'admin_order_maps_coords_v5';
 const MENDOZA_GEO_BOUNDS = Object.freeze({
   minLat: -37.7,
   maxLat: -31.0,
   minLon: -70.7,
   maxLon: -66.2,
+});
+const MENDOZA_POSTAL_TO_DEPARTMENTS = Object.freeze({
+  '5500': ['Capital'],
+  '5501': ['Godoy Cruz'],
+  '5502': ['Godoy Cruz'],
+  '5503': ['Godoy Cruz'],
+  '5507': ['Lujan de Cuyo'],
+  '5509': ['Lujan de Cuyo'],
+  '5511': ['Lujan de Cuyo'],
+  '5513': ['Maipu'],
+  '5515': ['Maipu'],
+  '5517': ['Maipu'],
+  '5519': ['Guaymallen'],
+  '5521': ['Guaymallen'],
+  '5523': ['Guaymallen'],
+  '5525': ['Guaymallen'],
+  '5533': ['Lavalle'],
+  '5535': ['Lavalle'],
+  '5539': ['Las Heras'],
+  '5540': ['Las Heras'],
+  '5541': ['Las Heras'],
+  '5549': ['Lujan de Cuyo'],
+  '5560': ['Tunuyan'],
+  '5561': ['Tupungato'],
+  '5569': ['San Carlos'],
+  '5570': ['San Martin'],
+  '5573': ['San Martin', 'Junin'],
+  '5575': ['Junin'],
+  '5577': ['Rivadavia'],
+  '5590': ['La Paz'],
+  '5596': ['Santa Rosa'],
+  '5600': ['San Rafael'],
+  '5603': ['San Rafael'],
+  '5613': ['Malargue'],
+  '5620': ['General Alvear']
 });
 const ORDER_MAPS_COORD_TTL_MS = 1000 * 60 * 60 * 24 * 45;
 let orderMapsCoordCache = { byOrderId: {}, byAddressKey: {}, updatedAt: 0 };
@@ -350,7 +385,9 @@ function buildOrderAddressCacheKeyFromSnapshot(addr){
     const street = [addr.calle, addr.numeracion].filter(Boolean).join(' ').trim();
     const raw = String(addr.rawAddress || '').trim();
     const barrio = String(addr.barrio || '').trim();
-    const base = [street, barrio, raw].filter(Boolean).join(' | ');
+    const postal = normalizeOrderPostalCode(addr.postalCode || addr.postal_code || '');
+    const department = String(addr.department || '').trim();
+    const base = [street, barrio, department, postal, raw].filter(Boolean).join(' | ');
     return normalizeOrderMapsKeyToken(base);
   }catch(_){ return ''; }
 }
@@ -459,6 +496,22 @@ function normalizeOrderPostalDigits(value){
   }catch(_){ return ''; }
 }
 
+function normalizeOrderPostalCode(value){
+  try{
+    const digits = normalizeOrderPostalDigits(value);
+    return digits ? ('M' + digits) : '';
+  }catch(_){ return ''; }
+}
+
+function getOrderPostalDepartments(value){
+  try{
+    const digits = normalizeOrderPostalDigits(value);
+    if (!digits) return [];
+    const deps = MENDOZA_POSTAL_TO_DEPARTMENTS[digits];
+    return Array.isArray(deps) ? deps.slice() : [];
+  }catch(_){ return []; }
+}
+
 function isLikelyLasHerasPostal(postal){
   const digits = normalizeOrderPostalDigits(postal);
   // Las Heras commonly uses M5539 / M5540
@@ -477,10 +530,16 @@ function buildOrderGeocodeQueryFromSnapshot(addr){
       .replace(/\bM\d{4}\b/ig, '')
       .replace(/\s+/g, ' ')
       .trim();
-    const postalMatch = String(addr.rawAddress || '').match(/\bM?\d{4}\b/i);
-    const postal = postalMatch ? String(postalMatch[0] || '').trim() : '';
+    const postal = normalizeOrderPostalCode(addr.postalCode || addr.postal_code || String(addr.rawAddress || ''));
     const probe = `${street} ${barrio} ${String(addr.rawAddress || '')}`;
-    const locality = (/las heras/i.test(probe) || isLikelyLasHerasPostal(postal)) ? 'Las Heras' : '';
+    const postalDeps = getOrderPostalDepartments(postal);
+    const departmentToken = normalizeOrderMapsKeyToken(addr.department || '');
+    let locality = String(addr.department || '').trim();
+    if (!locality && departmentToken){
+      locality = departmentToken;
+    }
+    if (!locality && /las heras/i.test(probe)) locality = 'Las Heras';
+    if (!locality && postalDeps.length) locality = String(postalDeps[0] || '').trim();
     const parts = [];
     const pushPart = (value) => {
       const part = String(value || '').replace(/\s+/g, ' ').trim();
@@ -539,7 +598,7 @@ function buildOrderArcGisHints(addr){
     const numberMatch = numberRaw.match(/\d{1,6}/);
     const number = numberMatch ? String(numberMatch[0]) : '';
     const postalRawMatch = raw.match(/\bM?\d{4}\b/i);
-    const postal = normalizeOrderPostalToken(postalRawMatch ? postalRawMatch[0] : '');
+    const postal = normalizeOrderPostalToken(addr && (addr.postalCode || addr.postal_code) || (postalRawMatch ? postalRawMatch[0] : ''));
     const areaProbe = normalizeOrderMapsKeyToken([addr && addr.barrio, raw, streetRaw].filter(Boolean).join(' '));
     const wantsLasHeras = areaProbe.includes('las heras') || isLikelyLasHerasPostal(postal);
     return { streetTokens, number, postal, wantsLasHeras };
@@ -1380,6 +1439,8 @@ function mergeOrderRecord(existing, incoming){
     'user_barrio',
     'user_calle',
     'user_numeracion',
+    'user_postal_code',
+    'user_department',
     'user_address',
     'user_direccion',
     'user_lat',
@@ -1395,6 +1456,7 @@ function mergeOrderRecord(existing, incoming){
     'delivery_cutoff_applied',
     'delivery_timezone',
     'delivery_cutoff_hour',
+    'maps_url',
   ];
   keepIfIncomingMissing.forEach((field) => {
     if (!hasMeaningfulOrderValue(next[field]) && hasMeaningfulOrderValue(prev[field])){
@@ -1473,6 +1535,8 @@ async function fetchOrders(q = '', date = '', source = ''){
                 if(!o.user_barrio && tp.barrio) o.user_barrio = tp.barrio;
                 if(!o.user_calle && tp.calle) o.user_calle = tp.calle;
                 if(!o.user_numeracion && tp.numeracion) o.user_numeracion = tp.numeracion;
+                if(!o.user_postal_code) o.user_postal_code = tp.postal_code || tp.user_postal_code || (tp.address && (tp.address.postal_code || tp.address.postcode)) || '';
+                if(!o.user_department) o.user_department = tp.department || tp.user_department || (tp.address && tp.address.department) || '';
                 const ctExisting = String(o.customer_type || '').trim().toLowerCase();
                 if((ctExisting !== 'mayorista' && ctExisting !== 'minorista') && tp.customer_type){
                   const ctPreview = String(tp.customer_type || '').trim().toLowerCase();
@@ -2064,12 +2128,39 @@ function getOrderAddressSnapshot(order){
     )) ||
       tokenPreview.user_address ||
       tokenPreview.direccion ||
+      tokenPreview.query_hint ||
       tokenPreview.full_text ||
       tokenPreview.label ||
       nestedAddress.direccion ||
+      nestedAddress.query_hint ||
       nestedAddress.full_text ||
       nestedAddress.display_name ||
       '';
+    let postalFromMapsUrl = '';
+    try{
+      const mapsUrl = String(order && order.maps_url || '').trim();
+      if (mapsUrl){
+        const parsedMapsUrl = new URL(mapsUrl);
+        const mapsQuery = String(parsedMapsUrl.searchParams.get('query') || '').trim();
+        const decodedMapsQuery = decodeURIComponent(mapsQuery || '');
+        const mapsMatch = decodedMapsQuery.match(/\bM?\d{4}\b/i);
+        if (mapsMatch) postalFromMapsUrl = mapsMatch[0];
+      }
+    }catch(_){ postalFromMapsUrl = ''; }
+    const postalMatchRaw = String(rawAddress || '').match(/\bM?\d{4}\b/i);
+    const postalCode = normalizeOrderPostalCode(
+      (order && (order.user_postal_code || order.postal_code || order.postcode || order.zip_code || order.zip)) ||
+      (tokenPreview && (tokenPreview.postal_code || tokenPreview.user_postal_code || tokenPreview.postcode || tokenPreview.zip_code || tokenPreview.zip)) ||
+      (nestedAddress && (nestedAddress.postal_code || nestedAddress.postcode || nestedAddress.zip_code || nestedAddress.zip)) ||
+      postalFromMapsUrl ||
+      (postalMatchRaw ? postalMatchRaw[0] : '')
+    );
+    const department = String(
+      (order && (order.user_department || order.department)) ||
+      (tokenPreview && (tokenPreview.department || tokenPreview.user_department)) ||
+      (nestedAddress && (nestedAddress.department || nestedAddress.county || nestedAddress.state_district)) ||
+      ''
+    ).trim();
     const latCandidates = [
       order && (order.user_lat || order.user_latitude || order.delivery_lat || order.lat),
       tokenPreview && (tokenPreview.user_lat || tokenPreview.lat || tokenPreview.latitude || tokenPreview.delivery_lat),
@@ -2095,6 +2186,8 @@ function getOrderAddressSnapshot(order){
       calle,
       numeracion,
       rawAddress,
+      postalCode,
+      department,
     });
     if ((!Number.isFinite(lat) || !Number.isFinite(lon))){
       const cached = getCachedOrderCoords(orderId, addressKey);
@@ -2108,13 +2201,15 @@ function getOrderAddressSnapshot(order){
       calle: String(calle || '').trim(),
       numeracion: String(numeracion || '').trim(),
       rawAddress: String(rawAddress || '').trim(),
+      postalCode: String(postalCode || '').trim(),
+      department: String(department || '').trim(),
       lat,
       lon,
       orderId,
       addressKey,
     };
   }catch(_){
-    return { barrio: '', calle: '', numeracion: '', rawAddress: '', lat: null, lon: null, orderId: '', addressKey: '' };
+    return { barrio: '', calle: '', numeracion: '', rawAddress: '', postalCode: '', department: '', lat: null, lon: null, orderId: '', addressKey: '' };
   }
 }
 
@@ -2122,7 +2217,7 @@ function getOrderAddress(order){
   try{
     const addr = getOrderAddressSnapshot(order);
     const street = [addr.calle, addr.numeracion].filter((p) => String(p || '').trim()).join(' ').trim();
-    const parts = [street, addr.barrio].filter((p) => String(p || '').trim());
+    const parts = [street, addr.barrio, addr.department, addr.postalCode].filter((p) => String(p || '').trim());
     if (parts.length) return parts.join(', ');
     if (String(addr.rawAddress || '').trim()) return String(addr.rawAddress).trim();
     return '—';
@@ -2132,6 +2227,18 @@ function getOrderAddress(order){
 function buildOrderGoogleMapsUrl(order){
   try{
     const addr = getOrderAddressSnapshot(order);
+    const query = buildOrderGeocodeQueryFromSnapshot(addr);
+    if (query && (addr.postalCode || addr.department || /\bM?\d{4}\b/i.test(addr.rawAddress || ''))){
+      queueOrderCoordsResolution(order, addr);
+      return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(query);
+    }
+    const backendMapsUrl = String(order && order.maps_url || '').trim();
+    if (backendMapsUrl){
+      const lower = backendMapsUrl.toLowerCase();
+      if (lower.startsWith('https://www.google.com/maps/') || lower.startsWith('https://maps.google.com/')){
+        return backendMapsUrl;
+      }
+    }
     const parseCoord = (value) => {
       if (value === null || typeof value === 'undefined') return NaN;
       if (typeof value === 'string'){
@@ -2152,7 +2259,6 @@ function buildOrderGoogleMapsUrl(order){
       const q = `${Number(cachedCoords.lat).toFixed(6)},${Number(cachedCoords.lon).toFixed(6)}`;
       return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(q);
     }
-    const query = buildOrderGeocodeQueryFromSnapshot(addr);
     if (query){
       queueOrderCoordsResolution(order, addr);
       return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(query);

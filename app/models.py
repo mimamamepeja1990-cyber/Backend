@@ -45,6 +45,8 @@ class Order(Base):
     user_barrio = Column(String(200), nullable=True)
     user_calle = Column(String(200), nullable=True)
     user_numeracion = Column(String(100), nullable=True)
+    user_postal_code = Column(String(20), nullable=True)
+    user_department = Column(String(120), nullable=True)
     # Persist token preview info to allow admin to see user data even if user_* columns are missing
     _token_received = Column(Boolean, nullable=True)
     _token_preview = Column(Text, nullable=True)

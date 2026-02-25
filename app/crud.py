@@ -1213,7 +1213,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
     optional = [
         'source',
         'customer_type',
-        'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
+        'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion', 'user_postal_code', 'user_department',
         '_token_received', '_token_preview',
         'payment_method', 'payment_status', 'payment_reference',
         'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
@@ -1544,7 +1544,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
             cols = ['id', 'items', 'total', 'status', 'created_at']
             optional_cols = [
                 'customer_type',
-                'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
+                'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion', 'user_postal_code', 'user_department',
                 '_token_received', '_token_preview',
                 'payment_method', 'payment_status', 'payment_reference',
                 'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
@@ -1597,7 +1597,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
             # include any optional user_* fields we actually set
             for f in [
                 'customer_type',
-                'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
+                'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion', 'user_postal_code', 'user_department',
                 '_token_received', '_token_preview',
                 'payment_method', 'payment_status', 'payment_reference',
                 'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
@@ -1656,7 +1656,15 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                     # `preview_candidate` (which may contain current_user info).
                     try:
                         preview = {}
-                        for k, label in (('user_full_name', 'name'), ('user_email', 'email'), ('user_barrio', 'barrio'), ('user_calle', 'calle'), ('user_numeracion', 'numeracion')):
+                        for k, label in (
+                            ('user_full_name', 'name'),
+                            ('user_email', 'email'),
+                            ('user_barrio', 'barrio'),
+                            ('user_calle', 'calle'),
+                            ('user_numeracion', 'numeracion'),
+                            ('user_postal_code', 'postal_code'),
+                            ('user_department', 'department'),
+                        ):
                             v = kwargs.get(k) or getattr(payload, k, None)
                             if v:
                                 preview[label] = v
@@ -1782,7 +1790,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                     }
                     for f in [
                         'customer_type',
-                        'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
+                        'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion', 'user_postal_code', 'user_department',
                         '_token_received', '_token_preview',
                         'payment_method', 'payment_status', 'payment_reference',
                         'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
@@ -1874,6 +1882,8 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                     ('user_barrio', 'barrio'),
                     ('user_calle', 'calle'),
                     ('user_numeracion', 'numeracion'),
+                    ('user_postal_code', 'postal_code'),
+                    ('user_department', 'department'),
                     ('customer_type', 'customer_type'),
                 ):
                     v = kwargs.get(k) or getattr(payload, k, None)
@@ -1928,7 +1938,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
             # Candidate sources: kwargs (what we attempted to insert), payload attrs, preview_candidate
             sources = (kwargs, getattr(payload, '__dict__', {}) or {}, preview_candidate or {})
             for col in (
-                'user_id','user_full_name','user_email','user_barrio','user_calle','user_numeracion',
+                'user_id','user_full_name','user_email','user_barrio','user_calle','user_numeracion','user_postal_code','user_department',
                 '_token_preview','_token_received',
                 'payment_method','payment_status','payment_reference',
                 'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
@@ -2036,7 +2046,7 @@ def create_order_minimal(db: Session, raw_payload: dict, current_user: Optional[
     }
 
     for fld in (
-        'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
+        'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion', 'user_postal_code', 'user_department',
         '_token_received', '_token_preview',
         'payment_method', 'payment_status', 'payment_reference',
         'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
@@ -2134,7 +2144,7 @@ def create_order_minimal(db: Session, raw_payload: dict, current_user: Optional[
         'customer_type': kwargs.get('customer_type', customer_type),
     }
     for fld in (
-        'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
+        'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion', 'user_postal_code', 'user_department',
         '_token_received', '_token_preview',
         'payment_method', 'payment_status', 'payment_reference',
         'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
@@ -2160,7 +2170,7 @@ def get_orders(db: Session, skip: int = 0, limit: int = 200, source: Optional[st
     cols = ['id', 'items', 'total', 'status', 'created_at']
     optional = [
         'customer_type',
-        'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
+        'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion', 'user_postal_code', 'user_department',
         '_token_received', '_token_preview', 'source',
         'payment_method', 'payment_status', 'payment_reference',
         'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',

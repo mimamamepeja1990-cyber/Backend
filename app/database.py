@@ -117,6 +117,8 @@ def _migrate_orders_optional_columns() -> None:
         ('user_barrio', 'VARCHAR(200)'),
         ('user_calle', 'VARCHAR(200)'),
         ('user_numeracion', 'VARCHAR(100)'),
+        ('user_postal_code', 'VARCHAR(20)'),
+        ('user_department', 'VARCHAR(120)'),
         ('_token_received', 'BOOLEAN'),
         ('_token_preview', 'TEXT'),
         ('source', "VARCHAR(50) DEFAULT 'web'"),

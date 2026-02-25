@@ -17,10 +17,13 @@ import asyncio
 import logging
 import csv
 import json
+import re
 import time
 import datetime
+import unicodedata
 from io import StringIO
 from html import escape as html_escape
+from urllib.parse import quote_plus
 import anyio
 import sys
 import traceback
@@ -211,6 +214,8 @@ async def lifespan(app: FastAPI):
                 'user_barrio': 'VARCHAR(200)',
                 'user_calle': 'VARCHAR(200)',
                 'user_numeracion': 'VARCHAR(100)',
+                'user_postal_code': 'VARCHAR(20)',
+                'user_department': 'VARCHAR(120)',
                 '_token_received': 'BOOLEAN',
                 '_token_preview': 'TEXT',
                 # Ensure 'source' has a server-side default so rows without explicit
@@ -597,7 +602,7 @@ def _enrich_order_contact_fields(order_data: Optional[Dict[str, Any]]) -> Dict[s
     def _apply_candidate(candidate: Any) -> None:
         if not isinstance(candidate, dict):
             return
-        for field in ('user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion'):
+        for field in ('user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion', 'user_postal_code', 'user_department'):
             if not payload.get(field) and candidate.get(field):
                 payload[field] = candidate.get(field)
         for field in ('scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour'):
@@ -607,12 +612,20 @@ def _enrich_order_contact_fields(order_data: Optional[Dict[str, Any]]) -> Dict[s
 
         token_preview = candidate.get('_token_preview')
         if isinstance(token_preview, dict):
+            nested_address = token_preview.get('address') if isinstance(token_preview.get('address'), dict) else {}
             if not payload.get('_token_preview'):
                 payload['_token_preview'] = token_preview
             if not payload.get('user_full_name') and token_preview.get('name'):
                 payload['user_full_name'] = token_preview.get('name')
             if not payload.get('user_email') and token_preview.get('email'):
                 payload['user_email'] = token_preview.get('email')
+            if not payload.get('user_postal_code'):
+                payload['user_postal_code'] = (
+                    token_preview.get('postal_code') or token_preview.get('user_postal_code') or
+                    nested_address.get('postal_code') or nested_address.get('postcode')
+                )
+            if not payload.get('user_department'):
+                payload['user_department'] = token_preview.get('department') or token_preview.get('user_department') or nested_address.get('department')
             if '_token_received' not in payload:
                 payload['_token_received'] = True
 
@@ -642,6 +655,7 @@ def _enrich_order_contact_fields(order_data: Optional[Dict[str, Any]]) -> Dict[s
                         token_preview = {}
                 candidate = {'_token_preview': token_preview, '_token_received': token_received}
                 if isinstance(token_preview, dict):
+                    nested_address = token_preview.get('address') if isinstance(token_preview.get('address'), dict) else {}
                     if token_preview.get('email'):
                         candidate['user_email'] = token_preview.get('email')
                     if token_preview.get('name'):
@@ -652,6 +666,14 @@ def _enrich_order_contact_fields(order_data: Optional[Dict[str, Any]]) -> Dict[s
                         candidate['user_calle'] = token_preview.get('calle')
                     if token_preview.get('numeracion'):
                         candidate['user_numeracion'] = token_preview.get('numeracion')
+                    candidate['user_postal_code'] = (
+                        token_preview.get('postal_code') or token_preview.get('user_postal_code') or
+                        nested_address.get('postal_code') or nested_address.get('postcode')
+                    )
+                    candidate['user_department'] = (
+                        token_preview.get('department') or token_preview.get('user_department') or
+                        nested_address.get('department')
+                    )
                 _apply_candidate(candidate)
         except Exception:
             pass
@@ -662,6 +684,338 @@ def _enrich_order_contact_fields(order_data: Optional[Dict[str, Any]]) -> Dict[s
         if resolved:
             payload['user_email'] = resolved
 
+    return payload
+
+
+MENDOZA_GEO_BOUNDS = {
+    'min_lat': -37.7,
+    'max_lat': -31.0,
+    'min_lon': -70.7,
+    'max_lon': -66.2,
+}
+
+_MENDOZA_POSTAL_TO_DEPARTMENTS = {
+    '5500': ['Capital'],
+    '5501': ['Godoy Cruz'],
+    '5502': ['Godoy Cruz'],
+    '5503': ['Godoy Cruz'],
+    '5507': ['Lujan de Cuyo'],
+    '5509': ['Lujan de Cuyo'],
+    '5511': ['Lujan de Cuyo'],
+    '5513': ['Maipu'],
+    '5515': ['Maipu'],
+    '5517': ['Maipu'],
+    '5519': ['Guaymallen'],
+    '5521': ['Guaymallen'],
+    '5523': ['Guaymallen'],
+    '5525': ['Guaymallen'],
+    '5533': ['Lavalle'],
+    '5535': ['Lavalle'],
+    '5539': ['Las Heras'],
+    '5540': ['Las Heras'],
+    '5541': ['Las Heras'],
+    '5549': ['Lujan de Cuyo'],
+    '5560': ['Tunuyan'],
+    '5561': ['Tupungato'],
+    '5569': ['San Carlos'],
+    '5570': ['San Martin'],
+    '5573': ['San Martin', 'Junin'],
+    '5575': ['Junin'],
+    '5577': ['Rivadavia'],
+    '5590': ['La Paz'],
+    '5596': ['Santa Rosa'],
+    '5600': ['San Rafael'],
+    '5603': ['San Rafael'],
+    '5613': ['Malargue'],
+    '5620': ['General Alvear'],
+}
+
+
+def _normalize_region_token(value: Any) -> str:
+    try:
+        text_value = str(value or '').strip().lower()
+    except Exception:
+        text_value = ''
+    if not text_value:
+        return ''
+    try:
+        text_value = ''.join(
+            ch for ch in unicodedata.normalize('NFD', text_value)
+            if unicodedata.category(ch) != 'Mn'
+        )
+    except Exception:
+        pass
+    return re.sub(r'\s+', ' ', text_value).strip()
+
+
+def _extract_postal_digits(value: Any) -> str:
+    try:
+        raw = str(value or '').strip()
+    except Exception:
+        raw = ''
+    if not raw:
+        return ''
+    match = re.search(r'\bM?\s*(\d{4})\b', raw, re.IGNORECASE)
+    if not match:
+        return ''
+    return str(match.group(1) or '').strip()
+
+
+def _normalize_postal_code(value: Any) -> str:
+    digits = _extract_postal_digits(value)
+    return f'M{digits}' if digits else ''
+
+
+def _extract_postal_from_text(value: Any) -> str:
+    try:
+        text_value = str(value or '')
+    except Exception:
+        text_value = ''
+    return _normalize_postal_code(text_value)
+
+
+def _departments_for_postal(postal_code: Any) -> List[str]:
+    digits = _extract_postal_digits(postal_code)
+    if not digits:
+        return []
+    return list(_MENDOZA_POSTAL_TO_DEPARTMENTS.get(digits) or [])
+
+
+def _coerce_coord(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, str):
+            value = value.strip().replace(',', '.')
+        n = float(value)
+    except Exception:
+        return None
+    if not (-180.0 <= n <= 180.0):
+        return None
+    return round(n, 6)
+
+
+def _is_mendoza_point(lat: Any, lon: Any) -> bool:
+    lat_n = _coerce_coord(lat)
+    lon_n = _coerce_coord(lon)
+    if lat_n is None or lon_n is None:
+        return False
+    return (
+        MENDOZA_GEO_BOUNDS['min_lat'] <= lat_n <= MENDOZA_GEO_BOUNDS['max_lat'] and
+        MENDOZA_GEO_BOUNDS['min_lon'] <= lon_n <= MENDOZA_GEO_BOUNDS['max_lon']
+    )
+
+
+def _extract_order_address_snapshot(order_data: Dict[str, Any]) -> Dict[str, Any]:
+    payload = order_data if isinstance(order_data, dict) else {}
+    token_preview = payload.get('_token_preview')
+    if isinstance(token_preview, str):
+        try:
+            token_preview = json.loads(token_preview)
+        except Exception:
+            token_preview = {}
+    if not isinstance(token_preview, dict):
+        token_preview = {}
+    nested_address = token_preview.get('address')
+    if not isinstance(nested_address, dict):
+        nested_address = {}
+
+    barrio = (
+        payload.get('user_barrio') or payload.get('barrio') or payload.get('user_neighborhood') or
+        token_preview.get('barrio') or nested_address.get('barrio') or token_preview.get('city') or nested_address.get('city') or
+        ''
+    )
+    calle = (
+        payload.get('user_calle') or payload.get('calle') or payload.get('user_street') or
+        token_preview.get('calle') or nested_address.get('calle') or nested_address.get('street') or nested_address.get('road') or
+        ''
+    )
+    numeracion = (
+        payload.get('user_numeracion') or payload.get('numeracion') or payload.get('user_number') or
+        token_preview.get('numeracion') or nested_address.get('numeracion') or nested_address.get('number') or nested_address.get('house_number') or
+        ''
+    )
+    raw_address = (
+        payload.get('user_address') or payload.get('user_direccion') or payload.get('delivery_address') or
+        payload.get('shipping_address') or payload.get('address') or payload.get('user_full_address') or
+        payload.get('full_address') or payload.get('direccion') or
+        payload.get('query_hint') or payload.get('user_address_label') or
+        token_preview.get('user_address') or token_preview.get('direccion') or token_preview.get('query_hint') or token_preview.get('full_text') or token_preview.get('label') or
+        nested_address.get('direccion') or nested_address.get('query_hint') or nested_address.get('full_text') or nested_address.get('display_name') or
+        ''
+    )
+
+    postal_candidates = [
+        payload.get('user_postal_code'),
+        payload.get('postal_code'),
+        payload.get('postcode'),
+        payload.get('zip_code'),
+        payload.get('zip'),
+        token_preview.get('postal_code'),
+        token_preview.get('postcode'),
+        token_preview.get('user_postal_code'),
+        token_preview.get('query_hint'),
+        nested_address.get('postal_code'),
+        nested_address.get('postcode'),
+        nested_address.get('zip_code'),
+        nested_address.get('query_hint'),
+        raw_address,
+        barrio,
+    ]
+    postal_code = ''
+    for candidate in postal_candidates:
+        postal_code = _normalize_postal_code(candidate)
+        if postal_code:
+            break
+
+    department = (
+        payload.get('user_department') or payload.get('department') or
+        token_preview.get('department') or token_preview.get('user_department') or
+        nested_address.get('department') or nested_address.get('county') or nested_address.get('state_district') or
+        ''
+    )
+    department = str(department or '').strip()
+
+    department_candidates = _departments_for_postal(postal_code)
+    if department_candidates:
+        probe = _normalize_region_token(' '.join([
+            str(department or ''),
+            str(barrio or ''),
+            str(raw_address or ''),
+            str(token_preview.get('label') or ''),
+            str(token_preview.get('full_text') or ''),
+        ]))
+        matched_department = ''
+        if probe:
+            for dep_name in department_candidates:
+                dep_token = _normalize_region_token(dep_name)
+                if dep_token and dep_token in probe:
+                    matched_department = dep_name
+                    break
+        if not matched_department:
+            matched_department = department_candidates[0]
+        if not department:
+            department = matched_department
+
+    lat_candidates = [
+        payload.get('user_lat'),
+        payload.get('user_latitude'),
+        payload.get('delivery_lat'),
+        payload.get('lat'),
+        token_preview.get('user_lat'),
+        token_preview.get('lat'),
+        token_preview.get('latitude'),
+        token_preview.get('delivery_lat'),
+        nested_address.get('lat'),
+        nested_address.get('latitude'),
+    ]
+    lon_candidates = [
+        payload.get('user_lon'),
+        payload.get('user_lng'),
+        payload.get('user_longitude'),
+        payload.get('delivery_lon'),
+        payload.get('delivery_lng'),
+        payload.get('lon'),
+        payload.get('lng'),
+        token_preview.get('user_lon'),
+        token_preview.get('user_lng'),
+        token_preview.get('lon'),
+        token_preview.get('lng'),
+        token_preview.get('longitude'),
+        token_preview.get('delivery_lon'),
+        token_preview.get('delivery_lng'),
+        nested_address.get('lon'),
+        nested_address.get('lng'),
+        nested_address.get('longitude'),
+    ]
+    lat = next((v for v in (_coerce_coord(c) for c in lat_candidates) if v is not None), None)
+    lon = next((v for v in (_coerce_coord(c) for c in lon_candidates) if v is not None), None)
+
+    return {
+        'barrio': str(barrio or '').strip(),
+        'calle': str(calle or '').strip(),
+        'numeracion': str(numeracion or '').strip(),
+        'raw_address': str(raw_address or '').strip(),
+        'postal_code': postal_code,
+        'department': str(department or '').strip(),
+        'lat': lat,
+        'lon': lon,
+    }
+
+
+def _compose_order_maps_query(snapshot: Dict[str, Any]) -> str:
+    if not isinstance(snapshot, dict):
+        return ''
+    street = ' '.join(
+        part for part in [
+            str(snapshot.get('calle') or '').strip(),
+            str(snapshot.get('numeracion') or '').strip(),
+        ] if part
+    ).strip()
+    barrio = str(snapshot.get('barrio') or '').strip()
+    raw_address = str(snapshot.get('raw_address') or '').strip()
+    postal_code = _normalize_postal_code(snapshot.get('postal_code'))
+    department = str(snapshot.get('department') or '').strip()
+
+    if not department:
+        deps = _departments_for_postal(postal_code)
+        if deps:
+            department = deps[0]
+
+    parts: List[str] = []
+    seen: set = set()
+
+    def _push(value: Any) -> None:
+        text_value = str(value or '').strip()
+        if not text_value:
+            return
+        token = _normalize_region_token(text_value)
+        if not token or token in seen:
+            return
+        seen.add(token)
+        parts.append(text_value)
+
+    if street:
+        _push(street)
+    elif raw_address:
+        # Use first segment as street fallback when no explicit street exists.
+        _push(raw_address.split(',')[0])
+    _push(department)
+    _push(barrio)
+    _push(postal_code)
+    _push('Mendoza')
+    _push('Argentina')
+    return ', '.join(parts)
+
+
+def _build_order_maps_url(order_data: Dict[str, Any]) -> str:
+    snapshot = _extract_order_address_snapshot(order_data if isinstance(order_data, dict) else {})
+    query = _compose_order_maps_query(snapshot)
+    postal_code = _normalize_postal_code(snapshot.get('postal_code'))
+    department = str(snapshot.get('department') or '').strip()
+    if query and (postal_code or department):
+        return f"https://www.google.com/maps/search/?api=1&query={quote_plus(query)}"
+    lat = snapshot.get('lat')
+    lon = snapshot.get('lon')
+    if _is_mendoza_point(lat, lon):
+        query = f"{float(lat):.6f},{float(lon):.6f}"
+        return f"https://www.google.com/maps/search/?api=1&query={quote_plus(query)}"
+    if not query:
+        return ''
+    return f"https://www.google.com/maps/search/?api=1&query={quote_plus(query)}"
+
+
+def _attach_maps_url(order_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    payload = dict(order_data) if isinstance(order_data, dict) else {}
+    existing_maps_url = str(payload.get('maps_url') or '').strip()
+    try:
+        maps_url = _build_order_maps_url(payload)
+    except Exception:
+        maps_url = ''
+    if maps_url:
+        payload['maps_url'] = maps_url
+    elif existing_maps_url:
+        payload['maps_url'] = existing_maps_url
     return payload
 
 
@@ -2061,6 +2415,8 @@ def _run_add_user_columns() -> dict:
         ('user_barrio', 'VARCHAR(200)'),
         ('user_calle', 'VARCHAR(200)'),
         ('user_numeracion', 'VARCHAR(100)'),
+        ('user_postal_code', 'VARCHAR(20)'),
+        ('user_department', 'VARCHAR(120)'),
         ('_token_received', 'BOOLEAN'),
         ('_token_preview', 'TEXT'),
         ('source', "VARCHAR(50) DEFAULT 'web'"),
@@ -4304,6 +4660,12 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
                 merged_preview.setdefault('sub', token_payload.get('sub') or token_payload.get('email') or None)
                 merged_preview.setdefault('email', token_payload.get('email') or token_payload.get('sub') or None)
                 merged_preview.setdefault('name', token_payload.get('full_name') or token_payload.get('name') or None)
+                payload_postal = getattr(payload, 'user_postal_code', None)
+                payload_department = getattr(payload, 'user_department', None)
+                if payload_postal and not merged_preview.get('postal_code'):
+                    merged_preview['postal_code'] = _normalize_postal_code(payload_postal)
+                if payload_department and not merged_preview.get('department'):
+                    merged_preview['department'] = str(payload_department).strip()
                 setattr(payload, '_token_preview', merged_preview)
             except Exception:
                 # Fallback: try direct attribute assignment
@@ -4529,6 +4891,10 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
         except Exception:
             pass
         try:
+            payload = _attach_maps_url(payload if isinstance(payload, dict) else {})
+        except Exception:
+            pass
+        try:
             logger.info('create_order succeeded; id=%s created_at=%s payload_summary=%s', getattr(order, 'id', None), getattr(order, 'created_at', None), { 'user': payload.get('user_email') or payload.get('user_full_name'), 'total': payload.get('total') })
         except Exception:
             pass
@@ -4557,6 +4923,10 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
                         tp_val['calle'] = encoded.get('user_calle')
                     if isinstance(encoded, dict) and encoded.get('user_numeracion'):
                         tp_val['numeracion'] = encoded.get('user_numeracion')
+                    if isinstance(encoded, dict) and encoded.get('user_postal_code'):
+                        tp_val['postal_code'] = encoded.get('user_postal_code')
+                    if isinstance(encoded, dict) and encoded.get('user_department'):
+                        tp_val['department'] = encoded.get('user_department')
                     if not tp_val:
                         tp_val = None
                 except Exception:
@@ -4689,6 +5059,7 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
                     'status': getattr(order, 'status', 'nuevo'),
                     'created_at': getattr(order, 'created_at', None),
                 }
+            response_payload = _attach_maps_url(response_payload)
             headers = _cors_headers_for_request(request)
             return JSONResponse(status_code=200, content=response_payload, headers=headers)
         except Exception:
@@ -4708,6 +5079,8 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
                 'user_barrio': getattr(payload, 'user_barrio', None),
                 'user_calle': getattr(payload, 'user_calle', None),
                 'user_numeracion': getattr(payload, 'user_numeracion', None),
+                'user_postal_code': getattr(payload, 'user_postal_code', None),
+                'user_department': getattr(payload, 'user_department', None),
             }
 
             def emergency_task():
@@ -4721,6 +5094,7 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
             emergency_payload = jsonable_encoder(emergency_order)
             if isinstance(emergency_payload, dict):
                 emergency_payload['_fallback'] = True
+                emergency_payload = _attach_maps_url(emergency_payload)
             headers = _cors_headers_for_request(request)
             return JSONResponse(status_code=200, content=emergency_payload, headers=headers)
         except Exception:
@@ -5138,7 +5512,7 @@ def list_orders(skip: int = 0, limit: int = 200, source: Optional[str] = None, d
                 k: getattr(r, k, None)
                 for k in [
                     'id', 'items', 'total', 'status', 'customer_type', 'user_id', 'user_full_name', 'user_email',
-                    'user_barrio', 'user_calle', 'user_numeracion', 'created_at',
+                    'user_barrio', 'user_calle', 'user_numeracion', 'user_postal_code', 'user_department', 'created_at',
                     '_token_received', '_token_preview', 'source',
                     'payment_method', 'payment_status', 'payment_reference',
                     'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
@@ -5187,7 +5561,7 @@ def list_orders(skip: int = 0, limit: int = 200, source: Optional[str] = None, d
                         # prefer explicit user_* fields from cached payload
                         for f in (
                             'customer_type',
-                            'user_full_name','user_email','user_barrio','user_calle','user_numeracion','user_id',
+                            'user_full_name','user_email','user_barrio','user_calle','user_numeracion','user_postal_code','user_department','user_id',
                             'source','payment_method','payment_status','payment_reference',
                             'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
                         ):
@@ -5195,10 +5569,18 @@ def list_orders(skip: int = 0, limit: int = 200, source: Optional[str] = None, d
                                 od[f] = p.get(f)
                         # fallback to token preview when available
                         tp = p.get('_token_preview') or {}
+                        tp_addr = tp.get('address') if isinstance(tp.get('address'), dict) else {}
                         if not od.get('user_full_name') and tp.get('name'):
                             od['user_full_name'] = tp.get('name')
                         if not od.get('user_email') and tp.get('email'):
                             od['user_email'] = tp.get('email')
+                        if not od.get('user_postal_code'):
+                            od['user_postal_code'] = (
+                                tp.get('postal_code') or tp.get('user_postal_code') or
+                                tp_addr.get('postal_code') or tp_addr.get('postcode')
+                            )
+                        if not od.get('user_department'):
+                            od['user_department'] = tp.get('department') or tp.get('user_department') or tp_addr.get('department')
                         if not customer_type_value:
                             customer_type_value = _customer_type_from_preview(tp)
                         # include the token preview in the returned row so clients can show it explicitly
@@ -5227,6 +5609,14 @@ def list_orders(skip: int = 0, limit: int = 200, source: Optional[str] = None, d
                                         od['user_full_name'] = tp.get('name')
                                     if not od.get('user_email') and tp.get('email'):
                                         od['user_email'] = tp.get('email')
+                                    tp_addr = tp.get('address') if isinstance(tp.get('address'), dict) else {}
+                                    if not od.get('user_postal_code'):
+                                        od['user_postal_code'] = (
+                                            tp.get('postal_code') or tp.get('user_postal_code') or
+                                            tp_addr.get('postal_code') or tp_addr.get('postcode')
+                                        )
+                                    if not od.get('user_department'):
+                                        od['user_department'] = tp.get('department') or tp.get('user_department') or tp_addr.get('department')
                                     if not customer_type_value:
                                         customer_type_value = _customer_type_from_preview(tp)
                                     od['_token_preview'] = tp
@@ -5251,6 +5641,10 @@ def list_orders(skip: int = 0, limit: int = 200, source: Optional[str] = None, d
                         ov = (ORDER_STATUS_CACHE.get(str(oid)) or {}).get('status')
                     if ov:
                         od['status'] = ov
+            except Exception:
+                pass
+            try:
+                od = _attach_maps_url(od)
             except Exception:
                 pass
             # log per-row diagnostics for debugging clarity
@@ -5404,7 +5798,7 @@ async def update_order_status(order_id: str, request: Request):
             cols.append(c)
     optional = [
         'customer_type',
-        'user_id','user_full_name','user_email','user_barrio','user_calle','user_numeracion',
+        'user_id','user_full_name','user_email','user_barrio','user_calle','user_numeracion','user_postal_code','user_department',
         '_token_received','_token_preview','source',
         'payment_method','payment_status','payment_reference',
         'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
@@ -5456,6 +5850,10 @@ async def update_order_status(order_id: str, request: Request):
                 od['_token_preview'] = _json.loads(od['_token_preview'])
             except Exception:
                 pass
+    except Exception:
+        pass
+    try:
+        od = _attach_maps_url(od)
     except Exception:
         pass
 
