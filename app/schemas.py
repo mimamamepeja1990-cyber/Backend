@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from typing import Optional, List, Union
 from datetime import datetime
 
@@ -93,6 +93,8 @@ class OrderItem(BaseModel):
     meta: Optional[dict] = None
 
 class OrderCreate(BaseModel):
+    model_config = ConfigDict(extra='allow')
+
     items: List[OrderItem]
     total: float
     customer_type: Optional[str] = None
@@ -105,9 +107,8 @@ class OrderCreate(BaseModel):
     user_numeracion: Optional[str] = None
     user_postal_code: Optional[str] = None
     user_department: Optional[str] = None
-    # token preview fields (may be populated server-side when a bearer token is provided)
-    _token_received: Optional[bool] = None
-    _token_preview: Optional[dict] = None
+    # `_token_preview`, `_token_received`, `user_lat`, `user_lon`, etc. are
+    # accepted as extra fields and preserved for downstream processing.
     # optional source hint (client can set to 'app' or 'web')
     source: Optional[str] = None
     # payment snapshot

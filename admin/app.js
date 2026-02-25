@@ -2262,16 +2262,38 @@ function buildOrderGoogleMapsUrl(order){
       const q = `${Number(cachedCoords.lat).toFixed(6)},${Number(cachedCoords.lon).toFixed(6)}`;
       return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(q);
     }
-    const backendMapsUrl = String(order && order.maps_url || '').trim();
-    if (backendMapsUrl){
-      const lower = backendMapsUrl.toLowerCase();
-      if (lower.startsWith('https://www.google.com/maps/') || lower.startsWith('https://maps.google.com/')){
-        return backendMapsUrl;
-      }
-    }
+
     const query = buildOrderGeocodeQueryFromSnapshot(addr);
     if (query){
       queueOrderCoordsResolution(order, addr);
+    }
+
+    const backendMapsUrl = String(order && order.maps_url || '').trim();
+    if (backendMapsUrl){
+      const lower = backendMapsUrl.toLowerCase();
+      const isGoogleMaps = lower.startsWith('https://www.google.com/maps/') || lower.startsWith('https://maps.google.com/');
+      const backendHasCoords = (() => {
+        if (!isGoogleMaps) return false;
+        try{
+          const parsed = new URL(backendMapsUrl);
+          const probe = [
+            parsed.searchParams.get('query'),
+            parsed.searchParams.get('q'),
+            parsed.searchParams.get('ll'),
+            parsed.searchParams.get('center'),
+            decodeURIComponent(parsed.pathname || '')
+          ].filter(Boolean).join(' ');
+          return /-?\d{1,3}(?:\.\d+)?\s*,\s*-?\d{1,3}(?:\.\d+)?/.test(probe);
+        }catch(_){ return false; }
+      })();
+      if (backendHasCoords){
+        return backendMapsUrl;
+      }
+      if (isGoogleMaps && !query){
+        return backendMapsUrl;
+      }
+    }
+    if (query){
       return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(query);
     }
     return '';
