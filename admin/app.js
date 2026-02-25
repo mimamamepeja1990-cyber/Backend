@@ -248,7 +248,7 @@ let productLookupById = new Map();
 const PROMO_KEY = 'admin_promotions_v1';
 const FILTERS_KEY = 'admin_filters_v1';
 const PRODUCT_CATEGORIES_KEY = 'admin_product_categories_v1';
-const ORDER_MAPS_COORD_CACHE_KEY = 'admin_order_maps_coords_v5';
+const ORDER_MAPS_COORD_CACHE_KEY = 'admin_order_maps_coords_v6';
 const MENDOZA_GEO_BOUNDS = Object.freeze({
   minLat: -37.7,
   maxLat: -31.0,
@@ -2208,13 +2208,6 @@ function getOrderAddressSnapshot(order){
       postalCode,
       department,
     });
-    if ((!Number.isFinite(lat) || !Number.isFinite(lon))){
-      const cached = getCachedOrderCoords(orderId, addressKey);
-      if (cached){
-        lat = Number(cached.lat);
-        lon = Number(cached.lon);
-      }
-    }
     return {
       barrio: String(barrio || '').trim(),
       calle: String(calle || '').trim(),
@@ -2250,18 +2243,6 @@ function getOrderAddress(order){
 function buildOrderGoogleMapsUrl(order){
   try{
     const addr = getOrderAddressSnapshot(order);
-    const query = buildOrderGeocodeQueryFromSnapshot(addr);
-    if (query && (addr.postalCode || addr.department || /\bM?\d{4}\b/i.test(addr.rawAddress || ''))){
-      queueOrderCoordsResolution(order, addr);
-      return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(query);
-    }
-    const backendMapsUrl = String(order && order.maps_url || '').trim();
-    if (backendMapsUrl){
-      const lower = backendMapsUrl.toLowerCase();
-      if (lower.startsWith('https://www.google.com/maps/') || lower.startsWith('https://maps.google.com/')){
-        return backendMapsUrl;
-      }
-    }
     const parseCoord = (value) => {
       if (value === null || typeof value === 'undefined') return NaN;
       if (typeof value === 'string'){
@@ -2273,7 +2254,6 @@ function buildOrderGoogleMapsUrl(order){
     const lat = parseCoord(addr.lat);
     const lon = parseCoord(addr.lon);
     if (Number.isFinite(lat) && Number.isFinite(lon) && isMendozaPoint(lat, lon)){
-      setCachedOrderCoords(order, lat, lon);
       const q = `${Number(lat).toFixed(6)},${Number(lon).toFixed(6)}`;
       return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(q);
     }
@@ -2282,6 +2262,14 @@ function buildOrderGoogleMapsUrl(order){
       const q = `${Number(cachedCoords.lat).toFixed(6)},${Number(cachedCoords.lon).toFixed(6)}`;
       return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(q);
     }
+    const backendMapsUrl = String(order && order.maps_url || '').trim();
+    if (backendMapsUrl){
+      const lower = backendMapsUrl.toLowerCase();
+      if (lower.startsWith('https://www.google.com/maps/') || lower.startsWith('https://maps.google.com/')){
+        return backendMapsUrl;
+      }
+    }
+    const query = buildOrderGeocodeQueryFromSnapshot(addr);
     if (query){
       queueOrderCoordsResolution(order, addr);
       return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(query);

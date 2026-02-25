@@ -1070,15 +1070,15 @@ def _compose_order_maps_query(snapshot: Dict[str, Any]) -> str:
 
 def _build_order_maps_url(order_data: Dict[str, Any]) -> str:
     snapshot = _extract_order_address_snapshot(order_data if isinstance(order_data, dict) else {})
+    lat = snapshot.get('lat')
+    lon = snapshot.get('lon')
+    if _is_mendoza_point(lat, lon):
+        coords_query = f"{float(lat):.6f},{float(lon):.6f}"
+        return f"https://www.google.com/maps/search/?api=1&query={quote_plus(coords_query)}"
     query = _compose_order_maps_query(snapshot)
     postal_code = _normalize_postal_code(snapshot.get('postal_code'))
     department = str(snapshot.get('department') or '').strip()
     if query and (postal_code or department):
-        return f"https://www.google.com/maps/search/?api=1&query={quote_plus(query)}"
-    lat = snapshot.get('lat')
-    lon = snapshot.get('lon')
-    if _is_mendoza_point(lat, lon):
-        query = f"{float(lat):.6f},{float(lon):.6f}"
         return f"https://www.google.com/maps/search/?api=1&query={quote_plus(query)}"
     if not query:
         return ''
