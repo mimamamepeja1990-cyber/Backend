@@ -2037,6 +2037,7 @@ def create_order_minimal(db: Session, raw_payload: dict, current_user: Optional[
 
     for fld in (
         'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
+        '_token_received', '_token_preview',
         'payment_method', 'payment_status', 'payment_reference',
         'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
     ):
@@ -2046,6 +2047,11 @@ def create_order_minimal(db: Session, raw_payload: dict, current_user: Optional[
             val = None
         if val is None:
             continue
+        if fld == '_token_preview' and not isinstance(val, str):
+            try:
+                val = _json.dumps(val, ensure_ascii=False)
+            except Exception:
+                val = str(val)
         kwargs[fld] = val
 
     # token fallback for missing user snapshot values
@@ -2129,6 +2135,7 @@ def create_order_minimal(db: Session, raw_payload: dict, current_user: Optional[
     }
     for fld in (
         'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion',
+        '_token_received', '_token_preview',
         'payment_method', 'payment_status', 'payment_reference',
         'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
     ):

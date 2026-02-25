@@ -4299,11 +4299,12 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
         try:
             try:
                 setattr(payload, '_token_received', True)
-                setattr(payload, '_token_preview', {
-                    'sub': token_payload.get('sub') or token_payload.get('email') or None,
-                    'email': token_payload.get('email') or token_payload.get('sub') or None,
-                    'name': token_payload.get('full_name') or token_payload.get('name') or None
-                })
+                existing_preview = getattr(payload, '_token_preview', None)
+                merged_preview = dict(existing_preview) if isinstance(existing_preview, dict) else {}
+                merged_preview.setdefault('sub', token_payload.get('sub') or token_payload.get('email') or None)
+                merged_preview.setdefault('email', token_payload.get('email') or token_payload.get('sub') or None)
+                merged_preview.setdefault('name', token_payload.get('full_name') or token_payload.get('name') or None)
+                setattr(payload, '_token_preview', merged_preview)
             except Exception:
                 # Fallback: try direct attribute assignment
                 payload._token_received = True

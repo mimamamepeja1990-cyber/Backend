@@ -248,7 +248,7 @@ let productLookupById = new Map();
 const PROMO_KEY = 'admin_promotions_v1';
 const FILTERS_KEY = 'admin_filters_v1';
 const PRODUCT_CATEGORIES_KEY = 'admin_product_categories_v1';
-const ORDER_MAPS_COORD_CACHE_KEY = 'admin_order_maps_coords_v3';
+const ORDER_MAPS_COORD_CACHE_KEY = 'admin_order_maps_coords_v4';
 const MENDOZA_GEO_BOUNDS = Object.freeze({
   minLat: -37.7,
   maxLat: -31.0,
@@ -2132,16 +2132,6 @@ function getOrderAddress(order){
 function buildOrderGoogleMapsUrl(order){
   try{
     const addr = getOrderAddressSnapshot(order);
-    const cachedCoords = getCachedOrderCoords(addr.orderId, addr.addressKey);
-    if (cachedCoords){
-      const q = `${Number(cachedCoords.lat).toFixed(6)},${Number(cachedCoords.lon).toFixed(6)}`;
-      return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(q);
-    }
-    const query = buildOrderGeocodeQueryFromSnapshot(addr);
-    if (query){
-      queueOrderCoordsResolution(order, addr);
-      return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(query);
-    }
     const parseCoord = (value) => {
       if (value === null || typeof value === 'undefined') return NaN;
       if (typeof value === 'string'){
@@ -2152,9 +2142,20 @@ function buildOrderGoogleMapsUrl(order){
     };
     const lat = parseCoord(addr.lat);
     const lon = parseCoord(addr.lon);
-    if (Number.isFinite(lat) && Number.isFinite(lon)){
+    if (Number.isFinite(lat) && Number.isFinite(lon) && isMendozaPoint(lat, lon)){
+      setCachedOrderCoords(order, lat, lon);
       const q = `${Number(lat).toFixed(6)},${Number(lon).toFixed(6)}`;
       return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(q);
+    }
+    const cachedCoords = getCachedOrderCoords(addr.orderId, addr.addressKey);
+    if (cachedCoords && isMendozaPoint(cachedCoords.lat, cachedCoords.lon)){
+      const q = `${Number(cachedCoords.lat).toFixed(6)},${Number(cachedCoords.lon).toFixed(6)}`;
+      return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(q);
+    }
+    const query = buildOrderGeocodeQueryFromSnapshot(addr);
+    if (query){
+      queueOrderCoordsResolution(order, addr);
+      return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(query);
     }
     return '';
   }catch(_){ return ''; }
@@ -2176,14 +2177,7 @@ function getOrderGoogleMapsLinkHtml(order, label = 'Abrir en Google Maps', class
 }
 
 function getOrderGoogleMapsUrlHtml(order, className = ''){
-  try{
-    const url = buildOrderGoogleMapsUrl(order);
-    if (!url) return '';
-    const extraClass = String(className || '').trim();
-    const classes = ['order-map-url'];
-    if (extraClass) classes.push(extraClass);
-    return `<a class="${escapeHtml(classes.join(' '))}" href="${escapeHtml(url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(url)}</a>`;
-  }catch(_){ return ''; }
+  return '';
 }
 
 function getOrderCreatedTimestamp(order){
@@ -2382,7 +2376,6 @@ function renderPreparations(list){
       const scheduleLabel = formatScheduleInfoLabel(entry.scheduleInfo) || (key === 'sin_fecha' ? 'Sin fecha de salida' : formatIsoDateKeyWithWeekday(key));
       const customerTypeLabel = normalizeOrderCustomerType(order.customer_type) === 'minorista' ? 'Minorista' : 'Mayorista';
       const mapsLinkHtml = getOrderGoogleMapsLinkHtml(order, 'Abrir en Maps', 'prep-map-link');
-      const mapsUrlHtml = getOrderGoogleMapsUrlHtml(order, 'prep-map-url');
       card.innerHTML = `
         <div class="preparation-card-top">
           <div class="preparation-card-identity">
@@ -2395,7 +2388,7 @@ function renderPreparations(list){
         <div class="preparation-row"><span class="prep-label">Cliente</span><span class="prep-value">${escapeHtml(customerName)}</span></div>
         <div class="preparation-row"><span class="prep-label">Email</span><span class="prep-value">${escapeHtml(customerEmail)}</span></div>
         <div class="preparation-row"><span class="prep-label">Dirección</span><span class="prep-value">${escapeHtml(getOrderAddress(order))}</span></div>
-        ${(mapsLinkHtml || mapsUrlHtml) ? `<div class="preparation-row prep-row-map"><span class="prep-label">Ubicación</span><span class="prep-value prep-map-value">${mapsLinkHtml}${mapsUrlHtml ? `<div>${mapsUrlHtml}</div>` : ''}</span></div>` : ''}
+        ${mapsLinkHtml ? `<div class="preparation-row prep-row-map"><span class="prep-label">Ubicación</span><span class="prep-value prep-map-value">${mapsLinkHtml}</span></div>` : ''}
         <div class="preparation-row preparation-row-items"><span class="prep-label">Items</span><div class="prep-value prep-items-value">${getPreparationItemsListHtml(order)}</div></div>
         <div class="preparation-row"><span class="prep-label">Total</span><span class="prep-value prep-value-total">$${Number(order.total || 0).toFixed(2)}</span></div>
         <div class="preparation-footer">
@@ -2539,7 +2532,6 @@ function orderRowFor(o){
   const isPreparedStatus = orderStatusNorm === 'preparado';
   const fecha = o.created_at ? new Date(o.created_at).toLocaleString('es-ES', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
   const mapsLinkHtml = getOrderGoogleMapsLinkHtml(o, 'Ver en Google Maps', 'order-map-link-card');
-  const mapsUrlHtml = getOrderGoogleMapsUrlHtml(o, 'order-map-url-inline');
   // Solo mostrar 'pendiente' si NO tiene created_at y está en el caché local como pending
   let isPending = false;
   const localCache = window.__localOrderRows && window.__localOrderRows[String(o.id)];
@@ -2562,7 +2554,7 @@ function orderRowFor(o){
         <div class="order-row-user"><strong>Cliente:</strong> ${escapeHtml(userDisplay)}</div>
         <div class="order-row-customer-type"><strong>Perfil:</strong> ${escapeHtml(orderCustomerTypeLabel)}</div>
         <div class="order-row-address"><strong>Dirección:</strong> ${escapeHtml(address || '—')}</div>
-        ${(mapsLinkHtml || mapsUrlHtml) ? `<div class="order-row-map">${mapsLinkHtml}${mapsUrlHtml ? `<div>${mapsUrlHtml}</div>` : ''}</div>` : ''}
+        ${mapsLinkHtml ? `<div class="order-row-map">${mapsLinkHtml}</div>` : ''}
         ${scheduledDeliveryLabel ? `<div class="order-row-address"><strong>Entrega programada:</strong> ${escapeHtml(scheduledDeliveryLabel)}</div>` : ''}
         <div class="order-row-total"><strong>Total:</strong> $${Number(o.total||0).toFixed(2)}</div>
         <div class="order-row-payment"><strong>Forma de pago:</strong> ${escapeHtml(paymentMethod)}${paymentStatus ? ` <span class="muted">(${escapeHtml(paymentStatus)})</span>` : ''}</div>
@@ -2684,7 +2676,6 @@ function showOrderDetail(order){
   const scheduledDeliveryLabel = formatOrderScheduledDelivery(order);
   const customerTypeLabel = normalizeOrderCustomerType(order && order.customer_type) === 'minorista' ? 'Minorista' : 'Mayorista';
   const mapsLinkHtml = getOrderGoogleMapsLinkHtml(order, 'Abrir en Google Maps', 'order-map-link-modal');
-  const mapsUrlHtml = getOrderGoogleMapsUrlHtml(order, 'order-map-url-inline');
   // prefer user_* fields, otherwise display token preview when available
   const previewName = order._token_preview && (order._token_preview.name || order._token_preview.email) ? (order._token_preview.name || order._token_preview.email) : null;
   const displayName = order.user_full_name || previewName || order.user_email || (order.user_id ? '#'+order.user_id : '');
@@ -2693,7 +2684,7 @@ function showOrderDetail(order){
       <div><strong>Usuario:</strong> ${escapeHtml(displayName)} ${order.user_email && displayName !== order.user_email ? ' / ' + escapeHtml(order.user_email) : ''}</div>
       <div><strong>Perfil:</strong> ${escapeHtml(customerTypeLabel)}</div>
       <div><strong>Dirección:</strong> ${escapeHtml(address || '—')}</div>
-      ${(mapsLinkHtml || mapsUrlHtml) ? `<div><strong>Ubicación:</strong> ${mapsLinkHtml}${mapsUrlHtml ? `<div>${mapsUrlHtml}</div>` : ''}</div>` : ''}
+      ${mapsLinkHtml ? `<div><strong>Ubicación:</strong> ${mapsLinkHtml}</div>` : ''}
       ${scheduledDeliveryLabel ? `<div><strong>Entrega programada:</strong> ${escapeHtml(scheduledDeliveryLabel)}</div>` : ''}
       <div><strong>Total:</strong> $${Number(order.total||0).toFixed(2)}</div>
       <div><strong>Estado:</strong> ${escapeHtml(order.status||'')}</div>
