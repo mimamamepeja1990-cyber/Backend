@@ -56,6 +56,14 @@
   color:#1d4ed8;
   word-break:break-all;
 }
+.order-map-pending{
+  display:inline-flex;
+  align-items:center;
+  margin-top:4px;
+  font-size:12px;
+  font-weight:700;
+  color:#475569;
+}
 .order-map-link-card{
   background:linear-gradient(90deg,#eff6ff,#e0f2fe);
   border:1px solid rgba(37,99,235,0.24);

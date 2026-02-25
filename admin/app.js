@@ -248,6 +248,18 @@ let productLookupById = new Map();
 const PROMO_KEY = 'admin_promotions_v1';
 const FILTERS_KEY = 'admin_filters_v1';
 const PRODUCT_CATEGORIES_KEY = 'admin_product_categories_v1';
+const ORDER_MAPS_COORD_CACHE_KEY = 'admin_order_maps_coords_v3';
+const MENDOZA_GEO_BOUNDS = Object.freeze({
+  minLat: -37.7,
+  maxLat: -31.0,
+  minLon: -70.7,
+  maxLon: -66.2,
+});
+const ORDER_MAPS_COORD_TTL_MS = 1000 * 60 * 60 * 24 * 45;
+let orderMapsCoordCache = { byOrderId: {}, byAddressKey: {}, updatedAt: 0 };
+let orderMapsRerenderTimer = null;
+const orderMapsCoordInFlight = new Set();
+const orderMapsCoordFailUntil = new Map();
 
 // Promotions UI
 const promotionsSection = document.getElementById('promotions');
@@ -321,6 +333,353 @@ function saveLocalOrderCache(){
   try{
     localStorage.setItem('admin_local_orders_v1', JSON.stringify(window.__localOrderRows || {}));
   }catch(e){ console.warn('saveLocalOrderCache failed', e); }
+}
+
+function normalizeOrderMapsKeyToken(value){
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildOrderAddressCacheKeyFromSnapshot(addr){
+  try{
+    if (!addr || typeof addr !== 'object') return '';
+    const street = [addr.calle, addr.numeracion].filter(Boolean).join(' ').trim();
+    const raw = String(addr.rawAddress || '').trim();
+    const barrio = String(addr.barrio || '').trim();
+    const base = [street, barrio, raw].filter(Boolean).join(' | ');
+    return normalizeOrderMapsKeyToken(base);
+  }catch(_){ return ''; }
+}
+
+function loadOrderMapsCoordCache(){
+  try{
+    const raw = localStorage.getItem(ORDER_MAPS_COORD_CACHE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return;
+    const byOrderId = (parsed.byOrderId && typeof parsed.byOrderId === 'object') ? parsed.byOrderId : {};
+    const byAddressKey = (parsed.byAddressKey && typeof parsed.byAddressKey === 'object') ? parsed.byAddressKey : {};
+    const now = Date.now();
+    const keepFresh = (entry) => {
+      try{
+        if (!entry || typeof entry !== 'object') return false;
+        const ts = Number(entry.ts || 0);
+        const lat = Number(entry.lat);
+        const lon = Number(entry.lon);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+        if (ts && (now - ts) > ORDER_MAPS_COORD_TTL_MS) return false;
+        return true;
+      }catch(_){ return false; }
+    };
+    const cleanByOrderId = {};
+    const cleanByAddressKey = {};
+    Object.keys(byOrderId).forEach((k) => { if (keepFresh(byOrderId[k])) cleanByOrderId[k] = byOrderId[k]; });
+    Object.keys(byAddressKey).forEach((k) => { if (keepFresh(byAddressKey[k])) cleanByAddressKey[k] = byAddressKey[k]; });
+    orderMapsCoordCache = {
+      byOrderId: cleanByOrderId,
+      byAddressKey: cleanByAddressKey,
+      updatedAt: Number(parsed.updatedAt || now) || now,
+    };
+  }catch(e){
+    console.warn('loadOrderMapsCoordCache failed', e);
+    orderMapsCoordCache = { byOrderId: {}, byAddressKey: {}, updatedAt: 0 };
+  }
+}
+
+function saveOrderMapsCoordCache(){
+  try{
+    const payload = {
+      byOrderId: orderMapsCoordCache.byOrderId || {},
+      byAddressKey: orderMapsCoordCache.byAddressKey || {},
+      updatedAt: Date.now(),
+    };
+    localStorage.setItem(ORDER_MAPS_COORD_CACHE_KEY, JSON.stringify(payload));
+  }catch(e){
+    console.warn('saveOrderMapsCoordCache failed', e);
+  }
+}
+
+function getCachedOrderCoords(orderId, addressKey){
+  try{
+    if (orderId){
+      const direct = orderMapsCoordCache.byOrderId && orderMapsCoordCache.byOrderId[String(orderId)];
+      if (direct && Number.isFinite(Number(direct.lat)) && Number.isFinite(Number(direct.lon))){
+        return { lat: Number(direct.lat), lon: Number(direct.lon) };
+      }
+    }
+    if (addressKey){
+      const keyed = orderMapsCoordCache.byAddressKey && orderMapsCoordCache.byAddressKey[String(addressKey)];
+      if (keyed && Number.isFinite(Number(keyed.lat)) && Number.isFinite(Number(keyed.lon))){
+        return { lat: Number(keyed.lat), lon: Number(keyed.lon) };
+      }
+    }
+    return null;
+  }catch(_){ return null; }
+}
+
+function setCachedOrderCoords(order, lat, lon){
+  try{
+    const latNum = Number(lat);
+    const lonNum = Number(lon);
+    if (!Number.isFinite(latNum) || !Number.isFinite(lonNum)) return;
+    const fixedLat = Number(latNum.toFixed(6));
+    const fixedLon = Number(lonNum.toFixed(6));
+    const snapshot = getOrderAddressSnapshot(order);
+    const orderId = order && order.id != null ? String(order.id) : '';
+    const addressKey = buildOrderAddressCacheKeyFromSnapshot(snapshot);
+    const entry = { lat: fixedLat, lon: fixedLon, ts: Date.now() };
+    if (orderId) orderMapsCoordCache.byOrderId[orderId] = entry;
+    if (addressKey) orderMapsCoordCache.byAddressKey[addressKey] = entry;
+    saveOrderMapsCoordCache();
+  }catch(_){ }
+}
+
+function isMendozaPoint(lat, lon){
+  try{
+    const latNum = Number(lat);
+    const lonNum = Number(lon);
+    if (!Number.isFinite(latNum) || !Number.isFinite(lonNum)) return false;
+    return latNum >= MENDOZA_GEO_BOUNDS.minLat &&
+      latNum <= MENDOZA_GEO_BOUNDS.maxLat &&
+      lonNum >= MENDOZA_GEO_BOUNDS.minLon &&
+      lonNum <= MENDOZA_GEO_BOUNDS.maxLon;
+  }catch(_){ return false; }
+}
+
+function normalizeOrderPostalDigits(value){
+  try{
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const m = raw.match(/\d{4}/);
+    return m ? String(m[0] || '') : '';
+  }catch(_){ return ''; }
+}
+
+function isLikelyLasHerasPostal(postal){
+  const digits = normalizeOrderPostalDigits(postal);
+  // Las Heras commonly uses M5539 / M5540
+  return digits === '5539' || digits === '5540';
+}
+
+function buildOrderGeocodeQueryFromSnapshot(addr){
+  try{
+    if (!addr || typeof addr !== 'object') return '';
+    let street = [addr.calle, addr.numeracion].filter(Boolean).join(' ').trim();
+    if (!street){
+      const first = String(addr.rawAddress || '').split(',')[0] || '';
+      if (/\d/.test(first)) street = first.trim();
+    }
+    const barrio = String(addr.barrio || '')
+      .replace(/\bM\d{4}\b/ig, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+    const postalMatch = String(addr.rawAddress || '').match(/\bM?\d{4}\b/i);
+    const postal = postalMatch ? String(postalMatch[0] || '').trim() : '';
+    const probe = `${street} ${barrio} ${String(addr.rawAddress || '')}`;
+    const locality = (/las heras/i.test(probe) || isLikelyLasHerasPostal(postal)) ? 'Las Heras' : '';
+    const parts = [];
+    const pushPart = (value) => {
+      const part = String(value || '').replace(/\s+/g, ' ').trim();
+      if (!part) return;
+      const token = part.toLowerCase();
+      if (parts.some((p) => p.toLowerCase() === token)) return;
+      parts.push(part);
+    };
+    pushPart(street);
+    pushPart(locality);
+    pushPart(barrio);
+    pushPart(postal);
+    if (!parts.length && addr.rawAddress) pushPart(addr.rawAddress);
+    pushPart('Mendoza');
+    pushPart('Argentina');
+    return parts.join(', ');
+  }catch(_){ return ''; }
+}
+
+function normalizeOrderPostalToken(value){
+  try{
+    return normalizeOrderPostalDigits(value);
+  }catch(_){ return ''; }
+}
+
+function buildOrderArcGisCandidateText(candidate){
+  try{
+    const attrs = candidate && candidate.attributes && typeof candidate.attributes === 'object'
+      ? candidate.attributes
+      : {};
+    const parts = [
+      candidate && candidate.address,
+      attrs.Match_addr,
+      attrs.LongLabel,
+      attrs.ShortLabel,
+      attrs.Place_addr,
+      attrs.StAddr,
+      attrs.District,
+      attrs.City,
+      attrs.Subregion,
+      attrs.Region,
+      attrs.Postal,
+      attrs.CntryName
+    ];
+    return normalizeOrderMapsKeyToken(parts.filter(Boolean).join(' '));
+  }catch(_){ return ''; }
+}
+
+function buildOrderArcGisHints(addr){
+  try{
+    const raw = String(addr && addr.rawAddress || '');
+    const streetRaw = String(addr && addr.calle || '');
+    const street = normalizeOrderMapsKeyToken(streetRaw.replace(/\bcalle\b/ig, ' '));
+    const streetTokens = street.split(' ').filter((t) => t.length >= 3 && !/^\d/.test(t));
+    const numberRaw = String(addr && addr.numeracion || '').trim();
+    const numberMatch = numberRaw.match(/\d{1,6}/);
+    const number = numberMatch ? String(numberMatch[0]) : '';
+    const postalRawMatch = raw.match(/\bM?\d{4}\b/i);
+    const postal = normalizeOrderPostalToken(postalRawMatch ? postalRawMatch[0] : '');
+    const areaProbe = normalizeOrderMapsKeyToken([addr && addr.barrio, raw, streetRaw].filter(Boolean).join(' '));
+    const wantsLasHeras = areaProbe.includes('las heras') || isLikelyLasHerasPostal(postal);
+    return { streetTokens, number, postal, wantsLasHeras };
+  }catch(_){ return { streetTokens: [], number: '', postal: '', wantsLasHeras: false }; }
+}
+
+function hasOrderWordToken(text, token){
+  try{
+    const t = normalizeOrderMapsKeyToken(text);
+    const tk = normalizeOrderMapsKeyToken(token);
+    if (!t || !tk) return false;
+    return new RegExp(`(^|\\s)${tk}(\\s|$)`, 'i').test(t);
+  }catch(_){ return false; }
+}
+
+async function resolveOrderCoordsWithArcGis(query, addr = null){
+  try{
+    const clean = String(query || '').trim();
+    if (!clean) return null;
+    const hints = buildOrderArcGisHints(addr || {});
+    const params = new URLSearchParams({
+      SingleLine: clean,
+      f: 'pjson',
+      countryCode: 'ARG',
+      maxLocations: '8',
+      forStorage: 'false',
+      outFields: '*',
+      location: '-68.8458,-32.8895',
+      searchExtent: '-70.7,-37.7,-66.2,-31.0',
+    });
+    const url = `https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?${params.toString()}`;
+    const data = await safeFetch(url, { cache: 'no-store' }).catch(() => null);
+    const candidates = Array.isArray(data && data.candidates) ? data.candidates : [];
+    let bestStrict = null;
+    let bestRelaxed = null;
+    const updateBest = (target, payload) => {
+      if (!target || payload.rank > target.rank) return payload;
+      return target;
+    };
+    for (const candidate of candidates){
+      const score = Number(candidate && candidate.score);
+      if (Number.isFinite(score) && score < 62) continue;
+      const loc = candidate && candidate.location && typeof candidate.location === 'object' ? candidate.location : {};
+      const lat = Number(loc.y);
+      const lon = Number(loc.x);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      if (!isMendozaPoint(lat, lon)) continue;
+      const text = buildOrderArcGisCandidateText(candidate);
+      if (!text) continue;
+      const streetMatches = hints.streetTokens.filter((token) => text.includes(token));
+      const streetHitCount = streetMatches.length;
+      const hasStreetHint = hints.streetTokens.length > 0;
+      const numberMatches = hints.number ? hasOrderWordToken(text, hints.number) : false;
+      const hasNumberHint = !!hints.number;
+      const hasLasHerasMatch = text.includes('las heras');
+      const localityStrictOk = hints.wantsLasHeras ? hasLasHerasMatch : true;
+      const postalToken = normalizeOrderPostalToken((candidate && candidate.attributes && candidate.attributes.Postal) || text);
+      const postalMatches = hints.postal ? (postalToken === hints.postal || text.includes(hints.postal)) : false;
+      if (!localityStrictOk) continue;
+      let rank = Number.isFinite(score) ? score : 0;
+      rank += streetHitCount * 6;
+      if (numberMatches) rank += 8;
+      if (postalMatches) rank += 4;
+      if (hasLasHerasMatch) rank += hints.wantsLasHeras ? 5 : 1;
+      const addrType = normalizeOrderMapsKeyToken(
+        (candidate && candidate.attributes && (candidate.attributes.Addr_type || candidate.attributes.Type)) || ''
+      );
+      if (addrType.includes('pointaddress') || addrType.includes('streetaddress')) rank += 5;
+      const strict = (!hasStreetHint || streetHitCount > 0) && (!hasNumberHint || numberMatches);
+      const relaxed = (!hasStreetHint || streetHitCount > 0 || text.includes('mendoza')) && (!hasNumberHint || numberMatches || streetHitCount > 0);
+      const payload = { lat, lon, score, rank };
+      if (strict) bestStrict = updateBest(bestStrict, payload);
+      else if (relaxed) bestRelaxed = updateBest(bestRelaxed, payload);
+    }
+    if (bestStrict) return { lat: bestStrict.lat, lon: bestStrict.lon, score: bestStrict.score };
+    if (bestRelaxed) return { lat: bestRelaxed.lat, lon: bestRelaxed.lon, score: bestRelaxed.score };
+    return null;
+  }catch(_){ return null; }
+}
+
+function scheduleOrderMapLinksRerender(){
+  if (orderMapsRerenderTimer) return;
+  orderMapsRerenderTimer = setTimeout(() => {
+    orderMapsRerenderTimer = null;
+    try{
+      if (isPreparationsSectionActive()) renderPreparations(lastPreparationsBase);
+    }catch(_){ }
+    try{
+      const ordersTableBody = document.querySelector('#ordersTable_web tbody');
+      if (ordersTableBody && Array.isArray(lastOrdersBaseWeb) && lastOrdersBaseWeb.length){
+        const dateFilter = (typeof orderDate_web !== 'undefined' && orderDate_web && orderDate_web.value) ? orderDate_web.value : '';
+        renderOrders(lastOrdersBaseWeb, 'web', dateFilter);
+      }
+    }catch(_){ }
+    try{
+      const modal = document.getElementById('orderModal');
+      if (modal && !modal.classList.contains('hidden')){
+        const titleEl = document.getElementById('orderModalTitle');
+        const txt = String((titleEl && titleEl.textContent) || '');
+        const match = txt.match(/#(\d+)/);
+        const orderId = match ? String(match[1]) : '';
+        if (orderId){
+          const order = (lastOrdersBaseWeb || []).find((o) => String(o && o.id) === orderId) ||
+            (lastPreparationsBase || []).find((o) => String(o && o.id) === orderId);
+          if (order) showOrderDetail(order);
+        }
+      }
+    }catch(_){ }
+  }, 220);
+}
+
+function queueOrderCoordsResolution(order, snapshot = null){
+  try{
+    const addr = snapshot || getOrderAddressSnapshot(order);
+    const orderId = order && order.id != null ? String(order.id) : '';
+    const addressKey = buildOrderAddressCacheKeyFromSnapshot(addr);
+    if (!orderId && !addressKey) return;
+    if (getCachedOrderCoords(orderId, addressKey)) return;
+    const query = buildOrderGeocodeQueryFromSnapshot(addr);
+    if (!query) return;
+    const inFlightKey = orderId ? ('id:' + orderId) : ('addr:' + addressKey);
+    if (!inFlightKey || orderMapsCoordInFlight.has(inFlightKey)) return;
+    const failUntil = Number(orderMapsCoordFailUntil.get(inFlightKey) || 0);
+    if (failUntil && failUntil > Date.now()) return;
+    orderMapsCoordInFlight.add(inFlightKey);
+    resolveOrderCoordsWithArcGis(query, addr)
+      .then((resolved) => {
+        if (!resolved){
+          orderMapsCoordFailUntil.set(inFlightKey, Date.now() + (1000 * 60 * 5));
+          return;
+        }
+        orderMapsCoordFailUntil.delete(inFlightKey);
+        setCachedOrderCoords(order, resolved.lat, resolved.lon);
+        scheduleOrderMapLinksRerender();
+      })
+      .catch(() => {})
+      .finally(() => {
+        orderMapsCoordInFlight.delete(inFlightKey);
+      });
+  }catch(_){ }
 }
 
 function normalizeSaleUnit(val){
@@ -1680,6 +2039,7 @@ function getOrderEmail(order){
 
 function getOrderAddressSnapshot(order){
   try{
+    const orderId = order && order.id != null ? String(order.id) : '';
     const tokenPreview = order && order._token_preview && typeof order._token_preview === 'object'
       ? order._token_preview
       : {};
@@ -1730,16 +2090,31 @@ function getOrderAddressSnapshot(order){
       const n = Number(candidate);
       if (Number.isFinite(n)){ lon = Number(n.toFixed(6)); break; }
     }
+    const addressKey = buildOrderAddressCacheKeyFromSnapshot({
+      barrio,
+      calle,
+      numeracion,
+      rawAddress,
+    });
+    if ((!Number.isFinite(lat) || !Number.isFinite(lon))){
+      const cached = getCachedOrderCoords(orderId, addressKey);
+      if (cached){
+        lat = Number(cached.lat);
+        lon = Number(cached.lon);
+      }
+    }
     return {
       barrio: String(barrio || '').trim(),
       calle: String(calle || '').trim(),
       numeracion: String(numeracion || '').trim(),
       rawAddress: String(rawAddress || '').trim(),
       lat,
-      lon
+      lon,
+      orderId,
+      addressKey,
     };
   }catch(_){
-    return { barrio: '', calle: '', numeracion: '', rawAddress: '', lat: null, lon: null };
+    return { barrio: '', calle: '', numeracion: '', rawAddress: '', lat: null, lon: null, orderId: '', addressKey: '' };
   }
 }
 
@@ -1757,6 +2132,16 @@ function getOrderAddress(order){
 function buildOrderGoogleMapsUrl(order){
   try{
     const addr = getOrderAddressSnapshot(order);
+    const cachedCoords = getCachedOrderCoords(addr.orderId, addr.addressKey);
+    if (cachedCoords){
+      const q = `${Number(cachedCoords.lat).toFixed(6)},${Number(cachedCoords.lon).toFixed(6)}`;
+      return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(q);
+    }
+    const query = buildOrderGeocodeQueryFromSnapshot(addr);
+    if (query){
+      queueOrderCoordsResolution(order, addr);
+      return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(query);
+    }
     const parseCoord = (value) => {
       if (value === null || typeof value === 'undefined') return NaN;
       if (typeof value === 'string'){
@@ -1771,44 +2156,18 @@ function buildOrderGoogleMapsUrl(order){
       const q = `${Number(lat).toFixed(6)},${Number(lon).toFixed(6)}`;
       return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(q);
     }
-    let street = [addr.calle, addr.numeracion].filter(Boolean).join(' ').trim();
-    if (!street){
-      const first = String(addr.rawAddress || '').split(',')[0] || '';
-      if (/\d/.test(first)) street = first.trim();
-    }
-    const barrioClean = String(addr.barrio || '')
-      .replace(/\bM\d{4}\b/ig, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-    const combinedArea = `${barrioClean} ${String(addr.rawAddress || '')}`.toLowerCase();
-    const localityHint = /las heras/i.test(combinedArea) ? 'Las Heras' : '';
-    const structuredParts = [];
-    const pushPart = (value) => {
-      const part = String(value || '').replace(/\s+/g, ' ').trim();
-      if (!part) return;
-      const normalized = part.toLowerCase();
-      if (structuredParts.some((p) => p.toLowerCase() === normalized)) return;
-      structuredParts.push(part);
-    };
-    pushPart(street);
-    pushPart(barrioClean);
-    if (localityHint) pushPart(localityHint);
-    let query = structuredParts.join(', ');
-    if (!query){
-      query = String(addr.rawAddress || '').replace(/\s+/g, ' ').trim();
-    }
-    if (!query) return '';
-    if (localityHint && !/las heras/i.test(query)) query = `${query}, Las Heras`;
-    if (!/mendoza/i.test(query)) query = `${query}, Mendoza`;
-    if (!/argentina/i.test(query)) query = `${query}, Argentina`;
-    return 'https://www.google.com/maps/search/?api=1&query=' + encodeURIComponent(query);
+    return '';
   }catch(_){ return ''; }
 }
 
 function getOrderGoogleMapsLinkHtml(order, label = 'Abrir en Google Maps', className = ''){
   try{
     const url = buildOrderGoogleMapsUrl(order);
-    if (!url) return '';
+    if (!url){
+      const addr = getOrderAddressSnapshot(order);
+      const hasAddress = !!String([addr.calle, addr.numeracion, addr.barrio, addr.rawAddress].filter(Boolean).join(' ')).trim();
+      return hasAddress ? '<span class="order-map-pending">Resolviendo ubicacion...</span>' : '';
+    }
     const extraClass = String(className || '').trim();
     const classes = ['btn', 'small', 'order-map-link'];
     if (extraClass) classes.push(extraClass);
@@ -2974,6 +3333,7 @@ async function bootstrapAdmin(){
   try{ await refresh(); }catch(e){ console.warn('initial refresh failed', e); }
   // restore any locally-inserted order previews (persisted across reloads)
   try{ loadLocalOrderCache(); }catch(e){ console.warn('loadLocalOrderCache failed', e); }
+  try{ loadOrderMapsCoordCache(); }catch(e){ console.warn('loadOrderMapsCoordCache failed', e); }
   try{ await refreshOrders('web'); }catch(e){ console.warn('refreshOrders web failed', e); }
 }
 bootstrapAdmin();
