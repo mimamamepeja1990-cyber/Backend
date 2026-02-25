@@ -512,6 +512,21 @@ function getOrderPostalDepartments(value){
   }catch(_){ return []; }
 }
 
+function normalizeOrderDepartmentToken(value){
+  return normalizeOrderMapsKeyToken(String(value || '').replace(/\./g, ' '));
+}
+
+function orderPostalMatchesDepartment(postal, department){
+  try{
+    const postalCode = normalizeOrderPostalCode(postal);
+    const depToken = normalizeOrderDepartmentToken(department);
+    if (!postalCode || !depToken) return true;
+    const deps = getOrderPostalDepartments(postalCode);
+    if (!deps.length) return true;
+    return deps.some((dep) => normalizeOrderDepartmentToken(dep) === depToken);
+  }catch(_){ return true; }
+}
+
 function isLikelyLasHerasPostal(postal){
   const digits = normalizeOrderPostalDigits(postal);
   // Las Heras commonly uses M5539 / M5540
@@ -530,7 +545,7 @@ function buildOrderGeocodeQueryFromSnapshot(addr){
       .replace(/\bM\d{4}\b/ig, '')
       .replace(/\s+/g, ' ')
       .trim();
-    const postal = normalizeOrderPostalCode(addr.postalCode || addr.postal_code || String(addr.rawAddress || ''));
+    let postal = normalizeOrderPostalCode(addr.postalCode || addr.postal_code || String(addr.rawAddress || ''));
     const probe = `${street} ${barrio} ${String(addr.rawAddress || '')}`;
     const postalDeps = getOrderPostalDepartments(postal);
     const departmentToken = normalizeOrderMapsKeyToken(addr.department || '');
@@ -540,6 +555,10 @@ function buildOrderGeocodeQueryFromSnapshot(addr){
     }
     if (!locality && /las heras/i.test(probe)) locality = 'Las Heras';
     if (!locality && postalDeps.length) locality = String(postalDeps[0] || '').trim();
+    if (postal && locality && !orderPostalMatchesDepartment(postal, locality)){
+      const rawPostal = normalizeOrderPostalCode(String(addr.rawAddress || ''));
+      postal = orderPostalMatchesDepartment(rawPostal, locality) ? rawPostal : '';
+    }
     const parts = [];
     const pushPart = (value) => {
       const part = String(value || '').replace(/\s+/g, ' ').trim();
@@ -2217,7 +2236,11 @@ function getOrderAddress(order){
   try{
     const addr = getOrderAddressSnapshot(order);
     const street = [addr.calle, addr.numeracion].filter((p) => String(p || '').trim()).join(' ').trim();
-    const parts = [street, addr.barrio, addr.department, addr.postalCode].filter((p) => String(p || '').trim());
+    let displayPostal = String(addr.postalCode || '').trim();
+    if (displayPostal && addr.department && !orderPostalMatchesDepartment(displayPostal, addr.department)){
+      displayPostal = '';
+    }
+    const parts = [street, addr.barrio, addr.department, displayPostal].filter((p) => String(p || '').trim());
     if (parts.length) return parts.join(', ');
     if (String(addr.rawAddress || '').trim()) return String(addr.rawAddress).trim();
     return '—';

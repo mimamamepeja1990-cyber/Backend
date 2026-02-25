@@ -748,6 +748,13 @@ def _normalize_region_token(value: Any) -> str:
     return re.sub(r'\s+', ' ', text_value).strip()
 
 
+_MENDOZA_DEPARTMENTS = sorted(
+    {dep for deps in _MENDOZA_POSTAL_TO_DEPARTMENTS.values() for dep in deps},
+    key=lambda value: len(_normalize_region_token(value)),
+    reverse=True,
+)
+
+
 def _extract_postal_digits(value: Any) -> str:
     try:
         raw = str(value or '').strip()
@@ -779,6 +786,43 @@ def _departments_for_postal(postal_code: Any) -> List[str]:
     if not digits:
         return []
     return list(_MENDOZA_POSTAL_TO_DEPARTMENTS.get(digits) or [])
+
+
+def _department_from_hints(values: Any) -> str:
+    candidates = values if isinstance(values, (list, tuple, set)) else [values]
+    probe = _normalize_region_token(' '.join(str(v or '') for v in candidates if v))
+    if not probe:
+        return ''
+    for department in _MENDOZA_DEPARTMENTS:
+        department_token = _normalize_region_token(department)
+        if department_token and department_token in probe:
+            return str(department or '')
+    return ''
+
+
+def _postal_matches_department(postal_code: Any, department: Any) -> bool:
+    postal = _normalize_postal_code(postal_code)
+    department_token = _normalize_region_token(department)
+    if not postal or not department_token:
+        return True
+    departments = _departments_for_postal(postal)
+    if not departments:
+        return True
+    return any(_normalize_region_token(dep) == department_token for dep in departments)
+
+
+def _select_postal_for_department(postal_code: Any, department: Any, hints: Optional[List[Any]] = None) -> str:
+    resolved_department = str(
+        department or _department_from_hints(hints or []) or ''
+    ).strip()
+    direct_postal = _normalize_postal_code(postal_code)
+    if direct_postal and _postal_matches_department(direct_postal, resolved_department):
+        return direct_postal
+    for hint in (hints or []):
+        candidate = _normalize_postal_code(hint)
+        if candidate and _postal_matches_department(candidate, resolved_department):
+            return candidate
+    return direct_postal if direct_postal and not resolved_department else ''
 
 
 def _coerce_coord(value: Any) -> Optional[float]:
@@ -875,6 +919,19 @@ def _extract_order_address_snapshot(order_data: Dict[str, Any]) -> Dict[str, Any
         ''
     )
     department = str(department or '').strip()
+    hinted_department = _department_from_hints([
+        department,
+        barrio,
+        raw_address,
+        payload.get('query_hint'),
+        token_preview.get('query_hint'),
+        token_preview.get('label'),
+        token_preview.get('full_text'),
+        nested_address.get('query_hint'),
+        nested_address.get('display_name'),
+    ])
+    if not department and hinted_department:
+        department = hinted_department
 
     department_candidates = _departments_for_postal(postal_code)
     if department_candidates:
@@ -882,8 +939,10 @@ def _extract_order_address_snapshot(order_data: Dict[str, Any]) -> Dict[str, Any
             str(department or ''),
             str(barrio or ''),
             str(raw_address or ''),
+            str(token_preview.get('query_hint') or ''),
             str(token_preview.get('label') or ''),
             str(token_preview.get('full_text') or ''),
+            str(nested_address.get('query_hint') or ''),
         ]))
         matched_department = ''
         if probe:
@@ -892,10 +951,27 @@ def _extract_order_address_snapshot(order_data: Dict[str, Any]) -> Dict[str, Any
                 if dep_token and dep_token in probe:
                     matched_department = dep_name
                     break
+        if not matched_department and hinted_department:
+            hinted_token = _normalize_region_token(hinted_department)
+            for dep_name in department_candidates:
+                if hinted_token and hinted_token == _normalize_region_token(dep_name):
+                    matched_department = dep_name
+                    break
         if not matched_department:
-            matched_department = department_candidates[0]
+            matched_department = ''
         if not department:
-            department = matched_department
+            department = matched_department or hinted_department or ''
+
+    postal_code = _select_postal_for_department(postal_code, department, [
+        raw_address,
+        barrio,
+        payload.get('query_hint'),
+        token_preview.get('query_hint'),
+        token_preview.get('label'),
+        token_preview.get('full_text'),
+        nested_address.get('query_hint'),
+        nested_address.get('display_name'),
+    ])
 
     lat_candidates = [
         payload.get('user_lat'),
@@ -956,11 +1032,15 @@ def _compose_order_maps_query(snapshot: Dict[str, Any]) -> str:
     raw_address = str(snapshot.get('raw_address') or '').strip()
     postal_code = _normalize_postal_code(snapshot.get('postal_code'))
     department = str(snapshot.get('department') or '').strip()
+    if not department:
+        department = _department_from_hints([barrio, raw_address, street])
 
     if not department:
         deps = _departments_for_postal(postal_code)
         if deps:
             department = deps[0]
+
+    postal_code = _select_postal_for_department(postal_code, department, [raw_address, barrio, street])
 
     parts: List[str] = []
     seen: set = set()
