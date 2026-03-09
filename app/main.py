@@ -5638,10 +5638,17 @@ async def backup_orders(request: Request):
 
 
 @app.get('/orders', response_model=List[schemas.OrderResponse])
-def list_orders(skip: int = 0, limit: int = 200, source: Optional[str] = None, db: Session = Depends(get_db)):
+def list_orders(
+    skip: int = 0,
+    limit: int = 200,
+    source: Optional[str] = None,
+    q: Optional[str] = None,
+    date: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
     # Fetch recent orders (safe select in CRUD). Then merge any cached pushed payloads
     # (which may contain token preview) to surface user info when DB lacks columns.
-    rows = crud.get_orders(db, skip, limit, source=source)
+    rows = crud.get_orders(db, skip, limit, source=source, q=q, date=date)
     try:
         _prune_order_cache()
     except Exception:

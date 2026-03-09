@@ -2156,7 +2156,14 @@ def create_order_minimal(db: Session, raw_payload: dict, current_user: Optional[
     return SimpleNamespace(**objd)
 
 
-def get_orders(db: Session, skip: int = 0, limit: int = 200, source: Optional[str] = None):
+def get_orders(
+    db: Session,
+    skip: int = 0,
+    limit: int = 200,
+    source: Optional[str] = None,
+    q: Optional[str] = None,
+    date: Optional[str] = None,
+):
     """Return recent orders using a safe raw SELECT that only requests
     columns present in the `orders` table. This avoids ProgrammingError
     when the live DB schema lacks newly added columns.
@@ -2182,18 +2189,93 @@ def get_orders(db: Session, skip: int = 0, limit: int = 200, source: Optional[st
 
     cols_sql = ', '.join(cols)
     try:
-        # Build WHERE clause if source filtering requested and column exists
-        where_clause = ''
+        where = []
         params = {'skip': skip, 'limit': limit}
         if source and 'source' in existing:
-            where_clause = ' WHERE source = :source'
+            where.append('source = :source')
             params['source'] = source
-        rows = _safe_execute_fetchall(db, f"SELECT {cols_sql} FROM orders{where_clause} ORDER BY created_at DESC LIMIT :limit OFFSET :skip", params)
+
+        date_value = str(date or '').strip()
+        if date_value:
+            # Supports YYYY-MM-DD date filtering on both sqlite and postgres.
+            where.append('DATE(created_at) = :date')
+            params['date'] = date_value
+
+        q_raw = str(q or '').strip()
+        if q_raw:
+            q_no_hash = q_raw[1:].strip() if q_raw.startswith('#') else q_raw
+            q_like = f"%{q_raw.lower()}%"
+            search_parts = []
+
+            # Exact id match first so searching "1234" brings order #1234 reliably.
+            if q_no_hash:
+                search_parts.append("CAST(id AS TEXT) = :q_exact")
+                params['q_exact'] = q_no_hash
+                params['q_exact_lc'] = q_no_hash.lower()
+                search_parts.append("LOWER(CAST(id AS TEXT)) = :q_exact_lc")
+
+            # Partial id/name/email/address fallback search.
+            params['q_like'] = q_like
+            search_parts.append("LOWER(CAST(id AS TEXT)) LIKE :q_like")
+            for col_name in (
+                'user_full_name',
+                'user_email',
+                'user_barrio',
+                'user_calle',
+                'user_numeracion',
+                'user_postal_code',
+                'user_department',
+                'payment_reference',
+            ):
+                if col_name in existing:
+                    search_parts.append(f"LOWER(COALESCE(CAST({col_name} AS TEXT), '')) LIKE :q_like")
+
+            if search_parts:
+                where.append('(' + ' OR '.join(search_parts) + ')')
+
+        where_clause = (' WHERE ' + ' AND '.join(where)) if where else ''
+        rows = _safe_execute_fetchall(
+            db,
+            f"SELECT {cols_sql} FROM orders{where_clause} ORDER BY created_at DESC LIMIT :limit OFFSET :skip",
+            params,
+        )
     except Exception:
         logger.exception('get_orders raw select failed')
         # As a last resort try the ORM query (may raise too); let caller see a handled error
         try:
-            orm_rows = db.query(models.Order).order_by(models.Order.created_at.desc()).offset(skip).limit(limit).all()
+            query = db.query(models.Order)
+            if source and hasattr(models.Order, 'source'):
+                query = query.filter(models.Order.source == source)
+            orm_rows = query.order_by(models.Order.created_at.desc()).offset(skip).limit(limit).all()
+            q_raw = str(q or '').strip().lower()
+            if q_raw:
+                q_no_hash = q_raw[1:].strip() if q_raw.startswith('#') else q_raw
+                filtered = []
+                for row in orm_rows:
+                    try:
+                        row_id = str(getattr(row, 'id', '') or '').strip().lower()
+                        row_blob = ' '.join([
+                            row_id,
+                            str(getattr(row, 'user_full_name', '') or '').strip().lower(),
+                            str(getattr(row, 'user_email', '') or '').strip().lower(),
+                            str(getattr(row, 'user_barrio', '') or '').strip().lower(),
+                            str(getattr(row, 'user_calle', '') or '').strip().lower(),
+                            str(getattr(row, 'user_numeracion', '') or '').strip().lower(),
+                            str(getattr(row, 'user_postal_code', '') or '').strip().lower(),
+                            str(getattr(row, 'user_department', '') or '').strip().lower(),
+                            str(getattr(row, 'payment_reference', '') or '').strip().lower(),
+                        ])
+                        if (q_no_hash and row_id == q_no_hash) or (q_raw in row_blob):
+                            filtered.append(row)
+                    except Exception:
+                        continue
+                orm_rows = filtered
+            date_value = str(date or '').strip()
+            if date_value:
+                orm_rows = [
+                    row for row in orm_rows
+                    if str(getattr(row, 'created_at', '') or '').strip()[:10] == date_value
+                ]
             for r in orm_rows:
                 try:
                     if isinstance(r.items, str):

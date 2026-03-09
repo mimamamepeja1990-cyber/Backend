@@ -1964,8 +1964,12 @@ function renderOrders(list, source, dateFilter){
     });
   }catch(_){ }
   try{
-    const selectedType = normalizeOrderCustomerType(currentOrderCustomerType);
-    list = (list || []).filter(o => normalizeOrderCustomerType(o && o.customer_type) === selectedType);
+    const activeSearch = orderSearch_web && orderSearch_web.value ? String(orderSearch_web.value).trim() : '';
+    const shouldFilterByType = !activeSearch;
+    if (shouldFilterByType){
+      const selectedType = normalizeOrderCustomerType(currentOrderCustomerType);
+      list = (list || []).filter(o => normalizeOrderCustomerType(o && o.customer_type) === selectedType);
+    }
   }catch(_){ }
   // Agrupar por día y deduplicar por id (siempre mostrar solo una vez por tabla)
   const groups = new Map();
@@ -2240,6 +2244,64 @@ function getOrderAddress(order){
   }catch(_){ return '—'; }
 }
 
+function getOrderDeliveryNotes(order){
+  try{
+    const rawOrder = order && typeof order === 'object' ? order : {};
+    const parseObject = (value) => {
+      if (value && typeof value === 'object') return value;
+      if (typeof value === 'string'){
+        try{
+          const parsed = JSON.parse(value);
+          if (parsed && typeof parsed === 'object') return parsed;
+        }catch(_){ }
+      }
+      return {};
+    };
+    const tokenPreview = parseObject(rawOrder._token_preview);
+    const nestedAddress = parseObject(tokenPreview.address);
+    const directAddress = parseObject(rawOrder.address);
+    const normalizeNote = (value) => {
+      if (value === null || typeof value === 'undefined') return '';
+      let out = '';
+      if (typeof value === 'string') out = value;
+      else if (typeof value === 'number' || typeof value === 'boolean') out = String(value);
+      else return '';
+      out = out.replace(/\s+/g, ' ').trim();
+      const lower = out.toLowerCase();
+      if (!out || lower === 'null' || lower === 'undefined' || out === '-') return '';
+      return out;
+    };
+    const candidates = [
+      rawOrder.user_delivery_notes,
+      rawOrder.delivery_notes,
+      rawOrder.user_address_notes,
+      rawOrder.instructions,
+      rawOrder.instrucciones,
+      rawOrder.notes,
+      tokenPreview.delivery_notes,
+      tokenPreview.user_delivery_notes,
+      tokenPreview.instructions,
+      tokenPreview.instrucciones,
+      tokenPreview.notes,
+      nestedAddress.delivery_notes,
+      nestedAddress.user_delivery_notes,
+      nestedAddress.instructions,
+      nestedAddress.instrucciones,
+      nestedAddress.notes,
+      directAddress.delivery_notes,
+      directAddress.user_delivery_notes,
+      directAddress.instructions,
+      directAddress.instrucciones,
+      directAddress.notes,
+    ];
+    for (const candidate of candidates){
+      const note = normalizeNote(candidate);
+      if (note) return note;
+    }
+    return '';
+  }catch(_){ return ''; }
+}
+
 function buildOrderGoogleMapsUrl(order){
   try{
     const addr = getOrderAddressSnapshot(order);
@@ -2407,6 +2469,7 @@ function buildPreparationsSearchIndex(order){
     const itemsArr = safeParseItems(order && order.items ? order.items : []);
     const itemNames = (itemsArr || []).map((it) => getOrderItemSummaryLabel(it)).join(' ');
     const itemCodes = (itemsArr || []).map((it) => getOrderItemCode(it)).join(' ');
+    const deliveryNotes = getOrderDeliveryNotes(order);
     return [
       order && order.id,
       order && order.status,
@@ -2415,6 +2478,7 @@ function buildPreparationsSearchIndex(order){
       order && order.user_barrio,
       order && order.user_calle,
       order && order.user_numeracion,
+      deliveryNotes,
       itemNames,
       itemCodes,
     ].join(' ').toLowerCase();
@@ -2509,6 +2573,7 @@ function renderPreparations(list){
       const isPrepared = statusNorm === 'preparado';
       const customerName = getOrderPrimaryName(order);
       const customerEmail = getOrderEmail(order);
+      const deliveryNotes = getOrderDeliveryNotes(order);
       const statusLabel = isPrepared ? 'Preparado' : 'Visto';
       const card = document.createElement('article');
       card.className = 'preparation-card';
@@ -2527,6 +2592,7 @@ function renderPreparations(list){
         <div class="preparation-row"><span class="prep-label">Cliente</span><span class="prep-value">${escapeHtml(customerName)}</span></div>
         <div class="preparation-row"><span class="prep-label">Email</span><span class="prep-value">${escapeHtml(customerEmail)}</span></div>
         <div class="preparation-row"><span class="prep-label">Dirección</span><span class="prep-value">${escapeHtml(getOrderAddress(order))}</span></div>
+        ${deliveryNotes ? `<div class="preparation-row"><span class="prep-label">Instrucciones</span><span class="prep-value">${escapeHtml(deliveryNotes)}</span></div>` : ''}
         ${mapsLinkHtml ? `<div class="preparation-row prep-row-map"><span class="prep-label">Ubicación</span><span class="prep-value prep-map-value">${mapsLinkHtml}</span></div>` : ''}
         <div class="preparation-row preparation-row-items"><span class="prep-label">Items</span><div class="prep-value prep-items-value">${getPreparationItemsListHtml(order)}</div></div>
         <div class="preparation-row"><span class="prep-label">Total</span><span class="prep-value prep-value-total">$${Number(order.total || 0).toFixed(2)}</span></div>
@@ -2664,6 +2730,7 @@ function orderRowFor(o){
   const displayName = o.user_full_name || previewName || o.user_email;
   const userDisplay = displayName ? `${displayName}${o.user_email && displayName !== o.user_email ? ' / ' + o.user_email : ''}` : (o.user_id ? `#${o.user_id}` : '');
   const address = getOrderAddress(o);
+  const deliveryNotes = getOrderDeliveryNotes(o);
   const scheduledDeliveryLabel = formatOrderScheduledDelivery(o);
   const orderCustomerType = normalizeOrderCustomerType(o.customer_type);
   const orderCustomerTypeLabel = orderCustomerType === 'minorista' ? 'Minorista' : 'Mayorista';
@@ -2693,6 +2760,7 @@ function orderRowFor(o){
         <div class="order-row-user"><strong>Cliente:</strong> ${escapeHtml(userDisplay)}</div>
         <div class="order-row-customer-type"><strong>Perfil:</strong> ${escapeHtml(orderCustomerTypeLabel)}</div>
         <div class="order-row-address"><strong>Dirección:</strong> ${escapeHtml(address || '—')}</div>
+        ${deliveryNotes ? `<div class="order-row-notes"><strong>Instrucciones:</strong> ${escapeHtml(deliveryNotes)}</div>` : ''}
         ${mapsLinkHtml ? `<div class="order-row-map">${mapsLinkHtml}</div>` : ''}
         ${scheduledDeliveryLabel ? `<div class="order-row-address"><strong>Entrega programada:</strong> ${escapeHtml(scheduledDeliveryLabel)}</div>` : ''}
         <div class="order-row-total"><strong>Total:</strong> $${Number(o.total||0).toFixed(2)}</div>
@@ -2813,6 +2881,7 @@ function showOrderDetail(order){
   const paymentStatus = formatOrderPaymentStatus(order);
   const paymentReference = String((order && order.payment_reference) || '').trim();
   const scheduledDeliveryLabel = formatOrderScheduledDelivery(order);
+  const deliveryNotes = getOrderDeliveryNotes(order);
   const customerTypeLabel = normalizeOrderCustomerType(order && order.customer_type) === 'minorista' ? 'Minorista' : 'Mayorista';
   const mapsLinkHtml = getOrderGoogleMapsLinkHtml(order, 'Abrir en Google Maps', 'order-map-link-modal');
   // prefer user_* fields, otherwise display token preview when available
@@ -2823,6 +2892,7 @@ function showOrderDetail(order){
       <div><strong>Usuario:</strong> ${escapeHtml(displayName)} ${order.user_email && displayName !== order.user_email ? ' / ' + escapeHtml(order.user_email) : ''}</div>
       <div><strong>Perfil:</strong> ${escapeHtml(customerTypeLabel)}</div>
       <div><strong>Dirección:</strong> ${escapeHtml(address || '—')}</div>
+      ${deliveryNotes ? `<div><strong>Instrucciones:</strong> ${escapeHtml(deliveryNotes)}</div>` : ''}
       ${mapsLinkHtml ? `<div><strong>Ubicación:</strong> ${mapsLinkHtml}</div>` : ''}
       ${scheduledDeliveryLabel ? `<div><strong>Entrega programada:</strong> ${escapeHtml(scheduledDeliveryLabel)}</div>` : ''}
       <div><strong>Total:</strong> $${Number(order.total||0).toFixed(2)}</div>
