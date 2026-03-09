@@ -13,6 +13,7 @@ import traceback
 import datetime
 import os
 import re
+import uuid
 from sqlalchemy.exc import InternalError
 from zoneinfo import ZoneInfo
 
@@ -2264,6 +2265,217 @@ def authenticate_user(db: Session, email: str, plain_password: str):
     if not verify_password(plain_password, user.hashed_password):
         return None
     return user
+
+
+def _clean_address_str(value, max_len: int = 200) -> str:
+    try:
+        text_value = str(value or '').strip()
+    except Exception:
+        text_value = ''
+    if not text_value:
+        return ''
+    return re.sub(r'\s+', ' ', text_value).strip()[:max_len]
+
+
+def _clean_address_id(value) -> str:
+    candidate = _clean_address_str(value, 80)
+    if candidate:
+        return candidate
+    return f"addr-{uuid.uuid4().hex[:18]}"
+
+
+def _address_storage_id(user_id: int, client_id: str) -> str:
+    return f"{int(user_id)}:{_clean_address_id(client_id)}"
+
+
+def _address_client_id(raw_id: str, user_id: int) -> str:
+    rid = str(raw_id or '').strip()
+    prefix = f"{int(user_id)}:"
+    if rid.startswith(prefix):
+        return rid[len(prefix):] or rid
+    return rid
+
+
+def _clean_address_float(value):
+    try:
+        if value is None or value == '':
+            return None
+        if isinstance(value, str):
+            value = value.strip().replace(',', '.')
+        n = float(value)
+        if not (-180.0 <= n <= 180.0):
+            return None
+        return round(n, 6)
+    except Exception:
+        return None
+
+
+def _normalize_user_address_payload(item):
+    if not item:
+        return None
+    if hasattr(item, 'dict'):
+        try:
+            item = item.dict()
+        except Exception:
+            item = {}
+    if not isinstance(item, dict):
+        return None
+
+    barrio = _clean_address_str(item.get('barrio'), 200)
+    calle = _clean_address_str(item.get('calle'), 200)
+    numeracion = _clean_address_str(item.get('numeracion'), 100)
+    if not barrio or not calle or not numeracion:
+        return None
+
+    return {
+        'id': _clean_address_id(item.get('id')),
+        'label': _clean_address_str(item.get('label'), 80) or None,
+        'notes': _clean_address_str(item.get('notes'), 240) or None,
+        'barrio': barrio,
+        'calle': calle,
+        'numeracion': numeracion,
+        'postal_code': _clean_address_str(item.get('postal_code'), 20) or None,
+        'department': _clean_address_str(item.get('department'), 120) or None,
+        'query_hint': _clean_address_str(item.get('query_hint'), 200) or None,
+        'full_text': _clean_address_str(item.get('full_text'), 300) or None,
+        'lat': _clean_address_float(item.get('lat')),
+        'lon': _clean_address_float(item.get('lon')),
+        'is_default': bool(item.get('is_default')),
+    }
+
+
+def list_user_addresses(db: Session, user_id: int):
+    return db.query(models.UserAddress).filter(
+        models.UserAddress.user_id == int(user_id)
+    ).order_by(
+        models.UserAddress.is_default.desc(),
+        models.UserAddress.created_at.desc(),
+        models.UserAddress.id.asc(),
+    ).all()
+
+
+def ensure_user_primary_address(db: Session, user: models.User):
+    try:
+        if not user:
+            return
+        user_id = int(getattr(user, 'id'))
+        has_rows = db.query(models.UserAddress).filter(models.UserAddress.user_id == user_id).first()
+        if has_rows:
+            return
+        barrio = _clean_address_str(getattr(user, 'barrio', None), 200)
+        calle = _clean_address_str(getattr(user, 'calle', None), 200)
+        numeracion = _clean_address_str(getattr(user, 'numeracion', None), 100)
+        if not (barrio and calle and numeracion):
+            return
+        row = models.UserAddress(
+            id=f'profile-{user_id}',
+            user_id=user_id,
+            label='Principal',
+            notes=None,
+            barrio=barrio,
+            calle=calle,
+            numeracion=numeracion,
+            postal_code=None,
+            department=None,
+            query_hint=f'{calle} {numeracion}, {barrio}',
+            full_text=f'{calle} {numeracion}, {barrio}, Mendoza, Argentina',
+            lat=None,
+            lon=None,
+            is_default=True,
+        )
+        db.add(row)
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def replace_user_addresses(db: Session, user_id: int, payload):
+    raw_default = None
+    raw_items = []
+    if hasattr(payload, 'dict'):
+        try:
+            pdata = payload.dict()
+        except Exception:
+            pdata = {}
+    else:
+        pdata = payload if isinstance(payload, dict) else {}
+
+    if isinstance(pdata, dict):
+        raw_default = pdata.get('default_id')
+        raw_items = pdata.get('addresses') or []
+    elif isinstance(pdata, list):
+        raw_items = pdata
+
+    normalized = []
+    seen_ids = set()
+    for entry in (raw_items if isinstance(raw_items, list) else []):
+        parsed = _normalize_user_address_payload(entry)
+        if not parsed:
+            continue
+        if parsed['id'] in seen_ids:
+            parsed['id'] = _clean_address_id(None)
+        seen_ids.add(parsed['id'])
+        normalized.append(parsed)
+
+    target_default = _clean_address_str(raw_default, 80) if raw_default else ''
+    ids_set = {item['id'] for item in normalized}
+    if target_default not in ids_set:
+        target_default = normalized[0]['id'] if normalized else ''
+
+    existing_rows = db.query(models.UserAddress).filter(
+        models.UserAddress.user_id == int(user_id)
+    ).all()
+    by_id = { _address_client_id(getattr(row, 'id', ''), user_id): row for row in existing_rows }
+    incoming_ids = set(ids_set)
+
+    for stale in existing_rows:
+        sid = _address_client_id(getattr(stale, 'id', ''), user_id)
+        if sid not in incoming_ids:
+            db.delete(stale)
+
+    for item in normalized:
+        rid = item['id']
+        sid = _address_storage_id(user_id, rid)
+        row = by_id.get(rid)
+        if not row:
+            row = models.UserAddress(id=sid, user_id=int(user_id))
+        elif str(getattr(row, 'id', '') or '') != sid:
+            # Namespace ids by user to avoid cross-user collisions.
+            row.id = sid
+        row.user_id = int(user_id)
+        row.label = item['label']
+        row.notes = item['notes']
+        row.barrio = item['barrio']
+        row.calle = item['calle']
+        row.numeracion = item['numeracion']
+        row.postal_code = item['postal_code']
+        row.department = item['department']
+        row.query_hint = item['query_hint']
+        row.full_text = item['full_text']
+        row.lat = item['lat']
+        row.lon = item['lon']
+        row.is_default = bool(rid == target_default)
+        db.add(row)
+
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    rows = list_user_addresses(db, user_id)
+    if rows and not any(bool(getattr(r, 'is_default', False)) for r in rows):
+        rows[0].is_default = True
+        db.add(rows[0])
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+        rows = list_user_addresses(db, user_id)
+    return rows
 
 
 # --- Settings CRUD ---

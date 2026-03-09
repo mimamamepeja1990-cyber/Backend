@@ -1042,6 +1042,34 @@ def _compose_order_maps_query(snapshot: Dict[str, Any]) -> str:
 
     postal_code = _select_postal_for_department(postal_code, department, [raw_address, barrio, street])
 
+    def _looks_like_street(value: Any) -> bool:
+        try:
+            text_value = str(value or '').strip()
+        except Exception:
+            text_value = ''
+        if not text_value:
+            return False
+        token = _normalize_region_token(text_value)
+        if not token:
+            return False
+        if any(bad in token for bad in ('direccion', 'domicilio', 'sin direccion', 'ubicacion')):
+            return False
+        has_letter = bool(re.search(r'[A-Za-z\u00c0-\u024f]', text_value))
+        has_number = bool(re.search(r'\b\d{1,6}\b', text_value))
+        if has_letter and has_number:
+            return True
+        # If we have contextual fields, allow streets without number.
+        if has_letter and (barrio or department or postal_code):
+            return True
+        return False
+
+    first_raw_segment = str(raw_address.split(',')[0] or '').strip()
+    street_for_query = ''
+    if _looks_like_street(street):
+        street_for_query = street
+    elif _looks_like_street(first_raw_segment):
+        street_for_query = first_raw_segment
+
     parts: List[str] = []
     seen: set = set()
 
@@ -1055,16 +1083,27 @@ def _compose_order_maps_query(snapshot: Dict[str, Any]) -> str:
         seen.add(token)
         parts.append(text_value)
 
-    if street:
-        _push(street)
-    elif raw_address:
-        # Use first segment as street fallback when no explicit street exists.
-        _push(raw_address.split(',')[0])
-    _push(department)
+    if street_for_query:
+        _push(street_for_query)
     _push(barrio)
+    _push(department)
     _push(postal_code)
+    if raw_address and not street_for_query:
+        # Keep broader text only when no usable street was found.
+        _push(raw_address)
     _push('Mendoza')
     _push('Argentina')
+
+    # Avoid sending low-quality ambiguous queries to Maps.
+    quality_pieces = [
+        bool(street_for_query),
+        bool(barrio),
+        bool(department),
+        bool(postal_code),
+    ]
+    if sum(1 for flag in quality_pieces if flag) < 2:
+        return ''
+
     return ', '.join(parts)
 
 
@@ -3596,6 +3635,120 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
 @app.get('/auth/me', response_model=schemas.UserResponse)
 def auth_me(current_user = Depends(get_current_user)):
     return current_user
+
+
+def _to_epoch_ms(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        dt = value
+        if not isinstance(dt, datetime.datetime):
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return float(int(dt.timestamp() * 1000))
+    except Exception:
+        return None
+
+
+def _serialize_user_address_row(row: Any) -> Dict[str, Any]:
+    raw_id = str(getattr(row, 'id', '') or '').strip()
+    try:
+        user_id_int = int(getattr(row, 'user_id', 0) or 0)
+    except Exception:
+        user_id_int = 0
+    prefix = f"{user_id_int}:"
+    client_id = raw_id[len(prefix):] if (raw_id and prefix and raw_id.startswith(prefix)) else raw_id
+    payload = {
+        'id': client_id,
+        'user_id': user_id_int,
+        'label': str(getattr(row, 'label', '') or '').strip() or None,
+        'notes': str(getattr(row, 'notes', '') or '').strip() or None,
+        'barrio': str(getattr(row, 'barrio', '') or '').strip(),
+        'calle': str(getattr(row, 'calle', '') or '').strip(),
+        'numeracion': str(getattr(row, 'numeracion', '') or '').strip(),
+        'postal_code': str(getattr(row, 'postal_code', '') or '').strip() or None,
+        'department': str(getattr(row, 'department', '') or '').strip() or None,
+        'query_hint': str(getattr(row, 'query_hint', '') or '').strip() or None,
+        'full_text': str(getattr(row, 'full_text', '') or '').strip() or None,
+        'lat': None,
+        'lon': None,
+        'is_default': bool(getattr(row, 'is_default', False)),
+        # Keep frontend-compatible millisecond timestamp field.
+        'created_at': _to_epoch_ms(getattr(row, 'created_at', None)),
+        # Extra DB timestamps for diagnostics/admin compatibility.
+        'created_at_db': getattr(row, 'created_at', None),
+        'updated_at_db': getattr(row, 'updated_at', None),
+    }
+    try:
+        lat_val = getattr(row, 'lat', None)
+        payload['lat'] = round(float(lat_val), 6) if lat_val is not None else None
+    except Exception:
+        payload['lat'] = None
+    try:
+        lon_val = getattr(row, 'lon', None)
+        payload['lon'] = round(float(lon_val), 6) if lon_val is not None else None
+    except Exception:
+        payload['lon'] = None
+    return payload
+
+
+@app.get('/auth/addresses', response_model=schemas.UserAddressBookResponse)
+def auth_list_addresses(current_user=Depends(get_current_user), db: Session = Depends(get_db)):
+    try:
+        uid = int(getattr(current_user, 'id'))
+    except Exception:
+        raise HTTPException(status_code=401, detail='Invalid user')
+    try:
+        try:
+            crud.ensure_user_primary_address(db, current_user)
+        except Exception:
+            logger.exception('auth_list_addresses: ensure_user_primary_address failed')
+        rows = crud.list_user_addresses(db, uid)
+        serialized = [_serialize_user_address_row(row) for row in rows]
+        default_id = ''
+        for row in serialized:
+            if row.get('is_default'):
+                default_id = str(row.get('id') or '').strip()
+                break
+        if not default_id and serialized:
+            default_id = str(serialized[0].get('id') or '').strip()
+        return {
+            'default_id': default_id or None,
+            'addresses': serialized,
+        }
+    except Exception as e:
+        logger.exception('auth_list_addresses failed: %s', e)
+        raise HTTPException(status_code=500, detail='Could not load addresses')
+
+
+@app.put('/auth/addresses', response_model=schemas.UserAddressBookResponse)
+def auth_replace_addresses(
+    payload: schemas.UserAddressBookSync,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        uid = int(getattr(current_user, 'id'))
+    except Exception:
+        raise HTTPException(status_code=401, detail='Invalid user')
+    try:
+        rows = crud.replace_user_addresses(db, uid, payload)
+        serialized = [_serialize_user_address_row(row) for row in rows]
+        default_id = ''
+        for row in serialized:
+            if row.get('is_default'):
+                default_id = str(row.get('id') or '').strip()
+                break
+        if not default_id and serialized:
+            default_id = str(serialized[0].get('id') or '').strip()
+        return {
+            'default_id': default_id or None,
+            'addresses': serialized,
+        }
+    except Exception as e:
+        logger.exception('auth_replace_addresses failed: %s', e)
+        raise HTTPException(status_code=500, detail='Could not save addresses')
 
 @app.post("/products")
 async def create_product(payload: schemas.ProductCreate):

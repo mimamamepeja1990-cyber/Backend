@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from typing import Optional, List, Union
 from datetime import datetime
 
@@ -74,6 +74,41 @@ class UserResponse(BaseModel):
     created_at: Optional[datetime] = None
 
     model_config = { 'from_attributes': True }
+
+
+class UserAddressBase(BaseModel):
+    id: str
+    label: Optional[str] = None
+    notes: Optional[str] = None
+    barrio: str
+    calle: str
+    numeracion: str
+    postal_code: Optional[str] = None
+    department: Optional[str] = None
+    query_hint: Optional[str] = None
+    full_text: Optional[str] = None
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    is_default: Optional[bool] = False
+    created_at: Optional[float] = None
+
+
+class UserAddressResponse(UserAddressBase):
+    user_id: int
+    created_at_db: Optional[datetime] = None
+    updated_at_db: Optional[datetime] = None
+
+    model_config = { 'from_attributes': True }
+
+
+class UserAddressBookSync(BaseModel):
+    default_id: Optional[str] = None
+    addresses: List[UserAddressBase] = Field(default_factory=list)
+
+
+class UserAddressBookResponse(BaseModel):
+    default_id: Optional[str] = None
+    addresses: List[UserAddressResponse] = Field(default_factory=list)
 
 
 class Token(BaseModel):

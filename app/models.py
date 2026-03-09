@@ -98,6 +98,27 @@ class User(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class UserAddress(Base):
+    __tablename__ = "user_addresses"
+    # Keep string ids so frontend-generated address ids can be persisted as-is.
+    id = Column(String(80), primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False, index=True)
+    label = Column(String(80), nullable=True)
+    notes = Column(String(240), nullable=True)
+    barrio = Column(String(200), nullable=False)
+    calle = Column(String(200), nullable=False)
+    numeracion = Column(String(100), nullable=False)
+    postal_code = Column(String(20), nullable=True)
+    department = Column(String(120), nullable=True)
+    query_hint = Column(String(200), nullable=True)
+    full_text = Column(String(300), nullable=True)
+    lat = Column(Float, nullable=True)
+    lon = Column(Float, nullable=True)
+    is_default = Column(Boolean, default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+
 class Setting(Base):
     """Simple key/value store for admin-managed configuration such as
     filters and product-category mappings. Storing these in the DB makes
