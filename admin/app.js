@@ -9,6 +9,9 @@ document.querySelectorAll('.sidebar nav a[data-section]').forEach(link => {
     document.querySelectorAll('.sidebar nav a').forEach(a => a.classList.remove('active'));
     this.classList.add('active');
     if (this.getAttribute('data-section') === 'promo-images') fetchPromoImages();
+    if (this.getAttribute('data-section') === 'dashboard') {
+      try{ refreshSalesStats({ force: false, quiet: true }); }catch(_){ }
+    }
     // On mobile, close the sidebar after navigation
     try{
       const sidebar = document.querySelector('.sidebar');
@@ -25,9 +28,22 @@ document.querySelectorAll('.sidebar nav a[data-section]').forEach(link => {
 console.log('[admin] app.js loaded');
 const REMOTE_API_BASE = 'https://backend-0lcs.onrender.com';
 let API_BASE = (location.protocol && location.protocol.startsWith('http')) ? location.origin : REMOTE_API_BASE;
+function getActor(){
+  try{
+    const v = localStorage.getItem('admin:actor');
+    if (v && String(v).trim()) return String(v).trim();
+  }catch(_){ }
+  return 'admin-panel';
+}
 // Small helper to wrap fetch and provide consistent errors and JSON parsing
 async function safeFetch(url, opts) {
-  const res = await fetch(url, opts || {});
+  const next = opts ? Object.assign({}, opts) : {};
+  try{
+    const headers = new Headers(next.headers || {});
+    headers.set('X-Actor', getActor());
+    next.headers = headers;
+  }catch(_){ }
+  const res = await fetch(url, next);
   if (!res) throw new Error('no-response');
   const ct = res.headers.get('content-type') || '';
   let payload = null;
@@ -213,14 +229,39 @@ if (promoImageSelectBtn && promoImageInput && promoImageFileName && promoImageUp
 const apiBaseIndicator = document.getElementById('apiBaseIndicator');
 const wsStatus = document.getElementById('wsStatus');
 if(apiBaseIndicator) apiBaseIndicator.textContent = API_BASE;
+const salesOrders30El = document.getElementById('salesOrders30');
+const salesRevenue30El = document.getElementById('salesRevenue30');
+const salesAvgTicket30El = document.getElementById('salesAvgTicket30');
+const salesChartCanvas = document.getElementById('salesChart');
 
 const productsTableBody = document.querySelector('#productsTable tbody');
 const searchInput = document.getElementById('searchInput');
 const categoryFilter = document.getElementById('categoryFilter');
 const sortSelect = document.getElementById('sortSelect');
+const pageSizeSelect = document.getElementById('pageSizeSelect');
+const exportCsvBtn = document.getElementById('exportCsvBtn');
+const importCsvBtn = document.getElementById('importCsvBtn');
+const importCsvInput = document.getElementById('importCsvInput');
+const productsPager = document.getElementById('productsPager');
+const prevPageBtn = document.getElementById('prevPageBtn');
+const nextPageBtn = document.getElementById('nextPageBtn');
+const pageInfo = document.getElementById('pageInfo');
+const pageTotalInfo = document.getElementById('pageTotalInfo');
+const bulkBar = document.getElementById('bulkBar');
+const bulkCountEl = document.getElementById('bulkCount');
+const bulkTarget = document.getElementById('bulkTarget');
+const bulkMode = document.getElementById('bulkMode');
+const bulkValue = document.getElementById('bulkValue');
+const applyBulkBtn = document.getElementById('applyBulkBtn');
+const clearSelectionBtn = document.getElementById('clearSelectionBtn');
+const selectAllProducts = document.getElementById('selectAllProducts');
 const refreshBtn = document.getElementById('refreshBtn');
 const newBtn = document.getElementById('newBtn');
 const modal = document.getElementById('modal');
+const historyModal = document.getElementById('historyModal');
+const historyModalClose = document.getElementById('historyModalClose');
+const historyModalTitle = document.getElementById('historyModalTitle');
+const historyModalBody = document.getElementById('historyModalBody');
 const productForm = document.getElementById('productForm');
 const cancelBtn = document.getElementById('cancelBtn');
 const uploadImageBtn = document.getElementById('uploadImageBtn');
@@ -235,6 +276,10 @@ const kgPerUnitField = document.getElementById('kgPerUnitField');
 const stockLabel = document.getElementById('stockLabel');
 const priceLabel = document.getElementById('priceLabel');
 const productCodeInput = document.getElementById('code');
+const brandInput = document.getElementById('brand');
+const costInput = document.getElementById('cost');
+const minStockInput = document.getElementById('min_stock');
+const activeSelect = document.getElementById('active');
 const retailPriceInput = document.getElementById('price_retail');
 const retailPricesTableBody = document.querySelector('#retailPricesTable tbody');
 const retailPriceSearch = document.getElementById('retailPriceSearch');
@@ -317,7 +362,19 @@ const exportPromosBtn = document.getElementById('exportPromosBtn');
 const promotionsTableBody = document.querySelector('#promotionsTable tbody');
 
 let allProductsCache = [];
+let allProductsCacheTs = 0;
+let allProductsCacheHydrating = null;
+let catalogPage = 1;
+let catalogPageSize = 50;
+let catalogTotal = 0;
+let catalogPageItems = [];
+const selectedProductIds = new Set();
+let duplicateSkuSet = new Set();
+let duplicateSkuSetTs = 0;
+let salesStatsTs = 0;
+let salesStatsCache = null;
 let currentPromotionEditId = null;
+const SALES_STATS_TTL_MS = 1000 * 60;
 
 // Helpers
 function showToast(msg, type = 'info'){
@@ -328,6 +385,425 @@ function showToast(msg, type = 'info'){
   toast.classList.toggle('toast-error', type === 'error');
   const duration = type === 'error' ? 7000 : 3200;
   setTimeout(()=>{ toast.classList.add('hidden'); toast.classList.remove('toast-error'); toast.title = ''; }, duration);
+}
+
+const moneyFmt0 = new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', minimumFractionDigits: 0, maximumFractionDigits: 0 });
+const moneyFmt2 = new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const numFmt0 = new Intl.NumberFormat('es-AR', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+const numFmt3 = new Intl.NumberFormat('es-AR', { minimumFractionDigits: 0, maximumFractionDigits: 3 });
+
+function formatMoney(value){
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '—';
+  const isInt = Math.abs(n - Math.round(n)) < 1e-9;
+  return isInt ? moneyFmt0.format(n) : moneyFmt2.format(n);
+}
+
+function formatNumber(value, { digits = 0 } = {}){
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '—';
+  return digits >= 3 ? numFmt3.format(n) : numFmt0.format(n);
+}
+
+function formatPercent(value){
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '—';
+  const fixed = Math.round(n * 10) / 10;
+  // Use comma for decimals in es-AR
+  return String(fixed).replace('.', ',') + '%';
+}
+
+function formatShortDateLabel(iso){
+  try{
+    const raw = String(iso || '').trim();
+    const parts = raw.split('-');
+    if (parts.length === 3) return `${parts[2]}/${parts[1]}`;
+    return raw;
+  }catch(_){ return String(iso || ''); }
+}
+
+function renderSalesStats(stats){
+  const st = stats && typeof stats === 'object' ? stats : null;
+  try{ if (salesOrders30El) salesOrders30El.textContent = st ? formatNumber(st.orders || 0) : '—'; }catch(_){ }
+  try{ if (salesRevenue30El) salesRevenue30El.textContent = st ? formatMoney(st.revenue || 0) : '—'; }catch(_){ }
+  try{ if (salesAvgTicket30El) salesAvgTicket30El.textContent = st ? formatMoney(st.avg_ticket || 0) : '—'; }catch(_){ }
+
+  // Chart (by_day)
+  if (!salesChartCanvas || typeof Chart === 'undefined') return;
+  const series = (st && Array.isArray(st.by_day)) ? st.by_day : [];
+  const labels = series.map(x => formatShortDateLabel(x && x.date));
+  const revenue = series.map(x => Number(x && x.revenue || 0));
+  const orders = series.map(x => Number(x && x.orders || 0));
+
+  try{
+    if (window.salesChart && typeof window.salesChart.destroy === 'function') {
+      window.salesChart.destroy();
+    } else {
+      try{ delete window.salesChart; }catch(_){ window.salesChart = null; }
+    }
+  }catch(_){ }
+
+  try{
+    const ctx = salesChartCanvas.getContext ? salesChartCanvas.getContext('2d') : salesChartCanvas;
+    window.salesChart = new Chart(ctx, {
+      data: {
+        labels,
+        datasets: [
+          {
+            type: 'bar',
+            label: 'Pedidos',
+            data: orders,
+            yAxisID: 'y1',
+            backgroundColor: 'rgba(242,107,56,0.28)',
+            borderColor: 'rgba(242,107,56,0.45)',
+            borderWidth: 1,
+            borderRadius: 8,
+            maxBarThickness: 18,
+          },
+          {
+            type: 'line',
+            label: 'Ventas',
+            data: revenue,
+            yAxisID: 'y',
+            borderColor: '#0a2240',
+            backgroundColor: 'rgba(10,34,64,0.14)',
+            pointRadius: 0,
+            tension: 0.35,
+            fill: true,
+          },
+        ]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'bottom' },
+          tooltip: {
+            callbacks: {
+              title: (items) => {
+                try{
+                  const idx = items && items[0] ? items[0].dataIndex : null;
+                  const iso = (idx != null && series[idx]) ? series[idx].date : '';
+                  if (!iso) return '—';
+                  const parts = String(iso).split('-');
+                  return parts.length === 3 ? `${parts[2]}/${parts[1]}/${parts[0]}` : String(iso);
+                }catch(_){ return ''; }
+              },
+              label: (ctx) => {
+                try{
+                  if (ctx && ctx.dataset && ctx.dataset.yAxisID === 'y1') return `Pedidos: ${formatNumber(ctx.parsed && ctx.parsed.y || 0)}`;
+                  return `Ventas: ${formatMoney(ctx.parsed && ctx.parsed.y || 0)}`;
+                }catch(_){ return ''; }
+              }
+            }
+          }
+        },
+        scales: {
+          y: {
+            position: 'left',
+            beginAtZero: true,
+            ticks: {
+              callback: (v) => formatMoney(v),
+              maxTicksLimit: 6,
+            }
+          },
+          y1: {
+            position: 'right',
+            beginAtZero: true,
+            grid: { drawOnChartArea: false },
+            ticks: {
+              callback: (v) => formatNumber(v),
+              precision: 0,
+              maxTicksLimit: 6,
+            }
+          }
+        }
+      }
+    });
+  }catch(e){
+    console.error('Failed to create salesChart', e);
+  }
+}
+
+async function refreshSalesStats({ force = false, quiet = true, days = 30 } = {}){
+  const now = Date.now();
+  if (!force && salesStatsCache && (now - salesStatsTs) < SALES_STATS_TTL_MS) {
+    try{ renderSalesStats(salesStatsCache); }catch(_){ }
+    return salesStatsCache;
+  }
+  try{
+    const d = Math.max(1, Math.min(365, Number(days || 30)));
+    const stats = await safeFetch(`${API_BASE}/sales/stats?days=${encodeURIComponent(String(d))}`, { cache: 'no-store' });
+    salesStatsCache = stats;
+    salesStatsTs = now;
+    renderSalesStats(stats);
+    return stats;
+  }catch(e){
+    console.error('refreshSalesStats failed', e);
+    if (!quiet) showToast('No se pudieron cargar estadísticas de ventas', 'error');
+    if (!salesStatsCache) {
+      try{ renderSalesStats(null); }catch(_){ }
+    }
+    throw e;
+  }
+}
+
+function updateCatalogPager(){
+  try{
+    const totalPages = Math.max(1, Math.ceil((catalogTotal || 0) / Math.max(1, catalogPageSize || 1)));
+    if (pageInfo) pageInfo.textContent = `Página ${catalogPage} / ${totalPages}`;
+    if (pageTotalInfo) pageTotalInfo.textContent = `· ${formatNumber(catalogTotal || 0)} productos`;
+    if (prevPageBtn) prevPageBtn.disabled = catalogPage <= 1;
+    if (nextPageBtn) nextPageBtn.disabled = catalogPage >= totalPages;
+  }catch(_){ }
+}
+
+function updateBulkBar(){
+  try{
+    const count = selectedProductIds.size;
+    if (bulkBar) bulkBar.classList.toggle('hidden', count === 0);
+    if (bulkCountEl) bulkCountEl.textContent = String(count);
+    // active bulk: percent mode doesn't apply
+    if (bulkTarget && bulkMode && bulkValue){
+      const t = String(bulkTarget.value || '');
+      const isActive = t === 'active';
+      bulkMode.disabled = isActive;
+      bulkValue.placeholder = isActive ? 'si / no' : '10';
+    }
+  }catch(_){ }
+}
+
+function clearSelection(){
+  selectedProductIds.clear();
+  try{
+    if (selectAllProducts) selectAllProducts.checked = false;
+  }catch(_){ }
+  // Re-render current page checkboxes state without refetching
+  try{
+    (productsTableBody || document).querySelectorAll('.rowSelect').forEach((cb) => {
+      try{ cb.checked = false; }catch(_){ }
+    });
+  }catch(_){ }
+  updateBulkBar();
+}
+
+function round2(value){
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.round(n * 100) / 100;
+}
+
+async function applyBulk(){
+  try{
+    if (!selectedProductIds.size) return;
+    const ids = Array.from(selectedProductIds);
+    if (!bulkTarget) return;
+    const target = String(bulkTarget.value || 'price');
+    const mode = bulkMode ? String(bulkMode.value || 'percent') : 'percent';
+    const raw = bulkValue ? String(bulkValue.value || '').trim() : '';
+
+    let updates = [];
+    if (target === 'active'){
+      const v = raw.toLowerCase();
+      let nextActive = null;
+      if (['1','true','si','sí','s','on','activo','activa'].includes(v)) nextActive = true;
+      if (['0','false','no','n','off','inactivo','inactiva'].includes(v)) nextActive = false;
+      if (nextActive === null) {
+        showToast('Para "Activo" escribí: si / no', 'error');
+        return;
+      }
+      updates = ids
+        .map((id) => ({ id: Number(id), active: nextActive }))
+        .filter((u) => Number.isFinite(u.id));
+    } else {
+      const num = Number(raw);
+      if (!Number.isFinite(num)) {
+        showToast('Valor inválido', 'error');
+        return;
+      }
+      for (const id of ids){
+        const pid = String(id || '').trim();
+        if (!pid) continue;
+        const prod = getCachedProductById(pid) || null;
+        if (!prod) continue;
+        const basePrice = Number(prod.price || 0);
+        const retailExists = !(prod.price_retail === null || prod.price_retail === undefined || prod.price_retail === '');
+        const baseRetail = retailExists ? Number(prod.price_retail) : null;
+
+        const payload = { id: Number(pid) };
+        if (!Number.isFinite(payload.id)) continue;
+
+        if (mode === 'percent'){
+          const factor = 1 + (num / 100);
+          if (target === 'price' || target === 'both_prices') payload.price = round2(basePrice * factor);
+          if (target === 'price_retail' || target === 'both_prices') {
+            if (baseRetail !== null && Number.isFinite(baseRetail)) payload.price_retail = round2(baseRetail * factor);
+          }
+        } else {
+          // set
+          if (target === 'price' || target === 'both_prices') payload.price = round2(num);
+          if (target === 'price_retail' || target === 'both_prices') payload.price_retail = round2(num);
+        }
+        updates.push(payload);
+      }
+    }
+
+    if (!updates.length) {
+      showToast('No hay productos válidos para actualizar', 'warning');
+      return;
+    }
+
+    if (applyBulkBtn) applyBulkBtn.disabled = true;
+    const result = await safeFetch(`${API_BASE}/products/bulk`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify(updates),
+    });
+    const updated = Number(result && result.updated != null ? result.updated : 0) || 0;
+    showToast(`Edición masiva: ${updated}/${updates.length} actualizados`);
+    clearSelection();
+    await ensureAllProductsCache({ force: true }).catch(()=>null);
+    await refresh();
+  }catch(e){
+    console.error('applyBulk failed', e);
+    showToast('Error aplicando edición masiva', 'error');
+  } finally {
+    if (applyBulkBtn) applyBulkBtn.disabled = false;
+  }
+}
+
+function parseCsvLine(line, delimiter){
+  const out = [];
+  let cur = '';
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++){
+    const ch = line[i];
+    if (ch === '"'){
+      if (inQuotes && line[i + 1] === '"') { cur += '"'; i += 1; continue; }
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (!inQuotes && ch === delimiter){
+      out.push(cur);
+      cur = '';
+      continue;
+    }
+    cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+function parseCsv(text){
+  const raw = String(text || '');
+  const lines = raw.split(/\r?\n/).filter(l => String(l || '').trim() !== '');
+  if (!lines.length) return [];
+  const headerLine = lines[0];
+  const comma = headerLine.split(',').length;
+  const semi = headerLine.split(';').length;
+  const delimiter = semi > comma ? ';' : ',';
+  const headers = parseCsvLine(headerLine, delimiter).map(h => String(h || '').trim().replace(/^\\uFEFF/, '').toLowerCase());
+  const rows = [];
+  for (let i = 1; i < lines.length; i++){
+    const cols = parseCsvLine(lines[i], delimiter);
+    const obj = {};
+    headers.forEach((h, idx) => { obj[h] = (cols[idx] != null) ? String(cols[idx]).trim() : ''; });
+    rows.push(obj);
+  }
+  return rows;
+}
+
+function parseCsvNumber(raw){
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  const normalized = s.replace(/\s+/g, '').replace(/\./g, '').replace(',', '.');
+  const n = Number(normalized);
+  if (!Number.isFinite(n)) return null;
+  return n;
+}
+
+async function importCsvFile(file){
+  if (!file) return;
+  try{
+    const text = await file.text();
+    const rows = parseCsv(text);
+    if (!rows.length) {
+      showToast('CSV vacío o inválido', 'error');
+      return;
+    }
+    await ensureAllProductsCache({ force: true }).catch(()=>null);
+    const byCode = new Map();
+    for (const p of (allProductsCache || [])){
+      const code = normalizeProductCode(p.code || p.codigo);
+      if (code) byCode.set(code.toLowerCase(), p);
+    }
+    const updates = [];
+    const missing = [];
+    for (const r of rows){
+      const code = normalizeProductCode(r.code || r.sku || r.codigo || r['código'] || r['sku']);
+      if (!code) continue;
+      const prod = byCode.get(code.toLowerCase());
+      if (!prod || !prod.id) { missing.push(code); continue; }
+      const u = { id: Number(prod.id) };
+      if (!Number.isFinite(u.id)) continue;
+      const price = parseCsvNumber(r.price || r.precio);
+      const retail = parseCsvNumber(r.price_retail || r.precio_minorista || r.minorista);
+      const cost = parseCsvNumber(r.cost || r.costo);
+      const stock = parseCsvNumber(r.stock);
+      const minStock = parseCsvNumber(r.min_stock || r.stock_min || r['stock mínimo']);
+      if (price !== null) u.price = round2(price);
+      if (retail !== null) u.price_retail = round2(retail);
+      if (cost !== null) u.cost = round2(cost);
+      if (stock !== null) u.stock = Math.max(0, Math.round(stock));
+      if (minStock !== null) u.min_stock = Math.max(0, Math.round(minStock));
+      updates.push(u);
+    }
+    if (!updates.length){
+      showToast(missing.length ? `No se encontró ningún SKU del CSV (faltan: ${missing.slice(0,5).join(', ')}${missing.length>5?'...':''})` : 'No hay filas importables', 'error');
+      return;
+    }
+    const res = await safeFetch(`${API_BASE}/products/bulk`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify(updates),
+    });
+    const updated = Number(res && res.updated != null ? res.updated : 0) || 0;
+    if (missing.length) showToast(`Importación: ${updated} actualizados · ${missing.length} SKUs no encontrados`, 'warning');
+    else showToast(`Importación: ${updated} actualizados`);
+    await ensureAllProductsCache({ force: true }).catch(()=>null);
+    await refresh();
+  }catch(e){
+    console.error('importCsvFile failed', e);
+    showToast('Error importando CSV', 'error');
+  }
+}
+
+async function downloadExportCsv(){
+  if (!exportCsvBtn) return;
+  const prevText = exportCsvBtn.textContent;
+  exportCsvBtn.disabled = true;
+  exportCsvBtn.textContent = 'Exportando...';
+  try{
+    const url = `${API_BASE}/export?format=csv&ts=` + Date.now();
+    const res = await fetch(url, { cache: 'no-store', headers: { 'X-Actor': getActor() } });
+    if (!res.ok) throw new Error('http-' + res.status);
+    const csvText = await res.text();
+    const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `productos-${new Date().toISOString().slice(0,10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    try{ setTimeout(() => URL.revokeObjectURL(a.href), 1200); }catch(_){ }
+    showToast('CSV exportado');
+  }catch(e){
+    console.error('downloadExportCsv failed', e);
+    showToast('No se pudo exportar CSV', 'error');
+  } finally {
+    exportCsvBtn.disabled = false;
+    exportCsvBtn.textContent = prevText || 'Exportar CSV';
+  }
 }
 
 // Persist local order previews so pending orders with token info don't disappear on reload
@@ -917,13 +1393,77 @@ function uploadImageWithProgress(file, onProgress){
 }
 
 // CRUD fetchers
-async function fetchProducts(q = '', category = '', sort = ''){
+async function fetchProducts(q = '', category = '', sort = '', opts = {}){
   const params = new URLSearchParams();
   if(q) params.append('q', q);
   if(category) params.append('category', category);
   if(sort) params.append('sort', sort);
+  try{
+    if (opts && typeof opts.skip !== 'undefined') params.append('skip', String(Math.max(0, Number(opts.skip) || 0)));
+    if (opts && typeof opts.limit !== 'undefined') params.append('limit', String(Math.max(1, Number(opts.limit) || 100)));
+  }catch(_){ }
   const url = `${API_BASE}/products?` + params.toString();
   return await safeFetch(url).catch(err => { console.error('fetchProducts failed', err); throw err; });
+}
+
+async function fetchProductsPaged(q = '', category = '', sort = '', skip = 0, limit = 50){
+  const params = new URLSearchParams();
+  if(q) params.append('q', q);
+  if(category) params.append('category', category);
+  if(sort) params.append('sort', sort);
+  params.append('skip', String(Math.max(0, Number(skip) || 0)));
+  params.append('limit', String(Math.max(1, Number(limit) || 50)));
+  const url = `${API_BASE}/products/paged?` + params.toString();
+  try{
+    const page = await safeFetch(url);
+    if (page && Array.isArray(page.items)) return page;
+  }catch(e){
+    console.warn('fetchProductsPaged failed, falling back to /products', e);
+  }
+  const items = await fetchProducts(q, category, sort, { skip, limit });
+  return { total: Array.isArray(items) ? items.length : 0, skip: 0, limit: Array.isArray(items) ? items.length : 0, items: Array.isArray(items) ? items : [] };
+}
+
+async function ensureAllProductsCache({ force = false } = {}){
+  const freshMs = 1000 * 60 * 5;
+  const now = Date.now();
+  if (!force && allProductsCache.length && (now - allProductsCacheTs) < freshMs) return allProductsCache;
+  if (allProductsCacheHydrating) return allProductsCacheHydrating;
+  allProductsCacheHydrating = (async () => {
+    try{
+      const list = await fetchProducts('', '', 'name_asc', { skip: 0, limit: 5000 });
+      allProductsCache = Array.isArray(list) ? list : [];
+      allProductsCacheTs = Date.now();
+      syncProductLookup(allProductsCache);
+      return allProductsCache;
+    } finally {
+      allProductsCacheHydrating = null;
+    }
+  })();
+  return allProductsCacheHydrating;
+}
+
+async function ensureSkuDiagnostics({ force = false } = {}){
+  const freshMs = 1000 * 60 * 5;
+  const now = Date.now();
+  if (!force && duplicateSkuSetTs && (now - duplicateSkuSetTs) < freshMs) return duplicateSkuSet;
+  try{
+    const list = await safeFetch(`${API_BASE}/products/duplicates?limit=500`).catch(() => []);
+    const next = new Set();
+    if (Array.isArray(list)) {
+      list.forEach((d) => {
+        try{
+          const code = String(d && d.code || '').trim().toLowerCase();
+          if (code) next.add(code);
+        }catch(_){ }
+      });
+    }
+    duplicateSkuSet = next;
+    duplicateSkuSetTs = Date.now();
+  }catch(e){
+    console.warn('ensureSkuDiagnostics failed', e);
+  }
+  return duplicateSkuSet;
 }
 
 async function createProduct(payload){
@@ -967,16 +1507,50 @@ async function refresh(){
   const sort = sortSelect.value;
   const prevText = refreshBtn.textContent;
   refreshBtn.disabled = true; refreshBtn.textContent = 'Cargando...';
-  const products = await fetchProducts(q, cat, sort);
-  allProductsCache = Array.isArray(products) ? products.slice() : [];
-  syncProductLookup(allProductsCache);
-  renderProducts(products);
-  updateStats(products);
+  try{
+    if (pageSizeSelect) {
+      const parsed = parseInt(String(pageSizeSelect.value || '50'), 10);
+      catalogPageSize = Number.isFinite(parsed) ? Math.max(1, parsed) : catalogPageSize;
+    }
+  }catch(_){ }
+
+  await ensureAllProductsCache({ force: false }).catch(()=>null);
+  await ensureSkuDiagnostics({ force: false }).catch(()=>null);
+
+  const fetchAndRender = async () => {
+    const skip = Math.max(0, (catalogPage - 1) * catalogPageSize);
+    const page = await fetchProductsPaged(q, cat, sort, skip, catalogPageSize);
+    catalogTotal = Number(page && page.total != null ? page.total : ((page && page.items) ? page.items.length : 0)) || 0;
+    catalogPageItems = Array.isArray(page && page.items) ? page.items : [];
+    // If filter changes caused the current page to go out of range, snap back.
+    const totalPages = Math.max(1, Math.ceil((catalogTotal || 0) / (catalogPageSize || 1)));
+    if (catalogPage > totalPages) {
+      catalogPage = totalPages;
+      return await fetchAndRender();
+    }
+    renderProducts(catalogPageItems);
+    try{
+      const counter = document.getElementById('productCounter');
+      if (counter) counter.textContent = String(catalogTotal || 0);
+    }catch(_){ }
+    updateCatalogPager();
+  };
+
+  await fetchAndRender();
+  // Keep dashboard stats based on the full cache (not the current page)
+  try{
+    const base = (allProductsCache && allProductsCache.length) ? allProductsCache : catalogPageItems;
+    updateStats(base || []);
+    const dash = document.getElementById('dashboard');
+    if (dash && !dash.classList.contains('hidden')) {
+      refreshSalesStats({ force: false, quiet: true }).catch(()=>{});
+    }
+  }catch(_){ }
+  // If retail-prices is visible, refresh that section with a dedicated query (full list)
   try{
     const retailSection = document.getElementById('retail-prices');
     if (retailSection && !retailSection.classList.contains('hidden')) {
-      retailProductsCache = products || [];
-      renderRetailPrices(retailProductsCache);
+      await refreshRetailPrices();
     }
   }catch(_){ }
   refreshBtn.disabled = false; refreshBtn.textContent = prevText;
@@ -985,10 +1559,13 @@ async function refresh(){
 function renderProducts(products){
   productsTableBody.innerHTML = '';
   const categories = new Set();
+  const categoriesSource = (allProductsCache && allProductsCache.length) ? allProductsCache : (products || []);
+  for (const p of (categoriesSource || [])) categories.add(p.category || '');
+
   // attempt to load product->categories map (best-effort and async-safe)
   const productCats = loadProductCategories();
-  for(const p of products){
-    categories.add(p.category || '');
+  for(const p of (products || [])){
+    const id = String(p.id || '').trim();
     const productCode = normalizeProductCode(p.code || p.codigo);
     const assigned = (productCats && (productCats[String(p.id)] || productCats[String(p.name)])) || [];
     const catsDisplay = (assigned && assigned.length) ? assigned.map(x => `<span class="pc-tag">${escapeHtml(x)}</span>`).join(' ') : (p.category || '');
@@ -1005,31 +1582,90 @@ function renderProducts(products){
     const stockRaw = unit === 'kg' ? getProductStockKg(p) : Number(p.stock ?? 0);
     const stockNum = Number(stockRaw || 0);
     const stockDisplay = unit === 'kg'
-      ? (Number.isFinite(stockNum) ? String(parseFloat(stockNum.toFixed(3))) : '0')
+      ? (Number.isFinite(stockNum) ? formatNumber(stockNum, { digits: 3 }) : '0')
       : String(Number.isFinite(stockNum) ? Math.max(0, Math.round(stockNum)) : 0);
     const kgPerUnitNum = getProductKgPerUnit(p);
     const kgPerUnitHint = unit === 'kg'
-      ? ` <small style="color:#6b7280;font-weight:600">(1 = ${Number.isFinite(kgPerUnitNum) ? parseFloat(kgPerUnitNum.toFixed(3)) : 1} kg)</small>`
+      ? ` <small style="color:var(--muted);font-weight:700">(1 = ${formatNumber(kgPerUnitNum, { digits: 3 })} kg)</small>`
       : '';
+
+    const brand = String(p.brand || '').trim();
+    const price = Number(p.price ?? 0);
+    const retail = (p.price_retail === null || p.price_retail === undefined || p.price_retail === '') ? null : Number(p.price_retail);
+    const cost = (p.cost === null || p.cost === undefined || p.cost === '') ? null : Number(p.cost);
+    const minStock = Number(p.min_stock ?? 0);
+    const hasMinStock = Number.isFinite(minStock) && minStock > 0;
+    const isLowStock = hasMinStock && Number.isFinite(stockNum) && stockNum < minStock;
+    if (isLowStock) tr.classList.add('row-low-stock');
+    if (!productCode) tr.classList.add('row-missing-sku');
+    const codeKey = productCode ? String(productCode).trim().toLowerCase() : '';
+    const isDupSku = !!(codeKey && duplicateSkuSet && duplicateSkuSet.has(codeKey));
+    if (isDupSku) tr.classList.add('row-dup-sku');
+
+    let marginPct = null;
+    if (Number.isFinite(price) && price > 0 && Number.isFinite(cost) && cost !== null) {
+      marginPct = ((price - cost) / price) * 100;
+    }
+    const marginClass = (marginPct == null || !Number.isFinite(marginPct)) ? 'cell-muted' : (marginPct >= 30 ? 'cell-good' : (marginPct >= 10 ? 'cell-warn' : 'cell-danger'));
+    const marginLabel = (marginPct == null || !Number.isFinite(marginPct)) ? '—' : formatPercent(marginPct);
+
+    const checked = id && selectedProductIds.has(id);
+
     tr.innerHTML = `
-      <td>${imgSrc ? `<img src="${imgSrc}" alt="${p.name}" width="60" onerror="this.onerror=null;this.src='../images/default.png'">` : ''}</td>
+      <td class="col-select"><input type="checkbox" class="rowSelect" data-id="${escapeHtml(id)}" ${checked ? 'checked' : ''} aria-label="Seleccionar producto" /></td>
+      <td>${imgSrc ? `<img src="${imgSrc}" alt="${escapeHtml(p.name || '')}" width="60" height="60" style="border-radius:10px;object-fit:cover;background:#fff7ed;border:1px solid rgba(2,6,23,0.06)" onerror="this.onerror=null;this.src='icon.png'">` : ''}</td>
       <td>${escapeHtml(p.name || '')}</td>
-      <td>${productCode ? escapeHtml(productCode) : '<span class="muted">—</span>'}</td>
+      <td>${brand ? escapeHtml(brand) : '<span class="cell-muted">—</span>'}</td>
+      <td>${productCode ? (escapeHtml(productCode) + (isDupSku ? ' <span class="cell-danger">Duplicado</span>' : '')) : '<span class="cell-warn">Falta</span>'}</td>
       <td>${catsDisplay}</td>
-      <td>$${parseFloat(p.price).toFixed(2)}${unitSuffix}</td>
-      <td>${(p.price_retail === null || p.price_retail === undefined || p.price_retail === '') ? '<span class="muted"></span>' : ('$' + parseFloat(p.price_retail).toFixed(2) + unitSuffix)}</td>
+      <td>${formatMoney(price)}${unitSuffix}</td>
+      <td>${retail === null || !Number.isFinite(retail) ? '<span class="cell-muted">—</span>' : (formatMoney(retail) + unitSuffix)}</td>
+      <td>${cost === null || !Number.isFinite(cost) ? '<span class="cell-muted">—</span>' : formatMoney(cost)}</td>
+      <td><span class="${marginClass}">${escapeHtml(marginLabel)}</span></td>
       <td>${stockDisplay}${stockSuffix}${kgPerUnitHint}</td>
+      <td>${hasMinStock ? escapeHtml(String(minStock)) : '<span class="cell-muted">—</span>'}</td>
       <td>${p.active ? 'Sí' : 'No'}</td>
       <td>
-        <button data-id="${p.id}" class="editBtn btn">Editar</button>
-        <button data-id="${p.id}" class="delBtn btn">Eliminar</button>
+        <button data-id="${escapeHtml(id)}" class="editBtn btn">Editar</button>
+        <button data-id="${escapeHtml(id)}" class="dupBtn btn">Duplicar</button>
+        <button data-id="${escapeHtml(id)}" class="histBtn btn">Historial</button>
+        <button data-id="${escapeHtml(id)}" class="delBtn btn danger">Eliminar</button>
       </td>
     `;
-  productsTableBody.appendChild(tr);
+    productsTableBody.appendChild(tr);
   }
-  categoryFilter.innerHTML = '<option value="">Todas</option>' + Array.from(categories).map(c => `<option value="${c}">${c}</option>`).join('');
-  document.querySelectorAll('.editBtn').forEach(el => el.onclick = async e => { await onEdit(e.target.dataset.id) });
-  document.querySelectorAll('.delBtn').forEach(el => el.onclick = async e => { await onDelete(e.target.dataset.id) });
+
+  // Preserve selection when rebuilding options
+  const currentCat = categoryFilter ? String(categoryFilter.value || '') : '';
+  if (categoryFilter){
+    categoryFilter.innerHTML = '<option value="">Todas</option>' + Array.from(categories).map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+    try{
+      if (currentCat && Array.from(categories).includes(currentCat)) categoryFilter.value = currentCat;
+    }catch(_){ }
+  }
+
+  // Wire events
+  productsTableBody.querySelectorAll('.editBtn').forEach(el => el.onclick = async e => { await onEdit(e.target.dataset.id) });
+  productsTableBody.querySelectorAll('.dupBtn').forEach(el => el.onclick = async e => { await onDuplicate(e.target.dataset.id) });
+  productsTableBody.querySelectorAll('.histBtn').forEach(el => el.onclick = async e => { await openProductHistory(e.target.dataset.id) });
+  productsTableBody.querySelectorAll('.delBtn').forEach(el => el.onclick = async e => { await onDelete(e.target.dataset.id) });
+  productsTableBody.querySelectorAll('.rowSelect').forEach((el) => {
+    el.addEventListener('change', () => {
+      const pid = String(el.dataset.id || '').trim();
+      if (!pid) return;
+      if (el.checked) selectedProductIds.add(pid);
+      else selectedProductIds.delete(pid);
+      updateBulkBar();
+    });
+  });
+
+  // Select-all applies to current page only
+  try{
+    if (selectAllProducts){
+      selectAllProducts.checked = (products || []).length > 0 && (products || []).every(p => selectedProductIds.has(String(p.id || '').trim()));
+    }
+  }catch(_){ }
+  updateBulkBar();
 }
 
 function parseRetailPriceInput(rawValue){
@@ -1145,7 +1781,7 @@ async function refreshRetailPrices(){
   const oldText = retailRefreshBtn ? retailRefreshBtn.textContent : '';
   if (retailRefreshBtn) { retailRefreshBtn.disabled = true; retailRefreshBtn.textContent = 'Cargando...'; }
   try{
-    const products = await fetchProducts(q, '', 'name_asc');
+    const products = await fetchProducts(q, '', 'name_asc', { skip: 0, limit: 5000 });
     retailProductsCache = products || [];
     renderRetailPrices(retailProductsCache);
   }catch(e){
@@ -1157,13 +1793,13 @@ async function refreshRetailPrices(){
 }
 
 function updateStats(products){
-  const totalActive = products.filter(p => p.active).length;
-  document.getElementById('totalActive').textContent = totalActive;
-  document.getElementById('productCounter').textContent = products.length;
-  const avg = products.reduce((s,p)=> s + Number(p.price), 0) / (products.length || 1);
-  document.getElementById('avgPrice').textContent = '$' + avg.toFixed(2);
+  const list = Array.isArray(products) ? products : [];
+  const totalActive = list.filter(p => p && p.active).length;
+  document.getElementById('totalActive').textContent = formatNumber(totalActive);
+  const avg = list.reduce((s,p)=> s + Number((p && p.price) || 0), 0) / (list.length || 1);
+  document.getElementById('avgPrice').textContent = formatMoney(avg);
   const byCat = {};
-  products.forEach(p => { const k = p.category || 'Uncategorized'; byCat[k] = (byCat[k] || 0) + 1 });
+  list.forEach(p => { const k = (p && p.category) ? p.category : 'Sin categoría'; byCat[k] = (byCat[k] || 0) + 1 });
   const ctx = document.getElementById('categoryChart');
   try{
     if (window.categoryChart && typeof window.categoryChart.destroy === 'function') {
@@ -1178,7 +1814,7 @@ function updateStats(products){
     const ctx2 = (ctx && ctx.getContext) ? ctx.getContext('2d') : ctx;
     window.categoryChart = new Chart(ctx2, {
       type: 'pie',
-      data: { labels: Object.keys(byCat), datasets: [{ data: Object.values(byCat), backgroundColor: ['#60A5FA','#F59E0B','#10B981','#F43F5E','#8B5CF6'] }] },
+      data: { labels: Object.keys(byCat), datasets: [{ data: Object.values(byCat), backgroundColor: ['#f26b38','#ffb84d','#0ea5a4','#0a2240','#f97316','#fb7185','#22c55e'] }] },
       options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } }
     });
   }catch(e){ console.error('Failed to create categoryChart', e); }
@@ -1192,8 +1828,42 @@ if(cancelBtn) cancelBtn.onclick = () => closeModal();
 if(saveBtn) saveBtn.onclick = handleSave;
 if(productForm) productForm.addEventListener('submit', handleSave);
 if(refreshBtn) refreshBtn.onclick = () => refresh();
-if(searchInput) searchInput.oninput = () => refresh();
-if(sortSelect) sortSelect.onchange = () => refresh();
+if(searchInput) searchInput.oninput = () => { catalogPage = 1; refresh(); };
+if(categoryFilter) categoryFilter.onchange = () => { catalogPage = 1; refresh(); };
+if(sortSelect) sortSelect.onchange = () => { catalogPage = 1; refresh(); };
+if(pageSizeSelect) pageSizeSelect.onchange = () => { catalogPage = 1; refresh(); };
+if(prevPageBtn) prevPageBtn.onclick = () => { if (catalogPage > 1) { catalogPage -= 1; refresh(); } };
+if(nextPageBtn) nextPageBtn.onclick = () => {
+  const totalPages = Math.max(1, Math.ceil((catalogTotal || 0) / Math.max(1, catalogPageSize || 1)));
+  if (catalogPage < totalPages) { catalogPage += 1; refresh(); }
+};
+if(selectAllProducts) selectAllProducts.onchange = () => {
+  const checked = !!selectAllProducts.checked;
+  for (const p of (catalogPageItems || [])){
+    const id = String(p && p.id || '').trim();
+    if (!id) continue;
+    if (checked) selectedProductIds.add(id);
+    else selectedProductIds.delete(id);
+  }
+  try{
+    productsTableBody.querySelectorAll('.rowSelect').forEach((cb) => { try{ cb.checked = checked; }catch(_){ } });
+  }catch(_){ }
+  updateBulkBar();
+};
+if(bulkTarget) bulkTarget.onchange = () => updateBulkBar();
+if(applyBulkBtn) applyBulkBtn.onclick = () => applyBulk();
+if(clearSelectionBtn) clearSelectionBtn.onclick = () => clearSelection();
+if(exportCsvBtn) exportCsvBtn.onclick = () => downloadExportCsv();
+if(importCsvBtn) importCsvBtn.onclick = () => { try{ if(importCsvInput) importCsvInput.click(); }catch(_){ } };
+if(importCsvInput) importCsvInput.onchange = async () => {
+  try{
+    const file = importCsvInput.files && importCsvInput.files[0] ? importCsvInput.files[0] : null;
+    if (!file) return;
+    await importCsvFile(file);
+  } finally {
+    try{ importCsvInput.value = ''; }catch(_){ }
+  }
+};
 if(retailRefreshBtn) retailRefreshBtn.onclick = () => refreshRetailPrices();
 if(retailSaveAllBtn) retailSaveAllBtn.onclick = () => saveAllRetailPrices();
 if(retailPriceSearch) retailPriceSearch.oninput = () => refreshRetailPrices();
@@ -1248,14 +1918,45 @@ async function handleSave(ev){
   // maintain compatibility: set hidden category to first selected or existing value
   productForm.category.value = (selectedCats && selectedCats.length) ? String(selectedCats[0]) : (productForm.category.value || '');
 
+  let parsedCost = null;
+  try{
+    const raw = costInput ? String(costInput.value || '').trim() : '';
+    if (raw !== ''){
+      const n = Number(raw);
+      if (Number.isFinite(n) && n >= 0) parsedCost = n;
+      else {
+        showToast('Costo inválido', 'error');
+        saveBtn.disabled = false;
+        return;
+      }
+    }
+  }catch(_){ parsedCost = null; }
+
+  let parsedMinStock = 0;
+  try{
+    const raw = minStockInput ? String(minStockInput.value || '').trim() : '';
+    if (raw !== ''){
+      const n = Number(raw);
+      if (Number.isFinite(n) && n >= 0) parsedMinStock = Math.round(n);
+      else {
+        showToast('Stock mínimo inválido', 'error');
+        saveBtn.disabled = false;
+        return;
+      }
+    }
+  }catch(_){ parsedMinStock = 0; }
+
   const payload = {
     code: normalizeProductCode(productCodeInput ? productCodeInput.value : '') || null,
     name: productForm.name.value.trim(),
+    brand: (brandInput && String(brandInput.value || '').trim()) ? String(brandInput.value || '').trim() : null,
     price: Number(productForm.price.value),
+    cost: parsedCost,
     description: productForm.description.value.trim(),
     category: productForm.category.value.trim() || null,
     image_url: imageUrl,
-    active: true
+    active: (activeSelect ? String(activeSelect.value) !== 'false' : true),
+    min_stock: parsedMinStock
   };
   try{
     const retailRaw = retailPriceInput ? String(retailPriceInput.value || '').trim() : '';
@@ -1359,8 +2060,12 @@ async function onEdit(id){
     currentEditId = id;
     productForm.name.value = p.name;
     if (productCodeInput) productCodeInput.value = normalizeProductCode(p.code || p.codigo);
+    if (brandInput) brandInput.value = String(p.brand || '');
     productForm.price.value = p.price;
     if (retailPriceInput) retailPriceInput.value = (p.price_retail === null || p.price_retail === undefined || p.price_retail === '') ? '' : String(p.price_retail);
+    try{ if (costInput) costInput.value = (p.cost === null || p.cost === undefined || p.cost === '') ? '' : String(p.cost); }catch(_){ }
+    try{ if (minStockInput) minStockInput.value = (p.min_stock === null || p.min_stock === undefined || p.min_stock === '') ? '0' : String(p.min_stock); }catch(_){ }
+    try{ if (activeSelect) activeSelect.value = (p.active === false) ? 'false' : 'true'; }catch(_){ }
     productForm.category.value = p.category;
     productForm.description.value = p.description;
     try{ if(productForm.sale_unit){ productForm.sale_unit.value = normalizeSaleUnit(String(p.sale_unit || p.unit_type || p.unit || 'unit')); } }catch(_){ }
@@ -1398,10 +2103,154 @@ async function onEdit(id){
   }catch(err){console.error(err); showToast('Error cargando producto','error')}
 }
 
+async function onDuplicate(id){
+  const pid = String(id || '').trim();
+  if (!pid) return;
+  try{
+    const res = await fetch(API_BASE + '/products/' + pid);
+    if (!res.ok) throw new Error('http-' + res.status);
+    const p = await res.json();
+    currentEditId = null;
+
+    // Reset modal state
+    try{ productForm.reset(); }catch(_){ }
+    imageUrl = p.image_url || null;
+    selectedFile = null;
+    try{ fileNameEl.textContent = imageUrl ? String(imageUrl).split('/').pop() : 'Ningun archivo seleccionado'; }catch(_){ }
+
+    // Prefill with a safe duplicate (force new SKU + zero stock)
+    productForm.name.value = String(p.name || '').trim() ? (String(p.name).trim() + ' (Copia)') : 'Producto (Copia)';
+    if (productCodeInput) productCodeInput.value = '';
+    if (brandInput) brandInput.value = String(p.brand || '');
+    productForm.price.value = (p.price != null) ? String(p.price) : '';
+    if (retailPriceInput) retailPriceInput.value = (p.price_retail == null || p.price_retail === '') ? '' : String(p.price_retail);
+    if (costInput) costInput.value = (p.cost == null || p.cost === '') ? '' : String(p.cost);
+    if (minStockInput) minStockInput.value = (p.min_stock == null || p.min_stock === '') ? '0' : String(p.min_stock);
+    if (activeSelect) activeSelect.value = 'true';
+    productForm.category.value = p.category || '';
+    productForm.description.value = p.description || '';
+    try{ if(productForm.sale_unit){ productForm.sale_unit.value = normalizeSaleUnit(String(p.sale_unit || p.unit_type || p.unit || 'unit')); } }catch(_){ }
+    try{ if(productForm.kg_per_unit){ productForm.kg_per_unit.value = String(getProductKgPerUnit(p)); } }catch(_){ }
+    try{ productForm.stock.value = '0'; }catch(_){ }
+    try{ productForm.discount.value = (p.discount != null) ? String(p.discount) : ''; }catch(_){ }
+    try{ syncProductUnitFields(); }catch(_){ }
+
+    // Preview image (reuse URL)
+    let previewSrc = '';
+    if(imageUrl){
+      const u = String(imageUrl);
+      if(u.startsWith('http://') || u.startsWith('https://') || u.startsWith('//')) previewSrc = u;
+      else if(u.startsWith('/')) previewSrc = API_BASE + u;
+      else previewSrc = API_BASE + '/' + u.replace(/^\//, '');
+    }
+    imagePreview.innerHTML = previewSrc ? `<img src="${previewSrc}" onerror="this.onerror=null;this.src='icon.png'"/>` : '';
+
+    document.getElementById('modalTitle').textContent = 'Duplicar producto';
+    await openModal();
+    // Copy assigned categories from the original mapping
+    try{
+      const filters = loadFilters();
+      const mapping = loadProductCategories() || {};
+      const assigned = (mapping && (mapping[String(p.id)] || mapping[String(p.name)])) || [];
+      renderCategoryCheckboxes(filters, assigned);
+    }catch(_){ }
+    validateForm();
+  }catch(e){
+    console.error('onDuplicate failed', e);
+    showToast('No se pudo duplicar el producto', 'error');
+  }
+}
+
+function closeHistoryModal(){
+  try{
+    if (!historyModal) return;
+    historyModal.classList.add('hidden');
+    historyModal.setAttribute('aria-hidden', 'true');
+    if (historyModalBody) historyModalBody.innerHTML = '';
+  }catch(_){ }
+}
+
+function renderProductHistory(list){
+  if (!historyModalBody) return;
+  const arr = Array.isArray(list) ? list : [];
+  if (!arr.length){
+    historyModalBody.innerHTML = '<div class="empty-note">Sin cambios registrados.</div>';
+    return;
+  }
+  historyModalBody.innerHTML = '';
+  for (const ch of arr){
+    const entry = document.createElement('div');
+    entry.className = 'history-entry';
+    const action = String((ch && ch.action) || 'update').toUpperCase();
+    const actor = String((ch && ch.actor) || '').trim() || '—';
+    let dateText = '';
+    try{
+      dateText = ch && ch.created_at ? new Date(ch.created_at).toLocaleString('es-AR', { year:'numeric', month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit' }) : '';
+    }catch(_){ dateText = ''; }
+    const changed = (ch && ch.changed_fields && typeof ch.changed_fields === 'object') ? ch.changed_fields : null;
+    let diffText = '';
+    if (changed){
+      const keys = Object.keys(changed);
+      if (keys.length){
+        const lines = [];
+        for (const k of keys.slice(0, 40)){
+          const from = (changed[k] && Object.prototype.hasOwnProperty.call(changed[k], 'from')) ? changed[k].from : undefined;
+          const to = (changed[k] && Object.prototype.hasOwnProperty.call(changed[k], 'to')) ? changed[k].to : undefined;
+          lines.push(`${k}: ${JSON.stringify(from)} -> ${JSON.stringify(to)}`);
+        }
+        if (keys.length > 40) lines.push('... (truncado)');
+        diffText = lines.join('\\n');
+      }
+    }
+    if (!diffText){
+      try{
+        const payload = { before: ch.before || null, after: ch.after || null };
+        diffText = JSON.stringify(payload, null, 2);
+        if (diffText.length > 4000) diffText = diffText.slice(0, 4000) + '\\n... (truncado)';
+      }catch(_){ diffText = ''; }
+    }
+    entry.innerHTML = `
+      <div class="history-meta">
+        <span class="history-action">${escapeHtml(action)}</span>
+        <span class="history-date">${escapeHtml(dateText || '')}</span>
+        <span class="history-actor">${escapeHtml(actor)}</span>
+      </div>
+      <pre class="history-diff">${escapeHtml(diffText || '')}</pre>
+    `;
+    historyModalBody.appendChild(entry);
+  }
+}
+
+async function openProductHistory(id){
+  const pid = String(id || '').trim();
+  if (!pid || !historyModal) return;
+  const prod = getCachedProductById(pid) || null;
+  const name = prod && prod.name ? String(prod.name) : 'Producto';
+  const code = normalizeProductCode(prod && (prod.code || prod.codigo));
+  if (historyModalTitle) historyModalTitle.textContent = `Historial: ${name}${code ? (' · SKU ' + code) : ''}`;
+  if (historyModalBody) historyModalBody.innerHTML = '<div class="empty-note">Cargando historial...</div>';
+  historyModal.classList.remove('hidden');
+  historyModal.setAttribute('aria-hidden','false');
+  try{
+    const list = await safeFetch(`${API_BASE}/product-changes?product_id=${encodeURIComponent(pid)}&limit=120`).catch(() => []);
+    renderProductHistory(list);
+  }catch(e){
+    console.error('openProductHistory failed', e);
+    if (historyModalBody) historyModalBody.innerHTML = '<div class="empty-note">No se pudo cargar el historial.</div>';
+  }
+}
+
 async function onDelete(id){
-  if(!confirm('¿Eliminar producto?')) return;
-  try{ await deleteProduct(id); showToast('Eliminado'); refresh(); }
-  catch(err){ showToast('Error eliminando','error'); }
+  const pid = String(id || '').trim();
+  if (!pid) return;
+  const prod = getCachedProductById(pid) || null;
+  const name = prod && prod.name ? String(prod.name) : 'producto';
+  const code = normalizeProductCode(prod && (prod.code || prod.codigo));
+  const label = code ? `${name} (SKU ${code})` : name;
+  const typed = prompt(`Vas a eliminar: ${label}\n\nEscribí ELIMINAR para confirmar:`, '');
+  if (typed !== 'ELIMINAR') return;
+  try{ await deleteProduct(pid); showToast('Eliminado'); await ensureAllProductsCache({ force: true }).catch(()=>null); refresh(); }
+  catch(err){ console.error(err); showToast('Error eliminando','error'); }
 }
 
 // --- Orders (admin) ---
@@ -3094,8 +3943,14 @@ function closeModal(){
 }
 // Close modal when clicking outside the modal card
 if(modal) modal.addEventListener('click', e => { if(e.target === modal) closeModal(); });
+if(historyModal) historyModal.addEventListener('click', e => { if(e.target === historyModal) closeHistoryModal(); });
+if(historyModalClose) historyModalClose.onclick = () => closeHistoryModal();
 // Close on ESC key
-document.addEventListener('keydown', e => { if(e.key === 'Escape' && !modal.classList.contains('hidden')) closeModal(); });
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  try{ if (historyModal && !historyModal.classList.contains('hidden')) { closeHistoryModal(); return; } }catch(_){ }
+  try{ if (!modal.classList.contains('hidden')) closeModal(); }catch(_){ }
+});
 
 // Enable validation
 if(productForm) productForm.addEventListener('input', validateForm);
@@ -3323,7 +4178,7 @@ async function seedFiltersFromProductsIfMissing(){
   const existing = loadFilters();
   if(Array.isArray(existing) && existing.length > 0) return existing;
   try{
-    const products = await fetchProducts().catch(() => []);
+    const products = await ensureAllProductsCache({ force: true }).catch(() => []);
     const derived = deriveFiltersFromProducts(products);
     if(Array.isArray(derived) && derived.length > 0){
       saveFilters(derived);
@@ -3718,7 +4573,7 @@ async function openPromoModal(editId){
   if(savePromoBtn) savePromoBtn.disabled = true;
   if(promoProductsList) promoProductsList.innerHTML = 'Cargando productos...';
   let products = [];
-  try{ products = await fetchProducts(); }catch(e){ console.warn('fetchProducts failed', e); }
+  try{ products = await ensureAllProductsCache({ force: true }); }catch(e){ console.warn('ensureAllProductsCache failed', e); }
   if(!products || !products.length){
     // try snapshot file
     try{ const resp = await fetch('../catalogo/products.json'); if(resp.ok){ products = await resp.json(); } }catch(e){}
@@ -3835,7 +4690,7 @@ const consumoSearch = document.getElementById('consumoSearch');
 async function loadConsumos(){
   try{
     let products = [];
-    try{ products = await fetchProducts(); }catch(e){ console.warn('fetchProducts failed for consumos', e); }
+    try{ products = await ensureAllProductsCache({ force: true }); }catch(e){ console.warn('ensureAllProductsCache failed for consumos', e); }
     // try snapshot fallback
     if(!products || !products.length){ try{ const resp = await fetch('../catalogo/products.json'); if(resp.ok) products = await resp.json(); }catch(e){} }
     const resp = await safeFetch(API_BASE + '/api/consumos').catch(()=>[]);

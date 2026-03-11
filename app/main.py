@@ -280,12 +280,15 @@ async def lifespan(app: FastAPI):
             discount_type = 'REAL DEFAULT 0' if 'postgres' in dialect_name else 'FLOAT DEFAULT 0'
             prod_needed = {
                 'code': 'VARCHAR(100)',
+                'brand': 'VARCHAR(200)',
                 'stock': 'INTEGER DEFAULT 0',
+                'min_stock': 'INTEGER DEFAULT 0',
                 'stock_kg': 'REAL DEFAULT 0',
                 'kg_per_unit': 'REAL DEFAULT 1',
                 'discount': discount_type,
                 "sale_unit": "VARCHAR(20) DEFAULT 'unit'",
                 "price_retail": "REAL",
+                "cost": "REAL",
             }
             try:
                 insp = inspect(engine)
@@ -1367,8 +1370,86 @@ def _format_delivery_schedule_label(order_data: Optional[Dict[str, Any]]) -> str
     return label
 
 
+def _format_ars_money(value: Any) -> str:
+    """Format ARS with thousands '.' and decimals ',' (email-safe)."""
+    try:
+        num = float(value or 0)
+    except Exception:
+        return f"${html_escape(str(value or '0'))}"
+    # Python uses 10,400.00 with this format; swap separators for es-AR style.
+    txt = f"{num:,.2f}"
+    txt = txt.replace(',', '_').replace('.', ',').replace('_', '.')
+    return f"${txt}"
+
+
+def _resolve_order_tracking_url(order_data: Optional[Dict[str, Any]]) -> Optional[str]:
+    try:
+        oid = order_data.get('id') if isinstance(order_data, dict) else None
+    except Exception:
+        oid = None
+    if oid is None or str(oid).strip() == '':
+        return None
+
+    template = str(os.environ.get('ORDER_TRACKING_URL_TEMPLATE') or '').strip()
+    if template:
+        try:
+            return template.replace('{order_id}', quote_plus(str(oid)))
+        except Exception:
+            return template
+
+    base = str(os.environ.get('CATALOG_PUBLIC_URL') or os.environ.get('FRONTEND_PUBLIC_URL') or '').strip()
+    if not base:
+        return None
+    url = base.rstrip('/')
+    if not url.lower().endswith('.html'):
+        url = url + '/catalogo.html'
+    sep = '&' if '?' in url else '?'
+    return url + sep + 'order=' + quote_plus(str(oid))
+
+
+def _build_tracking_button_html(order_data: Optional[Dict[str, Any]]) -> str:
+    url = _resolve_order_tracking_url(order_data)
+    if not url:
+        return ''
+    safe_url = html_escape(str(url))
+    return (
+        "<div style='margin:16px 0 0 0;'>"
+        f"<a href='{safe_url}' "
+        "style='display:inline-block;background:#f26b38;color:#ffffff;text-decoration:none;"
+        "font-weight:800;padding:12px 16px;border-radius:12px;'>"
+        "Ver estado del pedido</a>"
+        "</div>"
+    )
+
+
+def _build_brand_footer_text(brand_name: str) -> str:
+    parts: List[str] = []
+    try:
+        address = str(os.environ.get('RESEND_BRAND_ADDRESS') or '').strip()
+        if address:
+            parts.append(address)
+    except Exception:
+        pass
+    try:
+        phone = str(os.environ.get('RESEND_BRAND_PHONE') or '').strip()
+        if phone:
+            parts.append(phone)
+    except Exception:
+        pass
+    try:
+        website = str(os.environ.get('RESEND_BRAND_WEBSITE') or '').strip()
+        if website:
+            parts.append(website)
+    except Exception:
+        pass
+    if parts:
+        return brand_name + " · " + " · ".join(parts)
+    return brand_name
+
+
 def _build_order_seen_html(order_data: Dict[str, Any]) -> str:
     brand_name = html_escape(str(os.environ.get('RESEND_BRAND_NAME') or 'DistriAr'))
+    logo_url = (os.environ.get('RESEND_BRAND_LOGO_URL') or '').strip()
     order_id = html_escape(str(order_data.get('id') or 'sin-id'))
     customer_name = html_escape(str(order_data.get('user_full_name') or 'cliente'))
     delivery_window = html_escape(_format_delivery_schedule_label(order_data))
@@ -1378,7 +1459,7 @@ def _build_order_seen_html(order_data: Dict[str, Any]) -> str:
     if created_at_raw:
         try:
             parsed_dt = datetime.datetime.fromisoformat(str(created_at_raw).replace('Z', '+00:00'))
-            created_at_text = parsed_dt.strftime('%Y-%m-%d %H:%M')
+            created_at_text = parsed_dt.strftime('%d/%m/%Y %H:%M')
         except Exception:
             created_at_text = str(created_at_raw)
     created_at_text = html_escape(created_at_text) if created_at_text else '-'
@@ -1394,19 +1475,16 @@ def _build_order_seen_html(order_data: Dict[str, Any]) -> str:
                 seen_dt = now_utc.astimezone(ZoneInfo(timezone_name))
             except Exception:
                 seen_dt = now_utc
-        seen_at_text = seen_dt.strftime('%Y-%m-%d %H:%M')
+        seen_at_text = seen_dt.strftime('%d/%m/%Y %H:%M')
     except Exception:
         try:
-            seen_at_text = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M')
+            seen_at_text = datetime.datetime.utcnow().strftime('%d/%m/%Y %H:%M')
         except Exception:
             seen_at_text = ''
     seen_at_text = html_escape(seen_at_text) if seen_at_text else '-'
 
     total_raw = order_data.get('total')
-    try:
-        total_text = f"${float(total_raw or 0):,.2f}"
-    except Exception:
-        total_text = f"${html_escape(str(total_raw or '0'))}"
+    total_text = _format_ars_money(total_raw)
 
     email_val = _normalize_email(order_data.get('user_email'))
     email_text = html_escape(email_val) if email_val else '-'
@@ -1492,6 +1570,13 @@ def _build_order_seen_html(order_data: Dict[str, Any]) -> str:
         "</p>"
     )
 
+    logo_block = (
+        f"<img src='{html_escape(logo_url)}' alt='{brand_name}' style='height:42px;display:block;margin:0 0 12px 0;'/>"
+        if logo_url else ""
+    )
+    tracking_button = _build_tracking_button_html(order_data)
+    footer_text = html_escape(_build_brand_footer_text(str(os.environ.get('RESEND_BRAND_NAME') or 'DistriAr')))
+
     return (
         "<!doctype html>"
         "<html><body style='margin:0;padding:0;background:#f3f5f7;font-family:Arial,sans-serif;color:#0f172a;'>"
@@ -1500,6 +1585,7 @@ def _build_order_seen_html(order_data: Dict[str, Any]) -> str:
         "<table role='presentation' width='640' cellspacing='0' cellpadding='0' "
         "style='max-width:640px;width:100%;background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden;'>"
         "<tr><td style='padding:22px 26px;background:#0f172a;color:#f8fafc;'>"
+        f"{logo_block}"
         "<div style='font-size:20px;font-weight:700;'>Pedido visto por administracion</div>"
         "<div style='margin-top:6px;font-size:14px;color:#cbd5e1;'>Tu pedido ya esta en preparacion.</div>"
         "</td></tr>"
@@ -1532,10 +1618,11 @@ def _build_order_seen_html(order_data: Dict[str, Any]) -> str:
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
         "<p style='margin:18px 0 12px 0;font-size:15px;'>Gracias por tu compra.</p>"
+        f"{tracking_button}"
         f"{support_line}"
         "</td></tr>"
         "<tr><td style='padding:12px 26px;border-top:1px solid #e5e7eb;color:#64748b;font-size:12px;'>"
-        f"{brand_name} - Actualizacion automatica de pedido"
+        f"{footer_text} - Actualizacion automatica de pedido"
         "</td></tr>"
         "</table>"
         "</td></tr></table>"
@@ -1545,6 +1632,7 @@ def _build_order_seen_html(order_data: Dict[str, Any]) -> str:
 
 def _build_order_prepared_html(order_data: Dict[str, Any]) -> str:
     brand_name = html_escape(str(os.environ.get('RESEND_BRAND_NAME') or 'DistriAr'))
+    logo_url = (os.environ.get('RESEND_BRAND_LOGO_URL') or '').strip()
     order_id = html_escape(str(order_data.get('id') or 'sin-id'))
     customer_name = html_escape(str(order_data.get('user_full_name') or 'cliente'))
     delivery_window = html_escape(_format_delivery_schedule_label(order_data))
@@ -1560,19 +1648,63 @@ def _build_order_prepared_html(order_data: Dict[str, Any]) -> str:
                 prepared_dt = now_utc.astimezone(ZoneInfo(timezone_name))
             except Exception:
                 prepared_dt = now_utc
-        prepared_at_text = prepared_dt.strftime('%Y-%m-%d %H:%M')
+        prepared_at_text = prepared_dt.strftime('%d/%m/%Y %H:%M')
     except Exception:
         try:
-            prepared_at_text = datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M')
+            prepared_at_text = datetime.datetime.utcnow().strftime('%d/%m/%Y %H:%M')
         except Exception:
             prepared_at_text = ''
     prepared_at_text = html_escape(prepared_at_text) if prepared_at_text else '-'
 
     total_raw = order_data.get('total')
-    try:
-        total_text = f"${float(total_raw or 0):,.2f}"
-    except Exception:
-        total_text = f"${html_escape(str(total_raw or '0'))}"
+    total_text = _format_ars_money(total_raw)
+
+    items = order_data.get('items') if isinstance(order_data.get('items'), list) else []
+    rows: List[str] = []
+    for idx, item in enumerate(items[:25], start=1):
+        if isinstance(item, dict):
+            prod_id_raw = item.get('id', '?')
+            qty_raw = item.get('qty', '?')
+            meta = item.get('meta') if isinstance(item.get('meta'), dict) else {}
+            item_name = meta.get('name') or meta.get('title') or meta.get('product_name')
+            qty_label = meta.get('qty_label')
+        else:
+            prod_id_raw = getattr(item, 'id', '?')
+            qty_raw = getattr(item, 'qty', '?')
+            meta = getattr(item, 'meta', None)
+            meta = meta if isinstance(meta, dict) else {}
+            item_name = meta.get('name') or meta.get('title') or meta.get('product_name')
+            qty_label = meta.get('qty_label')
+
+        try:
+            qty_text = f"{float(qty_raw):g}"
+        except Exception:
+            qty_text = str(qty_raw)
+        if qty_label:
+            qty_text = f"{qty_text} ({str(qty_label)})"
+
+        if not item_name:
+            item_name = f"Producto #{prod_id_raw}"
+
+        rows.append(
+            "<tr>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #edf1f5;color:#1f2937'>{idx}</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #edf1f5;color:#1f2937'>{html_escape(str(item_name))}</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #edf1f5;color:#334155;text-align:right'>{html_escape(qty_text)}</td>"
+            "</tr>"
+        )
+    if not rows:
+        rows.append(
+            "<tr>"
+            "<td colspan='3' style='padding:12px;color:#64748b;border-bottom:1px solid #edf1f5'>Sin detalle de productos</td>"
+            "</tr>"
+        )
+    if len(items) > 25:
+        rows.append(
+            "<tr>"
+            "<td colspan='3' style='padding:10px 12px;color:#64748b'>... y mas productos</td>"
+            "</tr>"
+        )
 
     support_email = html_escape(str(os.environ.get('RESEND_REPLY_TO') or ''))
     support_line = (
@@ -1585,6 +1717,13 @@ def _build_order_prepared_html(order_data: Dict[str, Any]) -> str:
         "</p>"
     )
 
+    logo_block = (
+        f"<img src='{html_escape(logo_url)}' alt='{brand_name}' style='height:42px;display:block;margin:0 0 12px 0;'/>"
+        if logo_url else ""
+    )
+    tracking_button = _build_tracking_button_html(order_data)
+    footer_text = html_escape(_build_brand_footer_text(str(os.environ.get('RESEND_BRAND_NAME') or 'DistriAr')))
+
     return (
         "<!doctype html>"
         "<html><body style='margin:0;padding:0;background:#f3f5f7;font-family:Arial,sans-serif;color:#0f172a;'>"
@@ -1593,6 +1732,7 @@ def _build_order_prepared_html(order_data: Dict[str, Any]) -> str:
         "<table role='presentation' width='640' cellspacing='0' cellpadding='0' "
         "style='max-width:640px;width:100%;background:#ffffff;border:1px solid #e5e7eb;border-radius:14px;overflow:hidden;'>"
         "<tr><td style='padding:22px 26px;background:#0f172a;color:#f8fafc;'>"
+        f"{logo_block}"
         "<div style='font-size:20px;font-weight:700;'>Pedido preparado</div>"
         "<div style='margin-top:6px;font-size:14px;color:#cbd5e1;'>Tu pedido ya fue preparado por administracion.</div>"
         "</td></tr>"
@@ -1608,11 +1748,22 @@ def _build_order_prepared_html(order_data: Dict[str, Any]) -> str:
         f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Entrega programada</td><td style='padding:10px 12px;text-align:right;font-size:13px;color:#0f172a;font-weight:700;'>{delivery_window}</td></tr>"
         f"<tr><td style='padding:10px 12px;background:#f8fafc;color:#334155;font-size:13px;'>Total</td><td style='padding:10px 12px;text-align:right;font-size:15px;color:#0f172a;font-weight:700;'>{total_text}</td></tr>"
         "</table>"
-        "<p style='margin:0;font-size:15px;'>Gracias por tu compra.</p>"
+        "<div style='font-size:14px;font-weight:700;color:#0f172a;margin:8px 0 8px 0;'>Detalle del pedido</div>"
+        "<table role='presentation' width='100%' cellspacing='0' cellpadding='0' "
+        "style='border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;'>"
+        "<thead><tr>"
+        "<th align='left' style='padding:10px 12px;background:#f8fafc;font-size:12px;color:#475569;text-transform:uppercase;'>#</th>"
+        "<th align='left' style='padding:10px 12px;background:#f8fafc;font-size:12px;color:#475569;text-transform:uppercase;'>Producto</th>"
+        "<th align='right' style='padding:10px 12px;background:#f8fafc;font-size:12px;color:#475569;text-transform:uppercase;'>Cantidad</th>"
+        "</tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "<p style='margin:18px 0 0 0;font-size:15px;'>Gracias por tu compra.</p>"
+        f"{tracking_button}"
         f"{support_line}"
         "</td></tr>"
         "<tr><td style='padding:12px 26px;border-top:1px solid #e5e7eb;color:#64748b;font-size:12px;'>"
-        f"{brand_name} - Actualizacion automatica de pedido"
+        f"{footer_text} - Actualizacion automatica de pedido"
         "</td></tr>"
         "</table>"
         "</td></tr></table>"
@@ -1632,16 +1783,13 @@ def _build_order_confirmation_html(order_data: Dict[str, Any]) -> str:
     if created_at_raw:
         try:
             parsed_dt = datetime.datetime.fromisoformat(str(created_at_raw).replace('Z', '+00:00'))
-            created_at_text = parsed_dt.strftime('%Y-%m-%d %H:%M')
+            created_at_text = parsed_dt.strftime('%d/%m/%Y %H:%M')
         except Exception:
             created_at_text = str(created_at_raw)
     created_at_text = html_escape(created_at_text) if created_at_text else ''
 
     total_raw = order_data.get('total')
-    try:
-        total_text = f"${float(total_raw or 0):,.2f}"
-    except Exception:
-        total_text = f"${html_escape(str(total_raw or '0'))}"
+    total_text = _format_ars_money(total_raw)
 
     customer_name = order_data.get('user_full_name')
     if not customer_name:
@@ -1728,6 +1876,8 @@ def _build_order_confirmation_html(order_data: Dict[str, Any]) -> str:
         f"<img src='{html_escape(logo_url)}' alt='{brand_name}' style='height:42px;display:block;margin:0 0 12px 0;'/>"
         if logo_url else ""
     )
+    tracking_button = _build_tracking_button_html(order_data)
+    footer_text = html_escape(_build_brand_footer_text(str(os.environ.get('RESEND_BRAND_NAME') or 'DistriAr')))
 
     return (
         "<!doctype html>"
@@ -1766,9 +1916,10 @@ def _build_order_confirmation_html(order_data: Dict[str, Any]) -> str:
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
         "<p style='margin:18px 0 0 0;font-size:12px;color:#64748b;'>Si necesitas ayuda, responde este correo y te asistimos.</p>"
+        f"{tracking_button}"
         "</td></tr>"
         "<tr><td style='padding:14px 28px;border-top:1px solid #e5e7eb;color:#64748b;font-size:12px;'>"
-        f"{brand_name} - Confirmacion automatica de pedido"
+        f"{footer_text} - Confirmacion automatica de pedido"
         "</td></tr>"
         "</table>"
         "</td></tr></table>"
@@ -3751,7 +3902,7 @@ def auth_replace_addresses(
         raise HTTPException(status_code=500, detail='Could not save addresses')
 
 @app.post("/products")
-async def create_product(payload: schemas.ProductCreate):
+async def create_product(payload: schemas.ProductCreate, request: Request):
     """Create a product - no response validation, just raw JSON."""
     # Log incoming payload (helps debug server vs validation failures)
     try:
@@ -3759,10 +3910,16 @@ async def create_product(payload: schemas.ProductCreate):
     except Exception:
         logger.exception('Failed to log payload for POST /products')
 
+    actor = None
+    try:
+        actor = (request.headers.get('x-actor') or request.headers.get('X-Actor') or '').strip() or None
+    except Exception:
+        actor = None
+
     def task():
         db = SessionLocal()
         try:
-            prod = crud.create_product(db, payload)
+            prod = crud.create_product(db, payload, actor=actor)
             if not prod:
                 return None
             # Convert safely to dict whether prod is a dict or object
@@ -3774,8 +3931,10 @@ async def create_product(payload: schemas.ProductCreate):
                 'id': getv('id', None),
                 'code': getv('code', None),
                 'name': getv('name', ''),
+                'brand': getv('brand', None),
                 'price': getv('price', 0),
                 'price_retail': getv('price_retail', None),
+                'cost': getv('cost', None),
                 'description': getv('description', ''),
                 'category': getv('category', ''),
                 'image_url': getv('image_url', ''),
@@ -3783,6 +3942,7 @@ async def create_product(payload: schemas.ProductCreate):
                 'created_at': getv('created_at', None),
                 'updated_at': getv('updated_at', None),
                 'stock': int(getv('stock', 0) or 0),
+                'min_stock': int(getv('min_stock', 0) or 0),
                 'stock_kg': float(getv('stock_kg', getv('stock', 0.0)) or 0.0),
                 'kg_per_unit': float(getv('kg_per_unit', 1.0) or 1.0),
                 'discount': float(getv('discount', 0.0) or 0.0),
@@ -3860,8 +4020,11 @@ def list_products(
                 existing = set()
             cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
             if 'code' in existing: cols.append('code')
+            if 'brand' in existing: cols.append('brand')
             if 'price_retail' in existing: cols.append('price_retail')
+            if 'cost' in existing: cols.append('cost')
             if 'stock' in existing: cols.append('stock')
+            if 'min_stock' in existing: cols.append('min_stock')
             if 'stock_kg' in existing: cols.append('stock_kg')
             if 'kg_per_unit' in existing: cols.append('kg_per_unit')
             if 'discount' in existing: cols.append('discount')
@@ -3881,6 +4044,8 @@ def list_products(
             order_clause = ''
             if sort == 'price_asc': order_clause = ' ORDER BY price ASC'
             elif sort == 'price_desc': order_clause = ' ORDER BY price DESC'
+            elif sort == 'name_asc': order_clause = ' ORDER BY name ASC'
+            elif sort == 'name_desc': order_clause = ' ORDER BY name DESC'
             cols_sql = ', '.join(cols)
             sql = f"SELECT {cols_sql} FROM products{where_clause}{order_clause} LIMIT :limit OFFSET :skip"
             rows = crud._safe_execute_fetchall(db, sql, params)
@@ -3892,6 +4057,74 @@ def list_products(
         except Exception:
             logger.exception('list_products raw fallback failed')
             return []
+
+@app.get("/products/paged", response_model=schemas.PagedProductsResponse)
+def list_products_paged(
+    skip: int = 0,
+    limit: int = 50,
+    q: Optional[str] = None,
+    category: Optional[str] = None,
+    active: Optional[bool] = None,
+    sort: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    limit = max(1, min(int(limit or 50), 200))
+    skip = max(0, int(skip or 0))
+    total = crud.count_products(db, q=q, category=category, active=active)
+    items = crud.get_products(db, skip=skip, limit=limit, q=q, category=category, active=active, sort=sort)
+    return { 'total': int(total or 0), 'skip': skip, 'limit': limit, 'items': items }
+
+
+@app.get("/products/duplicates")
+def list_product_duplicates(limit: int = 200, db: Session = Depends(get_db)):
+    return crud.list_duplicate_product_codes(db, limit=limit)
+
+
+@app.patch("/products/bulk")
+async def bulk_update_products(payload: List[schemas.ProductBulkUpdateItem], request: Request):
+    actor = None
+    try:
+        actor = (request.headers.get('x-actor') or request.headers.get('X-Actor') or '').strip() or None
+    except Exception:
+        actor = None
+
+    def task():
+        db = SessionLocal()
+        try:
+            return crud.bulk_update_products(db, payload or [], actor=actor)
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+    result = await anyio.to_thread.run_sync(task)
+    try:
+        await push_event({"action": "bulk_updated", "updated": int((result or {}).get('updated') or 0)})
+    except Exception:
+        pass
+    try:
+        await anyio.to_thread.run_sync(write_catalog_snapshot)
+    except Exception:
+        pass
+    return result or {'updated': 0, 'results': []}
+
+
+@app.get("/product-changes", response_model=List[schemas.ProductChangeResponse])
+def list_product_changes(
+    product_id: Optional[int] = None,
+    skip: int = 0,
+    limit: int = 200,
+    db: Session = Depends(get_db),
+):
+    limit = max(1, min(int(limit or 200), 500))
+    skip = max(0, int(skip or 0))
+    query = db.query(models.ProductChange)
+    if product_id is not None:
+        query = query.filter(models.ProductChange.product_id == int(product_id))
+    query = query.order_by(models.ProductChange.created_at.desc(), models.ProductChange.id.desc())
+    return query.offset(skip).limit(limit).all()
+
 
 @app.get("/products/{product_id}", response_model=schemas.ProductResponse)
 def get_product(product_id: int, db: Session = Depends(get_db)):
@@ -3910,8 +4143,11 @@ def get_product(product_id: int, db: Session = Depends(get_db)):
             existing = set()
         cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
         if 'code' in existing: cols.append('code')
+        if 'brand' in existing: cols.append('brand')
         if 'price_retail' in existing: cols.append('price_retail')
+        if 'cost' in existing: cols.append('cost')
         if 'stock' in existing: cols.append('stock')
+        if 'min_stock' in existing: cols.append('min_stock')
         if 'stock_kg' in existing: cols.append('stock_kg')
         if 'kg_per_unit' in existing: cols.append('kg_per_unit')
         if 'discount' in existing: cols.append('discount')
@@ -3924,17 +4160,23 @@ def get_product(product_id: int, db: Session = Depends(get_db)):
         return objd
 
 @app.put("/products/{product_id}", response_model=schemas.ProductResponse)
-async def update_product(product_id: int, payload: schemas.ProductUpdate):
+async def update_product(product_id: int, payload: schemas.ProductUpdate, request: Request):
     # Log incoming payload for diagnostics
     try:
         logger.info('PUT /products/%s called with payload: %s', product_id, jsonable_encoder(payload))
     except Exception:
         logger.exception('Failed to log payload for PUT /products/%s', product_id)
 
+    actor = None
+    try:
+        actor = (request.headers.get('x-actor') or request.headers.get('X-Actor') or '').strip() or None
+    except Exception:
+        actor = None
+
     def task():
         db = SessionLocal()
         try:
-            return crud.update_product(db, product_id, payload)
+            return crud.update_product(db, product_id, payload, actor=actor, action='update')
         finally:
             db.close()
 
@@ -3965,11 +4207,17 @@ async def update_product(product_id: int, payload: schemas.ProductUpdate):
     return prod
 
 @app.delete("/products/{product_id}")
-async def delete_product(product_id: int):
+async def delete_product(product_id: int, request: Request):
+    actor = None
+    try:
+        actor = (request.headers.get('x-actor') or request.headers.get('X-Actor') or '').strip() or None
+    except Exception:
+        actor = None
+
     def task():
         db = SessionLocal()
         try:
-            crud.delete_product(db, product_id)
+            crud.delete_product(db, product_id, actor=actor)
         finally:
             db.close()
 
@@ -4075,6 +4323,7 @@ def write_catalog_snapshot():
             "id": p.id,
             "code": (str(getattr(p, 'code', '') or '').strip() or None),
             "name": p.name,
+            "brand": (str(getattr(p, 'brand', '') or '').strip() or None),
             "price": float(p.price) if p.price else None,
             "price_retail": float(p.price_retail) if getattr(p, 'price_retail', None) is not None else None,
             "description": p.description,
@@ -4259,11 +4508,42 @@ def save_promotions(promos: List[Dict[str, Any]]):
 @app.get("/export")
 def export(format: str = "json", db: Session = Depends(get_db)):
     products = crud.export_all(db)
-    rows = [p.__dict__ for p in products]
+    field_order = [
+        'id',
+        'code',
+        'name',
+        'brand',
+        'category',
+        'description',
+        'price',
+        'price_retail',
+        'cost',
+        'discount',
+        'sale_unit',
+        'kg_per_unit',
+        'stock',
+        'stock_kg',
+        'min_stock',
+        'image_url',
+        'active',
+        'created_at',
+        'updated_at',
+    ]
+
+    rows = []
+    all_keys = set()
+    for p in (products or []):
+        raw = p if isinstance(p, dict) else (getattr(p, '__dict__', None) or {})
+        cleaned = {k: v for (k, v) in (raw or {}).items() if k and not str(k).startswith('_')}
+        rows.append(cleaned)
+        all_keys.update(cleaned.keys())
+
+    # Ensure stable column order for CSV output.
+    fieldnames = [k for k in field_order if k in all_keys] + [k for k in sorted(all_keys) if k not in field_order]
 
     if format == "csv":
         si = StringIO()
-        writer = csv.DictWriter(si, fieldnames=rows[0].keys())
+        writer = csv.DictWriter(si, fieldnames=fieldnames, extrasaction='ignore')
         writer.writeheader()
         writer.writerows(rows)
         return PlainTextResponse(si.getvalue(), media_type="text/csv")
@@ -4285,6 +4565,183 @@ def trigger_backup(db: Session = Depends(get_db)):
 @app.get("/stats")
 def stats(db: Session = Depends(get_db)):
     return crud.stats(db)
+
+@app.get("/sales/stats")
+def sales_stats(
+    days: int = 30,
+    source: Optional[str] = None,
+    customer_type: Optional[str] = None,
+    limit: int = 5000,
+    db: Session = Depends(get_db),
+):
+    """Simple sales statistics based on recent orders.
+
+    Returns aggregated metrics for the last `days` (inclusive), computed in the
+    business timezone (ORDER_EMAIL_TIMEZONE or ORDER_DELIVERY_TIMEZONE).
+    """
+    try:
+        days_int = int(days or 30)
+    except Exception:
+        days_int = 30
+    days_int = max(1, min(365, days_int))
+
+    try:
+        limit_int = int(limit or 5000)
+    except Exception:
+        limit_int = 5000
+    limit_int = max(50, min(20000, limit_int))
+
+    tz_name = str(
+        os.environ.get('ORDER_EMAIL_TIMEZONE')
+        or os.environ.get('ORDER_DELIVERY_TIMEZONE')
+        or 'America/Argentina/Buenos_Aires'
+    ).strip() or 'America/Argentina/Buenos_Aires'
+    try:
+        from zoneinfo import ZoneInfo
+        tzinfo = ZoneInfo(tz_name)
+    except Exception:
+        tzinfo = datetime.timezone.utc
+        tz_name = 'UTC'
+
+    now_local = datetime.datetime.now(tzinfo)
+    end_date = now_local.date()
+    start_date = end_date - datetime.timedelta(days=days_int - 1)
+
+    def _normalize_customer_type(value: Any) -> str:
+        v = str(value or '').strip().lower()
+        return v if v in ('mayorista', 'minorista') else ''
+
+    customer_type_filter = _normalize_customer_type(customer_type)
+
+    orders_raw = crud.get_orders(db, skip=0, limit=limit_int, source=source, q=None, date=None) or []
+    orders_list: List[Dict[str, Any]] = []
+    for o in orders_raw:
+        if isinstance(o, dict):
+            orders_list.append(o)
+        else:
+            try:
+                orders_list.append({k: getattr(o, k, None) for k in ('id', 'items', 'total', 'created_at', 'customer_type', 'source', 'status')})
+            except Exception:
+                continue
+
+    by_day: Dict[str, Dict[str, Any]] = {}
+    orders_count = 0
+    revenue_total = 0.0
+    top_products: Dict[str, Dict[str, Any]] = {}
+
+    for order in orders_list:
+        try:
+            if customer_type_filter:
+                if _normalize_customer_type(order.get('customer_type')) != customer_type_filter:
+                    continue
+
+            created_at = order.get('created_at')
+            dt = None
+            if isinstance(created_at, datetime.datetime):
+                dt = created_at
+            elif created_at:
+                try:
+                    raw = str(created_at).strip()
+                    if raw.endswith('Z'):
+                        raw = raw[:-1] + '+00:00'
+                    dt = datetime.datetime.fromisoformat(raw)
+                except Exception:
+                    dt = None
+            if dt is None:
+                continue
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            local_date = dt.astimezone(tzinfo).date()
+            if local_date < start_date or local_date > end_date:
+                continue
+
+            try:
+                total = float(order.get('total') or 0.0)
+            except Exception:
+                total = 0.0
+
+            orders_count += 1
+            revenue_total += total
+
+            day_key = local_date.isoformat()
+            bucket = by_day.get(day_key)
+            if not bucket:
+                bucket = {'date': day_key, 'orders': 0, 'revenue': 0.0}
+                by_day[day_key] = bucket
+            bucket['orders'] = int(bucket.get('orders') or 0) + 1
+            bucket['revenue'] = float(bucket.get('revenue') or 0.0) + float(total or 0.0)
+
+            items = order.get('items') if isinstance(order.get('items'), list) else []
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                pid = str(it.get('id') or '').strip()
+                if not pid:
+                    continue
+                try:
+                    qty = float(it.get('qty') or 0.0)
+                except Exception:
+                    qty = 0.0
+                meta = it.get('meta') if isinstance(it.get('meta'), dict) else {}
+                name = meta.get('name') or meta.get('title') or meta.get('product_name') or ''
+                price_raw = meta.get('price')
+                if price_raw is None:
+                    price_raw = meta.get('unit_price')
+                try:
+                    unit_price = float(price_raw) if price_raw is not None else 0.0
+                except Exception:
+                    unit_price = 0.0
+                revenue = qty * unit_price
+                rec = top_products.get(pid)
+                if not rec:
+                    rec = {'product_id': pid, 'name': name or pid, 'qty': 0.0, 'revenue': 0.0}
+                    top_products[pid] = rec
+                rec['qty'] = float(rec.get('qty') or 0.0) + float(qty or 0.0)
+                rec['revenue'] = float(rec.get('revenue') or 0.0) + float(revenue or 0.0)
+                if name and (not rec.get('name') or rec.get('name') == pid):
+                    rec['name'] = name
+        except Exception:
+            continue
+
+    # Fill missing days so charts can render contiguous series.
+    series = []
+    cursor = start_date
+    while cursor <= end_date:
+        key = cursor.isoformat()
+        bucket = by_day.get(key) or {'date': key, 'orders': 0, 'revenue': 0.0}
+        series.append({
+            'date': key,
+            'orders': int(bucket.get('orders') or 0),
+            'revenue': float(round(float(bucket.get('revenue') or 0.0), 2)),
+        })
+        cursor = cursor + datetime.timedelta(days=1)
+
+    top = sorted(top_products.values(), key=lambda x: float(x.get('revenue') or 0.0), reverse=True)[:20]
+    for rec in top:
+        try:
+            rec['qty'] = float(round(float(rec.get('qty') or 0.0), 3))
+        except Exception:
+            rec['qty'] = 0.0
+        try:
+            rec['revenue'] = float(round(float(rec.get('revenue') or 0.0), 2))
+        except Exception:
+            rec['revenue'] = 0.0
+
+    avg_ticket = (revenue_total / orders_count) if orders_count else 0.0
+    return {
+        'timezone': tz_name,
+        'days': days_int,
+        'from': start_date.isoformat(),
+        'to': end_date.isoformat(),
+        'orders': int(orders_count),
+        'revenue': float(round(revenue_total, 2)),
+        'avg_ticket': float(round(avg_ticket, 2)),
+        'by_day': series,
+        'top_products': top,
+        'source': source,
+        'customer_type': customer_type_filter or None,
+        'sample_size': len(orders_list),
+    }
 
 
 # -----------------------------

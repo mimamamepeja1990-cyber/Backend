@@ -424,6 +424,10 @@ def get_products(db: Session, skip: int = 0, limit: int = 100, q: Optional[str]=
             query = query.order_by(models.Product.price.asc())
         elif sort == "price_desc":
             query = query.order_by(models.Product.price.desc())
+        elif sort == "name_asc":
+            query = query.order_by(models.Product.name.asc())
+        elif sort == "name_desc":
+            query = query.order_by(models.Product.name.desc())
         return query.offset(skip).limit(limit).all()
     except Exception as e:
         logger.exception('ORM get_products failed, falling back to raw SQL: %s', e)
@@ -437,11 +441,17 @@ def get_products(db: Session, skip: int = 0, limit: int = 100, q: Optional[str]=
         cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
         if 'code' in existing:
             cols.append('code')
+        if 'brand' in existing:
+            cols.append('brand')
         if 'price_retail' in existing:
             cols.append('price_retail')
+        if 'cost' in existing:
+            cols.append('cost')
         # only include optional columns if they exist
         if 'stock' in existing:
             cols.append('stock')
+        if 'min_stock' in existing:
+            cols.append('min_stock')
         if 'stock_kg' in existing:
             cols.append('stock_kg')
         if 'kg_per_unit' in existing:
@@ -469,6 +479,8 @@ def get_products(db: Session, skip: int = 0, limit: int = 100, q: Optional[str]=
         order_clause = ''
         if sort == 'price_asc': order_clause = ' ORDER BY price ASC'
         elif sort == 'price_desc': order_clause = ' ORDER BY price DESC'
+        elif sort == 'name_asc': order_clause = ' ORDER BY name ASC'
+        elif sort == 'name_desc': order_clause = ' ORDER BY name DESC'
         sql = f"SELECT {cols_sql} FROM products{where_clause}{order_clause} LIMIT :limit OFFSET :skip"
 
         # Use safe helper that retries once after rollback if needed
@@ -479,6 +491,127 @@ def get_products(db: Session, skip: int = 0, limit: int = 100, q: Optional[str]=
             objd = {cols[i]: row[i] for i in range(len(cols))}
             result.append(objd)
         return result
+
+
+def count_products(db: Session, q: Optional[str] = None, category: Optional[str] = None, active: Optional[bool] = None) -> int:
+    try:
+        try:
+            _ensure_product_columns(db)
+        except Exception:
+            pass
+        query = db.query(models.Product)
+        if q:
+            needle = f"%{str(q).strip()}%"
+            query = query.filter(
+                or_(
+                    models.Product.name.ilike(needle),
+                    models.Product.description.ilike(needle),
+                    models.Product.code.ilike(needle),
+                )
+            )
+        if category:
+            query = query.filter(models.Product.category == category)
+        if active is not None:
+            query = query.filter(models.Product.active == active)
+        return int(query.count())
+    except Exception as e:
+        logger.exception('ORM count_products failed, falling back to raw SQL: %s', e)
+        try:
+            bind = db.get_bind()
+            insp = inspect(bind)
+            existing = {c['name'] for c in insp.get_columns('products')}
+        except Exception:
+            existing = set()
+        where = []
+        params: dict = {}
+        if q:
+            match_parts = ["LOWER(COALESCE(name, '')) LIKE :q", "LOWER(COALESCE(description, '')) LIKE :q"]
+            if 'code' in existing:
+                match_parts.append("LOWER(COALESCE(code, '')) LIKE :q")
+            where.append("(" + " OR ".join(match_parts) + ")")
+            params['q'] = f"%{str(q).strip().lower()}%"
+        if category:
+            where.append("category = :category")
+            params['category'] = category
+        if active is not None and 'active' in existing:
+            where.append("active = :active")
+            params['active'] = bool(active)
+        where_clause = (' WHERE ' + ' AND '.join(where)) if where else ''
+        try:
+            return int(_safe_scalar(db, f"SELECT count(*) FROM products{where_clause}", params) or 0)
+        except Exception:
+            return 0
+
+
+def list_duplicate_product_codes(db: Session, limit: int = 200) -> List[dict]:
+    """Return duplicated product codes/SKUs (case-insensitive, trimmed)."""
+    try:
+        try:
+            _ensure_product_columns(db)
+        except Exception:
+            pass
+        rows = _safe_execute_fetchall(
+            db,
+            """
+            SELECT LOWER(TRIM(code)) AS code_key, COUNT(*) AS cnt
+            FROM products
+            WHERE code IS NOT NULL AND TRIM(code) <> ''
+            GROUP BY code_key
+            HAVING COUNT(*) > 1
+            ORDER BY cnt DESC, code_key ASC
+            LIMIT :limit
+            """,
+            {'limit': int(limit or 200)},
+        ) or []
+        out: List[dict] = []
+        for row in rows:
+            try:
+                code_key = str(row[0] or '').strip()
+            except Exception:
+                code_key = ''
+            try:
+                cnt = int(row[1] or 0)
+            except Exception:
+                cnt = 0
+            if not code_key:
+                continue
+            prows = _safe_execute_fetchall(
+                db,
+                "SELECT id, name, code FROM products WHERE LOWER(TRIM(COALESCE(code,''))) = :code_key ORDER BY id ASC",
+                {'code_key': code_key},
+            ) or []
+            products = []
+            for pr in prows:
+                try:
+                    products.append({'id': pr[0], 'name': pr[1], 'code': pr[2]})
+                except Exception:
+                    continue
+            out.append({'code': code_key, 'count': cnt, 'products': products})
+        return out
+    except Exception:
+        logger.exception('list_duplicate_product_codes failed')
+        return []
+
+
+def bulk_update_products(db: Session, updates: List[schemas.ProductBulkUpdateItem], actor: Optional[str] = None) -> dict:
+    results = []
+    updated = 0
+    for it in (updates or []):
+        try:
+            pid = int(getattr(it, 'id'))
+        except Exception:
+            continue
+        try:
+            payload = schemas.ProductUpdate(**it.dict(exclude={'id'}, exclude_unset=True))
+            update_product(db, pid, payload, actor=actor, action='bulk')
+            updated += 1
+            results.append({'id': pid, 'ok': True})
+        except HTTPException as he:
+            results.append({'id': pid, 'ok': False, 'status_code': he.status_code, 'detail': he.detail})
+        except Exception as e:
+            results.append({'id': pid, 'ok': False, 'detail': str(e)[:220]})
+    return {'updated': updated, 'results': results}
+
 
 def _ensure_product_columns(db: Session, existing_cols: Optional[set] = None) -> set:
     """Best-effort runtime migration for product columns used by admin/catalog."""
@@ -497,12 +630,15 @@ def _ensure_product_columns(db: Session, existing_cols: Optional[set] = None) ->
 
     col_defs = {
         'code': 'VARCHAR(100)',
+        'brand': 'VARCHAR(200)',
         'stock': 'INTEGER DEFAULT 0',
+        'min_stock': 'INTEGER DEFAULT 0',
         'stock_kg': 'REAL DEFAULT 0',
         'kg_per_unit': 'REAL DEFAULT 1',
         'discount': 'REAL DEFAULT 0',
         'sale_unit': "VARCHAR(20) DEFAULT 'unit'",
         'price_retail': 'REAL',
+        'cost': 'REAL',
     }
 
     for col, coltype in col_defs.items():
@@ -530,7 +666,125 @@ def _ensure_product_columns(db: Session, existing_cols: Optional[set] = None) ->
                 pass
     return existing
 
-def create_product(db: Session, payload: schemas.ProductCreate) -> models.Product:
+_PRODUCT_SNAPSHOT_FIELDS = (
+    'id',
+    'code',
+    'name',
+    'brand',
+    'price',
+    'price_retail',
+    'cost',
+    'description',
+    'category',
+    'image_url',
+    'active',
+    'stock',
+    'min_stock',
+    'stock_kg',
+    'kg_per_unit',
+    'discount',
+    'sale_unit',
+    'created_at',
+    'updated_at',
+)
+
+def _normalize_product_code_value(value: Optional[str]) -> Optional[str]:
+    try:
+        s = str(value or '').strip()
+    except Exception:
+        return None
+    return s or None
+
+
+def _product_snapshot(obj) -> Optional[dict]:
+    if obj is None:
+        return None
+    if isinstance(obj, dict):
+        snap = {}
+        for k in _PRODUCT_SNAPSHOT_FIELDS:
+            if k in obj:
+                snap[k] = obj.get(k)
+        # include common alias keys if present
+        if 'codigo' in obj and 'code' not in snap:
+            snap['code'] = obj.get('codigo')
+        return snap
+    snap = {}
+    for k in _PRODUCT_SNAPSHOT_FIELDS:
+        try:
+            snap[k] = getattr(obj, k, None)
+        except Exception:
+            pass
+    return snap
+
+
+def _diff_snapshots(before: Optional[dict], after: Optional[dict]) -> dict:
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return {}
+    keys = set(before.keys()) | set(after.keys())
+    changed = {}
+    for k in keys:
+        if before.get(k) != after.get(k):
+            changed[k] = {'from': before.get(k), 'to': after.get(k)}
+    return changed
+
+
+def _find_code_conflict(db: Session, code: str, exclude_id: Optional[int] = None) -> Optional[dict]:
+    normalized = _normalize_product_code_value(code)
+    if not normalized:
+        return None
+    params = {'code': normalized}
+    extra = ''
+    if exclude_id is not None:
+        try:
+            params['exclude_id'] = int(exclude_id)
+            extra = ' AND id != :exclude_id'
+        except Exception:
+            extra = ''
+    row = _safe_execute_fetchone(
+        db,
+        "SELECT id, name, code FROM products WHERE LOWER(TRIM(COALESCE(code,''))) = LOWER(TRIM(:code))"
+        + extra
+        + " LIMIT 1",
+        params,
+    )
+    if not row:
+        return None
+    try:
+        return {'id': row[0], 'name': row[1], 'code': row[2]}
+    except Exception:
+        return {'id': None, 'name': None, 'code': normalized}
+
+
+def _log_product_change(
+    db: Session,
+    product_id: Optional[int],
+    action: str,
+    before: Optional[dict] = None,
+    after: Optional[dict] = None,
+    actor: Optional[str] = None,
+    changed_fields: Optional[dict] = None,
+) -> None:
+    try:
+        entry = models.ProductChange(
+            product_id=product_id,
+            action=str(action or 'update'),
+            actor=(str(actor).strip() if actor else None),
+            before=before,
+            after=after,
+            changed_fields=changed_fields,
+        )
+        db.add(entry)
+        db.commit()
+    except Exception:
+        # best-effort only: never break the primary product operation
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.exception('product audit log failed')
+
+
+def create_product(db: Session, payload: schemas.ProductCreate, actor: Optional[str] = None) -> models.Product:
     """Create product - ultra-simple and robust."""
     logger.info('CREATE_PRODUCT: Inserting %s', payload.name)
     
@@ -541,7 +795,7 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
         insp = inspect(bind)
         existing_cols = {c['name'] for c in insp.get_columns('products')}
     except Exception:
-        existing_cols = {'id', 'code', 'name', 'price', 'description', 'category', 'image_url', 'active', 'created_at', 'updated_at', 'stock', 'stock_kg', 'kg_per_unit', 'discount', 'sale_unit', 'price_retail'}
+        existing_cols = {'id', 'code', 'name', 'brand', 'price', 'price_retail', 'cost', 'description', 'category', 'image_url', 'active', 'created_at', 'updated_at', 'stock', 'min_stock', 'stock_kg', 'kg_per_unit', 'discount', 'sale_unit'}
     
     existing_cols = _ensure_product_columns(db, existing_cols)
     logger.info('Existing columns: %s', existing_cols)
@@ -574,22 +828,50 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
     except Exception:
         price_retail = None
 
+    raw_cost = getattr(payload, 'cost', None)
+    try:
+        cost = float(raw_cost) if raw_cost is not None else None
+    except Exception:
+        cost = None
+
+    try:
+        min_stock = int(getattr(payload, 'min_stock', 0) or 0)
+    except Exception:
+        min_stock = 0
+
     data = {
         'code': str(getattr(payload, 'code', '') or '').strip() or None,
         'name': payload.name,
+        'brand': str(getattr(payload, 'brand', '') or '').strip() or None,
         'price': payload.price,
         'price_retail': price_retail,
+        'cost': cost,
         'description': payload.description or '',
         'category': payload.category or '',
         'image_url': payload.image_url or '',
         'active': payload.active,
         'stock': stock_int,
+        'min_stock': min_stock,
         'stock_kg': stock_kg,
         'kg_per_unit': kg_per_unit,
         'discount': getattr(payload, 'discount', 0.0),
         'sale_unit': sale_unit
     }
     
+    # Enforce SKU/code uniqueness (best-effort at application layer).
+    # This avoids inventory/order ambiguity when codes are duplicated.
+    try:
+        code_norm = _normalize_product_code_value(data.get('code'))
+        if code_norm and 'code' in existing_cols:
+            conflict = _find_code_conflict(db, code_norm)
+            if conflict:
+                raise HTTPException(status_code=409, detail=f"Código/SKU duplicado: {code_norm} (existe en id={conflict.get('id')})")
+    except HTTPException:
+        raise
+    except Exception:
+        # If uniqueness check fails for any reason, do not block creation.
+        logger.exception('SKU uniqueness check failed during create_product')
+
     # Filter to only existing columns
     cols_to_insert = [k for k in data.keys() if k in existing_cols]
     logger.info('Columns to insert: %s', cols_to_insert)
@@ -630,10 +912,16 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
         cols = ['id', 'name', 'price', 'description', 'category', 'image_url', 'active', 'created_at', 'updated_at']
         if 'code' in existing:
             cols.append('code')
+        if 'brand' in existing:
+            cols.append('brand')
         if 'price_retail' in existing:
             cols.append('price_retail')
+        if 'cost' in existing:
+            cols.append('cost')
         if 'stock' in existing:
             cols.append('stock')
+        if 'min_stock' in existing:
+            cols.append('min_stock')
         if 'stock_kg' in existing:
             cols.append('stock_kg')
         if 'kg_per_unit' in existing:
@@ -643,7 +931,19 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
         if 'sale_unit' in existing:
             cols.append('sale_unit')
         cols_sql = ', '.join(cols)
-        result = _safe_execute_fetchone(db, f'SELECT {cols_sql} FROM products WHERE name = :name ORDER BY created_at DESC LIMIT 1', {'name': payload.name})
+        code_norm = _normalize_product_code_value(data.get('code'))
+        if code_norm:
+            result = _safe_execute_fetchone(
+                db,
+                f"SELECT {cols_sql} FROM products WHERE LOWER(TRIM(COALESCE(code,''))) = LOWER(TRIM(:code)) ORDER BY created_at DESC LIMIT 1",
+                {'code': code_norm},
+            )
+        else:
+            result = _safe_execute_fetchone(
+                db,
+                f'SELECT {cols_sql} FROM products WHERE name = :name ORDER BY created_at DESC LIMIT 1',
+                {'name': payload.name},
+            )
 
         if result:
             logger.info('Fetched product id=%s', result[0])
@@ -656,7 +956,17 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
                     obj['price_retail'] = float(obj.get('price_retail')) if obj.get('price_retail') is not None else None
                 except Exception:
                     obj['price_retail'] = None
+            if 'cost' in obj:
+                try:
+                    obj['cost'] = float(obj.get('cost')) if obj.get('cost') is not None else None
+                except Exception:
+                    obj['cost'] = None
             obj['stock'] = int(obj.get('stock') or 0)
+            if 'min_stock' in obj:
+                try:
+                    obj['min_stock'] = int(obj.get('min_stock') or 0)
+                except Exception:
+                    obj['min_stock'] = 0
             if 'stock_kg' in obj:
                 try:
                     obj['stock_kg'] = float(obj.get('stock_kg') or 0.0)
@@ -671,6 +981,19 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
             if 'sale_unit' in obj:
                 obj['sale_unit'] = obj.get('sale_unit') or 'unit'
             obj['active'] = bool(obj.get('active')) if 'active' in obj else False
+            # Audit log (best-effort)
+            try:
+                _log_product_change(
+                    db,
+                    product_id=int(obj.get('id')) if obj.get('id') is not None else None,
+                    action='create',
+                    before=None,
+                    after=_product_snapshot(obj),
+                    actor=actor,
+                    changed_fields=None,
+                )
+            except Exception:
+                pass
             return obj
     except Exception as e:
         logger.exception('Could not fetch product: %s', e)
@@ -684,9 +1007,12 @@ def create_product(db: Session, payload: schemas.ProductCreate) -> models.Produc
         'id': None,
         'code': str(getattr(payload, 'code', '') or '').strip() or None,
         'name': payload.name,
+        'brand': str(getattr(payload, 'brand', '') or '').strip() or None,
         'price': float(payload.price) if getattr(payload, 'price', None) is not None else 0.0,
         'price_retail': fallback_price_retail,
+        'cost': (float(getattr(payload, 'cost')) if getattr(payload, 'cost', None) is not None else None),
         'stock': int(getattr(payload, 'stock', 0) or 0),
+        'min_stock': int(getattr(payload, 'min_stock', 0) or 0),
         'stock_kg': float(getattr(payload, 'stock_kg', getattr(payload, 'stock', 0)) or 0.0),
         'kg_per_unit': float(getattr(payload, 'kg_per_unit', 1.0) or 1.0),
         'discount': float(getattr(payload, 'discount', 0.0) or 0.0),
@@ -711,10 +1037,16 @@ def get_product(db: Session, product_id: int) -> Optional[models.Product]:
         cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
         if 'code' in existing:
             cols.append('code')
+        if 'brand' in existing:
+            cols.append('brand')
         if 'price_retail' in existing:
             cols.append('price_retail')
+        if 'cost' in existing:
+            cols.append('cost')
         if 'stock' in existing:
             cols.append('stock')
+        if 'min_stock' in existing:
+            cols.append('min_stock')
         if 'stock_kg' in existing:
             cols.append('stock_kg')
         if 'kg_per_unit' in existing:
@@ -730,10 +1062,11 @@ def get_product(db: Session, product_id: int) -> Optional[models.Product]:
         objd = {cols[i]: row[i] for i in range(len(cols))}
         return objd
 
-def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate) -> models.Product:
+def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate, actor: Optional[str] = None, action: str = 'update') -> models.Product:
     obj = get_product(db, product_id)
     if not obj:
         raise Exception("Not found")
+    before_snapshot = _product_snapshot(obj)
     updates = payload.dict(exclude_unset=True)
     # If obj is an ORM instance, perform usual setattr flow
     try:
@@ -742,11 +1075,32 @@ def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate)
         is_orm = False
 
     if is_orm:
+        # Enforce SKU uniqueness (best-effort) when code changes.
+        if 'code' in updates:
+            normalized = _normalize_product_code_value(updates.get('code'))
+            if normalized:
+                conflict = _find_code_conflict(db, normalized, exclude_id=product_id)
+                if conflict:
+                    raise HTTPException(status_code=409, detail=f"Código/SKU duplicado: {normalized} (existe en id={conflict.get('id')})")
+            updates['code'] = normalized
         for field, value in updates.items():
             setattr(obj, field, value)
         db.add(obj)
         db.commit()
         db.refresh(obj)
+        after_snapshot = _product_snapshot(obj)
+        try:
+            _log_product_change(
+                db,
+                product_id=int(getattr(obj, 'id', product_id) or product_id),
+                action=str(action or 'update'),
+                before=before_snapshot,
+                after=after_snapshot,
+                actor=actor,
+                changed_fields=_diff_snapshots(before_snapshot, after_snapshot),
+            )
+        except Exception:
+            pass
         return obj
 
     # Fallback: perform a raw UPDATE using only existing columns
@@ -763,6 +1117,11 @@ def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate)
             updates['price_retail'] = float(updates['price_retail']) if updates['price_retail'] is not None else None
         except Exception:
             updates.pop('price_retail', None)
+    if 'cost' in updates:
+        try:
+            updates['cost'] = float(updates['cost']) if updates['cost'] is not None else None
+        except Exception:
+            updates.pop('cost', None)
     if 'code' in updates:
         try:
             updates['code'] = str(updates['code']).strip() if updates['code'] is not None else None
@@ -770,6 +1129,26 @@ def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate)
                 updates['code'] = None
         except Exception:
             updates.pop('code', None)
+    if 'brand' in updates:
+        try:
+            updates['brand'] = str(updates['brand']).strip() if updates['brand'] is not None else None
+            if updates['brand'] == '':
+                updates['brand'] = None
+        except Exception:
+            updates.pop('brand', None)
+    if 'min_stock' in updates:
+        try:
+            updates['min_stock'] = int(updates['min_stock'] or 0)
+            if updates['min_stock'] < 0:
+                updates['min_stock'] = 0
+        except Exception:
+            updates.pop('min_stock', None)
+
+    # Enforce SKU uniqueness (best-effort) when code changes.
+    if updates.get('code'):
+        conflict = _find_code_conflict(db, updates['code'], exclude_id=product_id)
+        if conflict:
+            raise HTTPException(status_code=409, detail=f"Código/SKU duplicado: {updates['code']} (existe en id={conflict.get('id')})")
 
     set_cols = [k for k in updates.keys() if (not existing) or (k in existing)]
     if not set_cols:
@@ -799,10 +1178,16 @@ def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate)
     cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
     if 'code' in existing:
         cols.append('code')
+    if 'brand' in existing:
+        cols.append('brand')
     if 'price_retail' in existing:
         cols.append('price_retail')
+    if 'cost' in existing:
+        cols.append('cost')
     if 'stock' in existing:
         cols.append('stock')
+    if 'min_stock' in existing:
+        cols.append('min_stock')
     if 'stock_kg' in existing:
         cols.append('stock_kg')
     if 'kg_per_unit' in existing:
@@ -817,13 +1202,55 @@ def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate)
         return None
     objd = {cols[i]: row[i] for i in range(len(cols))}
     # Return plain dict for consistency
+    try:
+        after_snapshot = _product_snapshot(objd)
+        _log_product_change(
+            db,
+            product_id=int(product_id),
+            action=str(action or 'update'),
+            before=before_snapshot,
+            after=after_snapshot,
+            actor=actor,
+            changed_fields=_diff_snapshots(before_snapshot, after_snapshot),
+        )
+    except Exception:
+        pass
     return objd
 
-def delete_product(db: Session, product_id: int):
-    obj = get_product(db, product_id)
-    if obj:
-        db.delete(obj)
+def delete_product(db: Session, product_id: int, actor: Optional[str] = None):
+    before = get_product(db, product_id)
+    if not before:
+        return
+    before_snapshot = _product_snapshot(before)
+    try:
+        is_orm = hasattr(before, '__table__') or (hasattr(before, '__class__') and getattr(before.__class__, '__table__', None) is not None)
+    except Exception:
+        is_orm = False
+    if is_orm:
+        db.delete(before)
         db.commit()
+    else:
+        try:
+            _safe_execute(db, "DELETE FROM products WHERE id = :id", {'id': product_id})
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            raise
+    try:
+        _log_product_change(
+            db,
+            product_id=int(product_id),
+            action='delete',
+            before=before_snapshot,
+            after=None,
+            actor=actor,
+            changed_fields=None,
+        )
+    except Exception:
+        pass
 
 def export_all(db: Session):
     return db.query(models.Product).all()

@@ -7,11 +7,14 @@ class ProductBase(BaseModel):
     name: str
     price: float
     price_retail: Optional[float] = None
+    cost: Optional[float] = None
     description: Optional[str] = None
     category: Optional[str] = None
+    brand: Optional[str] = None
     image_url: Optional[str] = None
     active: Optional[bool] = True
     stock: Optional[int] = 0
+    min_stock: Optional[int] = 0
     stock_kg: Optional[float] = 0.0
     kg_per_unit: Optional[float] = 1.0
     discount: Optional[float] = 0.0
@@ -25,11 +28,14 @@ class ProductUpdate(BaseModel):
     name: Optional[str] = None
     price: Optional[float] = None
     price_retail: Optional[float] = None
+    cost: Optional[float] = None
     description: Optional[str] = None
     category: Optional[str] = None
+    brand: Optional[str] = None
     image_url: Optional[str] = None
     active: Optional[bool] = None
     stock: Optional[int] = None
+    min_stock: Optional[int] = None
     stock_kg: Optional[float] = None
     kg_per_unit: Optional[float] = None
     discount: Optional[float] = None
@@ -41,6 +47,7 @@ class ProductResponse(ProductBase):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     stock: Optional[int] = 0
+    min_stock: Optional[int] = 0
     stock_kg: Optional[float] = 0.0
     kg_per_unit: Optional[float] = 1.0
     discount: Optional[float] = 0.0
@@ -48,6 +55,44 @@ class ProductResponse(ProductBase):
     model_config = {
         "from_attributes": True
     }
+
+class ProductBulkUpdateItem(BaseModel):
+    id: int
+    code: Optional[str] = None
+    name: Optional[str] = None
+    price: Optional[float] = None
+    price_retail: Optional[float] = None
+    cost: Optional[float] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    brand: Optional[str] = None
+    image_url: Optional[str] = None
+    active: Optional[bool] = None
+    stock: Optional[int] = None
+    min_stock: Optional[int] = None
+    stock_kg: Optional[float] = None
+    kg_per_unit: Optional[float] = None
+    discount: Optional[float] = None
+    sale_unit: Optional[str] = None
+
+class PagedProductsResponse(BaseModel):
+    total: int
+    skip: int
+    limit: int
+    items: List[ProductResponse]
+
+class ProductChangeResponse(BaseModel):
+    id: int
+    product_id: Optional[int] = None
+    action: str
+    actor: Optional[str] = None
+    before: Optional[dict] = None
+    after: Optional[dict] = None
+    changed_fields: Optional[dict] = None
+    created_at: Optional[datetime] = None
+
+    model_config = { 'from_attributes': True }
+
 class StatsResponse(BaseModel):
     total: int
     average_price: float

@@ -12,14 +12,20 @@ class Product(Base):
     price = Column(Float, nullable=False, default=0.0)
     # Retail price (minorista). If null, frontend falls back to wholesale `price`.
     price_retail = Column(Float, nullable=True)
+    # Internal cost for margin calculations (admin-only).
+    cost = Column(Float, nullable=True)
     description = Column(String(1000), nullable=True)
     category = Column(String(200), nullable=True)
+    # Optional brand label shown in catalog/admin.
+    brand = Column(String(200), nullable=True)
     image_url = Column(String(500), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     active = Column(Boolean, default=True)
     # Inventory and simple per-product discount (percentage, e.g. 10 == 10%)
     stock = Column(Integer, default=0)
+    # Minimum desired stock. When current stock is below this value, admin can alert.
+    min_stock = Column(Integer, default=0)
     # Available weight (kg) for kg-based products
     stock_kg = Column(Float, nullable=True, default=0.0)
     # For kg-based products, how many kilograms represent one full unit ("1")
@@ -27,6 +33,17 @@ class Product(Base):
     discount = Column(Float, default=0.0)
     # Unit of sale: 'unit' or 'kg'
     sale_unit = Column(String(50), nullable=True, default='unit')
+
+class ProductChange(Base):
+    __tablename__ = "product_changes"
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(Integer, nullable=True, index=True)
+    action = Column(String(50), nullable=False)  # create/update/delete/bulk
+    actor = Column(String(200), nullable=True)
+    before = Column(_JSON, nullable=True)
+    after = Column(_JSON, nullable=True)
+    changed_fields = Column(_JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 class Order(Base):

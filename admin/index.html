@@ -71,11 +71,27 @@
             <h3>Precio promedio</h3>
             <div id="avgPrice" class="stat">—</div>
           </div>
+          <div class="card">
+            <h3>Pedidos (30 días)</h3>
+            <div id="salesOrders30" class="stat">—</div>
+          </div>
+          <div class="card">
+            <h3>Ventas (30 días)</h3>
+            <div id="salesRevenue30" class="stat">—</div>
+          </div>
+          <div class="card">
+            <h3>Ticket promedio</h3>
+            <div id="salesAvgTicket30" class="stat">—</div>
+          </div>
         </div>
         <div class="charts">
           <div class="chart-card">
             <h4>Productos por categoría</h4>
             <canvas id="categoryChart"></canvas>
+          </div>
+          <div class="chart-card">
+            <h4>Ventas por día (30 días)</h4>
+            <canvas id="salesChart"></canvas>
           </div>
         </div>
         </section>
@@ -94,29 +110,71 @@
           </div>
         </section>
 
-        <section id="catalog" class="section hidden">
+      <section id="catalog" class="section hidden">
         <div class="controls">
           <input id="searchInput" placeholder="Buscar por nombre, descripción o código..." />
           <select id="categoryFilter"><option value="">Todas</option></select>
           <select id="sortSelect"><option value="">Ordenar</option><option value="price_asc">Precio ↑</option><option value="price_desc">Precio ↓</option><option value="name_asc">Nombre A-Z</option><option value="name_desc">Nombre Z-A</option></select>
+          <select id="pageSizeSelect" title="Cantidad por página">
+            <option value="25">25 / pág.</option>
+            <option value="50" selected>50 / pág.</option>
+            <option value="100">100 / pág.</option>
+          </select>
+          <button id="exportCsvBtn" class="btn" title="Exportar productos a CSV">Exportar CSV</button>
+          <button id="importCsvBtn" class="btn" title="Importar productos desde CSV">Importar CSV</button>
+          <input id="importCsvInput" type="file" accept=".csv,text/csv" hidden />
+        </div>
+        <div id="bulkBar" class="bulk-bar hidden" aria-live="polite">
+          <div class="bulk-left">
+            <span class="bulk-count"><strong id="bulkCount">0</strong> seleccionados</span>
+            <span id="bulkHint" class="bulk-hint">Edición masiva: aplicá cambios a los seleccionados.</span>
+          </div>
+          <div class="bulk-actions">
+            <select id="bulkTarget" title="Campo a modificar">
+              <option value="price">Precio mayorista</option>
+              <option value="price_retail">Precio minorista</option>
+              <option value="both_prices">Mayorista + Minorista</option>
+              <option value="active">Activo</option>
+            </select>
+            <select id="bulkMode" title="Modo">
+              <option value="percent">Ajuste %</option>
+              <option value="set">Fijar valor</option>
+            </select>
+            <input id="bulkValue" type="number" step="0.01" placeholder="10" title="Valor" />
+            <button id="applyBulkBtn" class="btn primary" type="button">Aplicar</button>
+            <button id="clearSelectionBtn" class="btn" type="button">Limpiar</button>
+          </div>
         </div>
         <div class="table-wrap">
           <table id="productsTable">
             <thead>
               <tr>
+                <th class="col-select"><input id="selectAllProducts" type="checkbox" aria-label="Seleccionar todos" /></th>
                 <th>Imagen</th>
                 <th>Nombre</th>
+                <th>Marca</th>
                 <th>Código</th>
                 <th>Categoria</th>
                 <th>Precio mayorista</th>
                 <th>Precio minorista</th>
+                <th>Costo</th>
+                <th>Margen</th>
                 <th>Stock</th>
+                <th>Mín.</th>
                 <th>Activo</th>
                 <th>Acciones</th>
               </tr>
             </thead>
             <tbody></tbody>
           </table>
+        </div>
+        <div id="productsPager" class="pager" aria-label="Paginación de productos">
+          <button id="prevPageBtn" class="btn" type="button">Anterior</button>
+          <div class="pager-info">
+            <span id="pageInfo">Página 1</span>
+            <span id="pageTotalInfo" class="muted">· 0 productos</span>
+          </div>
+          <button id="nextPageBtn" class="btn" type="button">Siguiente</button>
         </div>
       </section>
 
@@ -258,6 +316,17 @@
           </div>
         </div>
       </div>
+
+      <!-- Product History Modal -->
+      <div id="historyModal" class="modal hidden" aria-hidden="true" role="dialog" aria-modal="true">
+        <div class="modal-card">
+          <button id="historyModalClose" class="modal-close" aria-label="Cerrar">✕</button>
+          <h2 id="historyModalTitle">Historial del producto</h2>
+          <div id="historyModalBody" class="history-body">
+            <!-- filled dynamically -->
+          </div>
+        </div>
+      </div>
     </main>
   </div>
 
@@ -279,6 +348,10 @@
             <input id="code" name="code" placeholder="Ej: 144" />
           </div>
           <div class="field">
+            <label for="brand">Marca</label>
+            <input id="brand" name="brand" placeholder="Ej: Ramolac" />
+          </div>
+          <div class="field">
             <label id="priceLabel" for="price">Precio mayorista</label>
             <input id="price" name="price" required type="number" step="0.01" placeholder="0.00" />
           </div>
@@ -286,13 +359,43 @@
             <label for="price_retail">Precio minorista</label>
             <input id="price_retail" name="price_retail" type="number" step="0.01" placeholder="0.00" />
           </div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="cost">Costo</label>
+            <input id="cost" name="cost" type="number" step="0.01" placeholder="0.00" />
+          </div>
           <div class="field">
             <label id="stockLabel" for="stock">Stock</label>
             <input id="stock" name="stock" type="number" min="0" step="1" value="0" placeholder="0" />
           </div>
           <div class="field">
+            <label for="min_stock">Stock mínimo</label>
+            <input id="min_stock" name="min_stock" type="number" min="0" step="1" value="0" placeholder="0" />
+          </div>
+          <div class="field">
+            <label for="active">Activo</label>
+            <select id="active" name="active">
+              <option value="true" selected>Sí</option>
+              <option value="false">No</option>
+            </select>
+          </div>
+          <div class="field">
             <label for="discount">Descuento %</label>
             <input id="discount" name="discount" type="number" min="0" max="100" step="0.01" value="" placeholder="0" />
+          </div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="sale_unit">Unidad de venta</label>
+            <select id="sale_unit" name="sale_unit">
+              <option value="unit" selected>Unidad</option>
+              <option value="kg">Kg</option>
+            </select>
+          </div>
+          <div class="field" id="kgPerUnitField">
+            <label for="kg_per_unit">Kg por unidad (1)</label>
+            <input id="kg_per_unit" name="kg_per_unit" type="number" min="0.001" step="0.001" value="1" />
           </div>
         </div>
         <div class="row">
