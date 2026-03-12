@@ -1624,7 +1624,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
     kwargs = {
         'items': items_json,
         'total': total_val,
-        'status': 'nuevo',
+        'status': 'recibido',
         'source': src,
         'customer_type': customer_type,
         'scheduled_delivery_date': delivery_schedule.get('scheduled_delivery_date'),
@@ -2019,7 +2019,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                 'id': new_id,
                 'items': items_list,
                 'total': total_val,
-                'status': kwargs.get('status', 'nuevo'),
+                'status': kwargs.get('status', 'recibido'),
                 'created_at': new_created_at
             }
             # include any optional user_* fields we actually set
@@ -2213,7 +2213,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                         'id': new_id,
                         'items': items_list,
                         'total': total_val,
-                        'status': kwargs.get('status', 'nuevo'),
+                        'status': kwargs.get('status', 'recibido'),
                         'created_at': new_created_at
                     }
                     for f in [
@@ -2266,7 +2266,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                 id=int(guessed_id) if guessed_id is not None else 0,
                 items=items_list,
                 total=total_val,
-                status=kwargs.get('status', 'nuevo'),
+                status=kwargs.get('status', 'recibido'),
                 source=kwargs.get('source'),
                 customer_type=kwargs.get('customer_type'),
             )
@@ -2468,7 +2468,7 @@ def create_order_minimal(db: Session, raw_payload: dict, current_user: Optional[
     kwargs = {
         'items': _serialize_order_items_for_storage(items_list, max_chars=None),
         'total': total_val,
-        'status': str(data.get('status') or 'nuevo'),
+        'status': str(data.get('status') or 'recibido'),
         'source': source,
         'customer_type': customer_type,
     }
@@ -2566,7 +2566,7 @@ def create_order_minimal(db: Session, raw_payload: dict, current_user: Optional[
         'id': int(new_id or 0),
         'items': items_list,
         'total': total_val,
-        'status': kwargs.get('status', 'nuevo'),
+        'status': kwargs.get('status', 'recibido'),
         'created_at': new_created_at,
         'source': kwargs.get('source', source),
         'customer_type': kwargs.get('customer_type', customer_type),

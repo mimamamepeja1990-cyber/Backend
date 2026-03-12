@@ -29,6 +29,83 @@
 }
 .order-id { font-size: 18px; font-weight: 800; color: var(--accent-2); }
 .order-date { font-size: 14px; color: var(--muted); }
+.order-row-progress{margin:10px 0 6px}
+.order-row-status{margin:2px 0 6px;font-size:14px;color:#1f2937}
+.order-status-pill{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  padding:5px 10px;
+  border-radius:999px;
+  font-size:12px;
+  font-weight:900;
+  letter-spacing:0.25px;
+  border:1px solid rgba(10,34,64,0.12);
+  background:linear-gradient(180deg,#ffffff,#f4f7fb);
+  color:#0b223f;
+}
+.order-status-pill.status-visto{background:linear-gradient(180deg,#eaf6ff,#dbefff);border-color:rgba(14,94,184,0.22);color:#0b3a66}
+.order-status-pill.status-preparado{background:linear-gradient(180deg,#fff7ed,#ffedd5);border-color:rgba(242,107,56,0.28);color:#9a3412}
+.order-status-pill.status-enviado{background:linear-gradient(180deg,#eef2ff,#e0e7ff);border-color:rgba(79,70,229,0.22);color:#3730a3}
+.order-status-pill.status-entregado{background:linear-gradient(180deg,#dff7ec,#bff0d9);border-color:rgba(16,185,129,0.26);color:#065f46}
+.order-status-pill.status-cancelado{background:linear-gradient(180deg,#ffecec,#ffd6d6);border-color:rgba(239,68,68,0.24);color:#9b1e1e}
+.order-stepper{
+  margin:0;
+  padding:0;
+  list-style:none;
+  display:grid;
+  grid-template-columns:repeat(5,minmax(0,1fr));
+  gap:0;
+}
+.order-step{
+  position:relative;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:flex-start;
+  gap:6px;
+  text-align:center;
+  font-size:10px;
+  font-weight:900;
+  text-transform:uppercase;
+  letter-spacing:0.55px;
+  color:rgba(6,26,43,0.62);
+}
+.order-step::after{
+  content:'';
+  position:absolute;
+  top:6px;
+  left:50%;
+  right:-50%;
+  height:2px;
+  background:rgba(10,34,64,0.12);
+  z-index:0;
+}
+.order-step:last-child::after{display:none}
+.order-step-dot{
+  width:12px;
+  height:12px;
+  border-radius:999px;
+  background:rgba(10,34,64,0.10);
+  border:2px solid rgba(10,34,64,0.18);
+  box-shadow:0 10px 22px rgba(2,6,23,0.06);
+  position:relative;
+  z-index:1;
+}
+.order-step.is-done{color:rgba(6,26,43,0.9)}
+.order-step.is-done .order-step-dot{
+  background:linear-gradient(90deg,var(--accent),var(--accent-2));
+  border-color:rgba(242,107,56,0.55);
+}
+.order-step.is-done::after{background:linear-gradient(90deg,var(--accent),var(--accent-2));opacity:0.5}
+.order-step.is-current{color:var(--text)}
+.order-step.is-current .order-step-dot{
+  background:#fff;
+  border-color:rgba(242,107,56,0.92);
+  box-shadow:0 0 0 6px rgba(242,107,56,0.12), 0 14px 26px rgba(2,6,23,0.10);
+}
+.order-step-label{line-height:1.1}
+.order-step-sub{line-height:1;font-size:9px;font-weight:900;letter-spacing:0.2px;text-transform:none;color:rgba(6,26,43,0.55);margin-top:-4px}
 .order-row-items, .order-row-user, .order-row-address, .order-row-total {
   font-size: 15px;
   color: #222;
@@ -97,7 +174,7 @@
 }
 *{box-sizing:border-box}
 html,body{height:100%}
-body{font-family:Inter,ui-sans-serif,system-ui,Arial;color:var(--text);background:var(--bg);margin:0}
+body{font-family:"Space Grotesk",ui-sans-serif,system-ui,Arial;color:var(--text);background:var(--bg);margin:0}
 body.sidebar-open{overflow:hidden}
 .app{display:flex;min-height:100vh}
 .sidebar{

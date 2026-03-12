@@ -205,7 +205,7 @@ class OrderResponse(BaseModel):
     id: int
     items: List[OrderItem]
     total: float
-    status: Optional[str] = 'nuevo'
+    status: Optional[str] = 'recibido'
     customer_type: Optional[str] = None
     user_id: Optional[int] = None
     user_full_name: Optional[str] = None

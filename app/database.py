@@ -109,7 +109,8 @@ def _migrate_orders_optional_columns() -> None:
         dialect = ''
 
     needed = [
-        ('status', "VARCHAR(50) DEFAULT 'nuevo'"),
+        # Order lifecycle: recibido -> visto -> preparado -> enviado -> entregado
+        ('status', "VARCHAR(50) DEFAULT 'recibido'"),
         ('customer_type', "VARCHAR(50) DEFAULT 'mayorista'"),
         ('user_id', 'INTEGER'),
         ('user_full_name', 'VARCHAR(200)'),

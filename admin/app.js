@@ -2279,9 +2279,70 @@ function normalizeOrderCustomerType(value){
 }
 
 function normalizeOrderStatus(value){
-  const v = String(value || '').trim().toLowerCase();
-  if (!v) return 'nuevo';
-  return v;
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return 'recibido';
+  const key = raw.replace(/[\s-]+/g, '_');
+  const aliases = {
+    nuevo: 'recibido',
+    new: 'recibido',
+    pendiente: 'recibido',
+    pending: 'recibido',
+    seen: 'visto',
+    viewed: 'visto',
+    preparando: 'preparado',
+    preparing: 'preparado',
+    prepared: 'preparado',
+    en_camino: 'enviado',
+    encamino: 'enviado',
+    delivering: 'enviado',
+    shipped: 'enviado',
+    delivered: 'entregado',
+    canceled: 'cancelado',
+    cancelled: 'cancelado',
+  };
+  const norm = aliases[key] || key;
+  const allowed = new Set(['recibido','visto','preparado','enviado','entregado','cancelado']);
+  return allowed.has(norm) ? norm : 'recibido';
+}
+
+function orderStatusRank(value){
+  const st = normalizeOrderStatus(value);
+  const rank = { recibido: 1, visto: 2, preparado: 3, enviado: 4, entregado: 5, cancelado: 99 };
+  return rank[st] || 0;
+}
+
+function formatOrderStatusLabel(value){
+  const st = normalizeOrderStatus(value);
+  const map = {
+    recibido: 'Recibido',
+    visto: 'Visto',
+    preparado: 'Preparado',
+    enviado: 'Enviado',
+    entregado: 'Entregado',
+    cancelado: 'Cancelado',
+  };
+  return map[st] || st;
+}
+
+function buildOrderStepperHtml(statusValue){
+  const st = normalizeOrderStatus(statusValue);
+  const cur = orderStatusRank(st);
+  const steps = [
+    { key: 'recibido', label: 'Recibido' },
+    { key: 'visto', label: 'Visto' },
+    { key: 'preparado', label: 'Preparado' },
+    { key: 'enviado', label: 'Enviado', sub: '09:00' },
+    { key: 'entregado', label: 'Entregado', sub: '16:00' },
+  ];
+  return `
+    <ol class="order-stepper" aria-label="Estado del pedido">
+      ${steps.map((s) => {
+        const r = orderStatusRank(s.key);
+        const cls = r < cur ? 'is-done' : (r === cur ? 'is-current' : '');
+        return `<li class="order-step ${cls}"><span class="order-step-dot" aria-hidden="true"></span><span class="order-step-label">${escapeHtml(s.label)}</span>${s.sub ? `<span class="order-step-sub">${escapeHtml(s.sub)}</span>` : ''}</li>`;
+      }).join('')}
+    </ol>
+  `;
 }
 
 function hasMeaningfulOrderValue(value){
@@ -2894,17 +2955,30 @@ function renderOrders(list, source, dateFilter){
   // wire buttons after rendering
   document.querySelectorAll('.viewOrderBtn').forEach(el => el.onclick = async (ev) => { const id = ev.target.dataset.id; const list = await fetchOrders(String(id)); const order = (list || []).find(x => String(x.id) === String(id)) || (list && list[0]); if(order) showOrderDetail(order); });
   document.querySelectorAll('.markSeenBtn').forEach(el => el.addEventListener('click', async (ev) => {
-    const btn = el; const id = btn && btn.dataset ? btn.dataset.id : null; if(!id) return; let row = null; try{ row = (btn && btn.closest) ? btn.closest('tr') : null; }catch(_){ }
+    const btn = el;
+    const id = btn && btn.dataset ? btn.dataset.id : null;
+    if(!id) return;
+    let row = null;
+    try{ row = (btn && btn.closest) ? btn.closest('tr') : null; }catch(_){ }
     if(!row) try{ row = findOrderRowById(id); }catch(_){ }
-    let currentStatus = '';
-    try{ if(row) currentStatus = (row.children && row.children[5] && row.children[5].textContent) ? row.children[5].textContent.trim() : ''; }catch(_){ }
-    const targetStatus = (currentStatus === 'visto') ? 'nuevo' : 'visto';
-    const oldStatus = currentStatus; const oldBtnText = btn && btn.textContent ? btn.textContent : '';
-    try{ if(row && row.children && row.children[5]) row.children[5].textContent = targetStatus; if(btn){ btn.textContent = targetStatus === 'visto' ? 'Visto' : 'Marcar visto'; btn.classList.add('updating'); } if(row) row.classList.add('updating'); }catch(_){ }
+
+    const currentStatus = normalizeOrderStatus((row && row.dataset ? row.dataset.status : '') || '');
+    if (orderStatusRank(currentStatus) >= orderStatusRank('visto')){
+      showToast('Este pedido ya está marcado (estado: ' + formatOrderStatusLabel(currentStatus) + ')');
+      return;
+    }
+
+    const targetStatus = 'visto';
+    const oldBtnText = btn && btn.textContent ? btn.textContent : '';
+    try{ if(btn){ btn.textContent = 'Marcando...'; btn.classList.add('updating'); } if(row) row.classList.add('updating'); }catch(_){ }
     try{ if(btn) btn.disabled = true; }catch(_){ }
     try{
       const updated = await safeFetch(API_BASE + '/orders/' + encodeURIComponent(id) + '/status', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: targetStatus }) });
-      try{ if(row && row.children && row.children[5]) row.children[5].textContent = updated.status || ''; if(btn){ btn.textContent = updated.status === 'visto' ? 'Visto' : 'Marcar visto'; btn.classList.remove('updating'); } if(row) row.classList.remove('updating'); }catch(_){ }
+      try{
+        if(row && row.dataset){
+          row.dataset.status = normalizeOrderStatus(updated && updated.status);
+        }
+      }catch(_){ }
       if(document.getElementById('orderModal') && document.getElementById('orderModal').classList.contains('hidden')===false) try{ showOrderDetail(updated); }catch(_){ }
       try{
         const uid = String((updated && updated.id) || id);
@@ -2914,8 +2988,17 @@ function renderOrders(list, source, dateFilter){
       try{ await refreshOrders('web'); }catch(_){ }
       if (String((updated && updated.status) || targetStatus).toLowerCase() === 'visto') showToast('Pedido marcado como visto y movido a Preparaciones');
       else showToast('Pedido actualizado');
-    }catch(e){ console.error('mark seen failed', e); try{ if(row && row.children && row.children[5]) row.children[5].textContent = oldStatus; }catch(_){ } try{ if(btn) btn.textContent = oldBtnText; }catch(_){ } try{ if(btn) btn.classList.remove('updating'); if(row) row.classList.remove('updating'); }catch(_){ } showToast('No se pudo actualizar estado', 'error'); }
-    finally{ try{ if(btn) btn.disabled = false; }catch(_){ } }
+    }catch(e){
+      console.error('mark seen failed', e);
+      try{ if(btn) btn.textContent = oldBtnText; }catch(_){ }
+      const msg = (e && e.status === 409 && e.payload && e.payload.current)
+        ? ('No se puede volver atrás (actual: ' + formatOrderStatusLabel(e.payload.current) + ').')
+        : 'No se pudo actualizar estado';
+      showToast(msg, 'error');
+    } finally {
+      try{ if(btn) btn.classList.remove('updating'); if(row) row.classList.remove('updating'); }catch(_){ }
+      try{ if(btn) btn.disabled = false; }catch(_){ }
+    }
   }));
 }
 
@@ -3584,7 +3667,8 @@ function orderRowFor(o){
   const orderCustomerType = normalizeOrderCustomerType(o.customer_type);
   const orderCustomerTypeLabel = orderCustomerType === 'minorista' ? 'Minorista' : 'Mayorista';
   const orderStatusNorm = normalizeOrderStatus(o && o.status);
-  const isPreparedStatus = orderStatusNorm === 'preparado';
+  const statusLabel = formatOrderStatusLabel(orderStatusNorm);
+  const canMarkSeen = orderStatusRank(orderStatusNorm) < orderStatusRank('visto');
   const fecha = o.created_at ? new Date(o.created_at).toLocaleString('es-ES', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
   const mapsLinkHtml = getOrderGoogleMapsLinkHtml(o, 'Ver en Google Maps', 'order-map-link-card');
   // Solo mostrar 'pendiente' si NO tiene created_at y está en el caché local como pending
@@ -3605,6 +3689,7 @@ function orderRowFor(o){
           <span class="order-date">${fecha}</span>
         </div>
         ${hasConsumo ? '<div class="order-row-banner" style="margin:6px 0 10px;padding:8px 10px;border-radius:10px;background:#fff7ed;border:1px solid rgba(242,107,56,0.25);color:#9a3412;font-weight:800">Pedido con consumo inmediato</div>' : ''}
+        <div class="order-row-status"><strong>Estado:</strong> <span class="order-status-pill status-${escapeHtml(orderStatusNorm)}">${escapeHtml(statusLabel)}</span></div>
         <div class="order-row-items"><strong>Artículos:</strong><ul class="order-items-list">${itemsList}</ul></div>
         <div class="order-row-user"><strong>Cliente:</strong> ${escapeHtml(userDisplay)}</div>
         <div class="order-row-customer-type"><strong>Perfil:</strong> ${escapeHtml(orderCustomerTypeLabel)}</div>
@@ -3618,11 +3703,15 @@ function orderRowFor(o){
         ${isPending ? '<div class="order-row-pending"> pendiente</div>' : ''}
         <div class="order-row-actions">
           <button data-id="${o.id}" class="viewOrderBtn btn">Ver</button>
-          <button data-id="${o.id}" class="markSeenBtn btn" ${isPreparedStatus ? 'disabled title="Pedido ya preparado"' : ''}>${isPreparedStatus ? 'Preparado' : (o.status === 'visto' ? 'Visto' : 'Marcar visto')}</button>
+          <button data-id="${o.id}" class="markSeenBtn btn" ${(!canMarkSeen || isPending) ? 'disabled' : ''} title="${!canMarkSeen ? 'Pedido ya marcado (progreso avanzado)' : (isPending ? 'Pendiente: sincronizando con servidor' : 'Marcar como visto')}">${canMarkSeen ? 'Marcar visto' : escapeHtml(statusLabel)}</button>
         </div>
       </div>
     </td>
   `;
+  try{
+    tr.dataset.orderId = String(o.id || '');
+    tr.dataset.status = String(orderStatusNorm || '');
+  }catch(_){ }
   // disable mark-seen for local-only rows that haven't been persisted to DB yet
   try{
     const btn = tr.querySelector('.markSeenBtn');
@@ -3733,6 +3822,8 @@ function showOrderDetail(order){
   const deliveryNotes = getOrderDeliveryNotes(order);
   const customerTypeLabel = normalizeOrderCustomerType(order && order.customer_type) === 'minorista' ? 'Minorista' : 'Mayorista';
   const mapsLinkHtml = getOrderGoogleMapsLinkHtml(order, 'Abrir en Google Maps', 'order-map-link-modal');
+  const statusNorm = normalizeOrderStatus(order && order.status);
+  const statusLabel = formatOrderStatusLabel(statusNorm);
   // prefer user_* fields, otherwise display token preview when available
   const previewName = order._token_preview && (order._token_preview.name || order._token_preview.email) ? (order._token_preview.name || order._token_preview.email) : null;
   const displayName = order.user_full_name || previewName || order.user_email || (order.user_id ? '#'+order.user_id : '');
@@ -3745,77 +3836,46 @@ function showOrderDetail(order){
       ${mapsLinkHtml ? `<div><strong>Ubicación:</strong> ${mapsLinkHtml}</div>` : ''}
       ${scheduledDeliveryLabel ? `<div><strong>Entrega programada:</strong> ${escapeHtml(scheduledDeliveryLabel)}</div>` : ''}
       <div><strong>Total:</strong> $${Number(order.total||0).toFixed(2)}</div>
-      <div><strong>Estado:</strong> ${escapeHtml(order.status||'')}</div>
+      <div><strong>Estado:</strong> <span class="order-status-pill status-${escapeHtml(statusNorm)}">${escapeHtml(statusLabel)}</span></div>
       <div><strong>Forma de pago:</strong> ${escapeHtml(paymentMethod)}${paymentStatus ? ` <span class="muted">(${escapeHtml(paymentStatus)})</span>` : ''}</div>
       ${paymentReference ? `<div><strong>Ref MP:</strong> ${escapeHtml(paymentReference)}</div>` : ''}
       ${hasConsumo ? '<div style="margin-top:8px;padding:8px 10px;border-radius:10px;background:#fff7ed;border:1px solid rgba(242,107,56,0.25);color:#9a3412;font-weight:800">Pedido con consumo inmediato</div>' : ''}
       <div class="mt-8"><strong>Items:</strong><ul class="order-items-list">${itemsHtml}</ul></div>
     </div>
   `;
-  // add action button for marking seen
+  // add action button for marking seen (one-way: recibido -> visto)
   try{
     const actionWrap = document.createElement('div'); actionWrap.style.marginTop = '10px';
-    const markBtn = document.createElement('button'); markBtn.className = 'btn'; markBtn.textContent = order.status === 'visto' ? 'Visto' : 'Marcar visto';
-    const isPreparedStatus = normalizeOrderStatus(order && order.status) === 'preparado';
-    if (isPreparedStatus){
-      markBtn.textContent = 'Preparado';
-      markBtn.disabled = true;
-      markBtn.title = 'Pedido ya preparado';
-    }
+    const canMarkSeen = orderStatusRank(statusNorm) < orderStatusRank('visto');
+    const markBtn = document.createElement('button');
+    markBtn.className = 'btn';
+    markBtn.textContent = canMarkSeen ? 'Marcar visto' : statusLabel;
+    markBtn.disabled = !canMarkSeen;
+    markBtn.title = canMarkSeen ? 'Marcar como visto' : 'Pedido ya marcado (progreso avanzado)';
     markBtn.onclick = async () => {
-      if (isPreparedStatus) return;
-      // Optimistic update in modal + table
-      const targetStatus = order.status === 'visto' ? 'nuevo' : 'visto';
-      const oldStatus = order.status;
-      const oldBtnText = markBtn.textContent;
+      if (!canMarkSeen) return;
+      const targetStatus = 'visto';
+      const oldBtnText = markBtn.textContent || 'Marcar visto';
       try{
-        // update modal UI immediately
-        try{ const statusDiv = Array.from(body.children).find(c => c && c.textContent && c.textContent.indexOf('Estado:') !== -1); if(statusDiv) statusDiv.innerHTML = `<strong>Estado:</strong> ${escapeHtml(targetStatus)}`; }catch(_){ }
-        markBtn.textContent = targetStatus === 'visto' ? 'Visto' : 'Marcar visto';
-        markBtn.classList.add('updating');
-        // update table row if present (prefer row matching order.source when available)
-        try{
-          let row = null;
-          try{
-            // Prefer matching a row whose data-source equals the order's source (default 'web')
-            const orderSrc = String((order && (typeof order.source !== 'undefined' && order.source !== null && String(order.source).trim() !== '') ? order.source : 'web')).toLowerCase();
-            row = Array.from(document.querySelectorAll('table[id^="ordersTable"] tbody tr')).find(r => String((r.children && r.children[0] && r.children[0].textContent)||'').trim() === String(order.id) && String((r.getAttribute('data-source')||'web')).toLowerCase() === orderSrc);
-          }catch(_){ }
-          if(!row) row = findOrderRowById(order.id);
-          if(row && row.children && row.children[5]){ row.children[5].textContent = targetStatus; row.classList.add('updating'); const rowBtn = row.querySelector('.markSeenBtn'); if(rowBtn) rowBtn.textContent = targetStatus === 'visto' ? 'Visto' : 'Marcar visto'; }
-        }catch(_){ }
-
         markBtn.disabled = true;
+        markBtn.textContent = 'Guardando...';
+        markBtn.classList.add('updating');
         const updated = await safeFetch(API_BASE + '/orders/' + encodeURIComponent(order.id) + '/status', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: targetStatus }) });
-        // canonical refresh
         showOrderDetail(updated);
-        try{
-          let row2 = null;
-          try{ const updatedSrc = String((updated && (typeof updated.source !== 'undefined' && updated.source !== null && String(updated.source).trim() !== '') ? updated.source : 'web')).toLowerCase(); row2 = Array.from(document.querySelectorAll('table[id^="ordersTable"] tbody tr')).find(r => String((r.children && r.children[0] && r.children[0].textContent)||'').trim() === String(updated.id) && String((r.getAttribute('data-source')||'web')).toLowerCase() === updatedSrc); }catch(_){ }
-          if(!row2) row2 = findOrderRowById(order.id);
-          if(row2){ row2.children[5].textContent = updated.status || ''; row2.classList.remove('updating'); const rowBtn2 = row2.querySelector('.markSeenBtn'); if(rowBtn2) rowBtn2.textContent = updated.status === 'visto' ? 'Visto' : 'Marcar visto'; }
-        }catch(_){ }
-        try{
-          const uid = String((updated && updated.id) || order.id);
-          lastPreparationsBase = (lastPreparationsBase || []).map((entry) => String(entry && entry.id) === uid ? mergeOrderRecord(entry, updated) : entry);
-          if (isPreparationsSectionActive()) renderPreparations(lastPreparationsBase);
-        }catch(_){ }
         try{ await refreshOrders('web'); }catch(_){ }
-        markBtn.classList.remove('updating');
         if (String((updated && updated.status) || targetStatus).toLowerCase() === 'visto') showToast('Pedido marcado como visto y movido a Preparaciones');
         else showToast('Estado actualizado');
       }catch(e){
         console.error('modal mark seen failed', e);
-        // revert modal and table to previous state
-        try{ const statusDiv = Array.from(body.children).find(c => c && c.textContent && c.textContent.indexOf('Estado:') !== -1); if(statusDiv) statusDiv.innerHTML = `<strong>Estado:</strong> ${escapeHtml(oldStatus)}`; }catch(_){ }
-        try{
-          let row = null;
-          try{ const orderSrc = String((order && (typeof order.source !== 'undefined' && order.source !== null && String(order.source).trim() !== '') ? order.source : 'web')).toLowerCase(); row = Array.from(document.querySelectorAll('table[id^="ordersTable"] tbody tr')).find(r => String((r.children && r.children[0] && r.children[0].textContent)||'').trim() === String(order.id) && String((r.getAttribute('data-source')||'web')).toLowerCase() === orderSrc); }catch(_){ }
-          if(!row) row = findOrderRowById(order.id);
-          if(row){ row.children[5].textContent = oldStatus; row.classList.remove('updating'); const rowBtn = row.querySelector('.markSeenBtn'); if(rowBtn) rowBtn.textContent = oldBtnText; }
-        }catch(_){ }
-        showToast('No se pudo actualizar estado: ' + (e && e.message ? e.message : ''), 'error');
-      }finally{ markBtn.disabled = false; markBtn.classList.remove('updating'); }
+        const msg = (e && e.status === 409 && e.payload && e.payload.current)
+          ? ('No se puede volver atrás (actual: ' + formatOrderStatusLabel(e.payload.current) + ').')
+          : 'No se pudo actualizar estado';
+        showToast(msg, 'error');
+        markBtn.disabled = false;
+        markBtn.textContent = oldBtnText;
+      }finally{
+        markBtn.classList.remove('updating');
+      }
     };
     actionWrap.appendChild(markBtn);
     body.appendChild(actionWrap);

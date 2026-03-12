@@ -53,7 +53,8 @@ class Order(Base):
     # Postgres stores JSONB and SQLite stores JSON as TEXT.
     items = Column(_JSON, nullable=False)
     total = Column(Float, nullable=False, default=0.0)
-    status = Column(String(50), default='nuevo')
+    # Order lifecycle: recibido -> visto -> preparado -> enviado -> entregado
+    status = Column(String(50), default='recibido')
     customer_type = Column(String(50), nullable=True, default='mayorista')
     # Associate order with a user (store snapshot of contact info)
     user_id = Column(Integer, nullable=True)

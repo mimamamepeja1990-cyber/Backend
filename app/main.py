@@ -24,6 +24,7 @@ import unicodedata
 from io import StringIO
 from html import escape as html_escape
 from urllib.parse import quote_plus
+from zoneinfo import ZoneInfo
 import anyio
 import sys
 import traceback
@@ -206,7 +207,7 @@ async def lifespan(app: FastAPI):
     try:
         with engine.begin() as conn:
             needed = {
-                'status': "VARCHAR(50) DEFAULT 'nuevo'",
+                'status': "VARCHAR(50) DEFAULT 'recibido'",
                 'customer_type': "VARCHAR(50) DEFAULT 'mayorista'",
                 'user_id': 'INTEGER',
                 'user_full_name': 'VARCHAR(200)',
@@ -530,6 +531,172 @@ def _prune_status_cache():
                 pass
     except Exception:
         pass
+
+
+# --- Orders: lifecycle normalization + auto milestones ---
+# Canonical lifecycle: recibido -> visto -> preparado -> enviado -> entregado
+_ORDER_LIFECYCLE = ('recibido', 'visto', 'preparado', 'enviado', 'entregado')
+_ORDER_STATUS_ALIASES = {
+    # legacy / english / variants
+    'nuevo': 'recibido',
+    'new': 'recibido',
+    'pendiente': 'recibido',
+    'pending': 'recibido',
+    'seen': 'visto',
+    'viewed': 'visto',
+    'preparando': 'preparado',
+    'preparing': 'preparado',
+    'prepared': 'preparado',
+    'en_camino': 'enviado',
+    'encamino': 'enviado',
+    'delivering': 'enviado',
+    'shipped': 'enviado',
+    'delivered': 'entregado',
+    'canceled': 'cancelado',
+    'cancelled': 'cancelado',
+}
+_ORDER_STATUS_RANK = {
+    'recibido': 1,
+    'visto': 2,
+    'preparado': 3,
+    'enviado': 4,
+    'entregado': 5,
+}
+_ORDER_TZINFO_CACHE: Dict[str, Any] = {}
+
+
+def _normalize_order_status(value: Any) -> str:
+    try:
+        raw = str(value or '').strip().lower()
+    except Exception:
+        raw = ''
+    if not raw:
+        return 'recibido'
+    # Normalize separators to keep stored values consistent.
+    raw = re.sub(r'[\s\-]+', '_', raw)
+    raw = _ORDER_STATUS_ALIASES.get(raw, raw)
+    if raw == 'cancelado':
+        return 'cancelado'
+    if raw in _ORDER_LIFECYCLE:
+        return raw
+    return 'recibido'
+
+
+def _normalize_order_status_strict(value: Any) -> Optional[str]:
+    """Normalize a status but return None when the input is empty/unknown."""
+    try:
+        raw = str(value or '').strip().lower()
+    except Exception:
+        raw = ''
+    if not raw:
+        return None
+    raw = re.sub(r'[\s\-]+', '_', raw)
+    raw = _ORDER_STATUS_ALIASES.get(raw, raw)
+    if raw == 'cancelado':
+        return 'cancelado'
+    if raw in _ORDER_LIFECYCLE:
+        return raw
+    return None
+
+
+def _order_status_rank(value: Any) -> int:
+    v = _normalize_order_status(value)
+    return int(_ORDER_STATUS_RANK.get(v, 0) or 0)
+
+
+def _resolve_order_tzinfo(tz_name_hint: Optional[str] = None):
+    tz_name = str(
+        tz_name_hint
+        or os.environ.get('ORDER_STATUS_TIMEZONE')
+        or os.environ.get('ORDER_EMAIL_TIMEZONE')
+        or os.environ.get('ORDER_DELIVERY_TIMEZONE')
+        or 'America/Argentina/Mendoza'
+    ).strip() or 'America/Argentina/Mendoza'
+    cached = _ORDER_TZINFO_CACHE.get(tz_name)
+    if cached is not None:
+        return cached
+    try:
+        tzinfo = ZoneInfo(tz_name)
+    except Exception:
+        tz_name = 'UTC'
+        tzinfo = datetime.timezone.utc
+    _ORDER_TZINFO_CACHE[tz_name] = tzinfo
+    return tzinfo
+
+
+def _coerce_datetime(value: Any) -> Optional[datetime.datetime]:
+    if value is None:
+        return None
+    if isinstance(value, datetime.datetime):
+        return value
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return None
+        # Accept typical ISO strings coming from JSON encoders.
+        s = s.replace('Z', '+00:00')
+        try:
+            return datetime.datetime.fromisoformat(s)
+        except Exception:
+            return None
+    return None
+
+
+def _compute_order_auto_status(
+    created_at_value: Any,
+    now_utc: Optional[datetime.datetime] = None,
+    tz_name_hint: Optional[str] = None,
+) -> Optional[str]:
+    """Auto-advance status based on the next-day schedule:
+    - enviado: next day 09:00
+    - entregado: next day 16:00
+    Computed in business timezone.
+    """
+    created_at = _coerce_datetime(created_at_value)
+    if created_at is None:
+        return None
+
+    base_utc = now_utc or datetime.datetime.now(datetime.timezone.utc)
+    if base_utc.tzinfo is None:
+        base_utc = base_utc.replace(tzinfo=datetime.timezone.utc)
+
+    # Treat naive created_at as UTC for consistency across sqlite/postgres.
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=datetime.timezone.utc)
+
+    tzinfo = _resolve_order_tzinfo(tz_name_hint)
+    created_local = created_at.astimezone(tzinfo)
+    now_local = base_utc.astimezone(tzinfo)
+
+    next_day = created_local.date() + datetime.timedelta(days=1)
+    enviado_at = datetime.datetime.combine(next_day, datetime.time(9, 0), tzinfo=tzinfo)
+    entregado_at = datetime.datetime.combine(next_day, datetime.time(16, 0), tzinfo=tzinfo)
+
+    if now_local >= entregado_at:
+        return 'entregado'
+    if now_local >= enviado_at:
+        return 'enviado'
+    return None
+
+
+def _merge_order_statuses(*values: Any) -> str:
+    normed = []
+    for v in values:
+        if v is None:
+            continue
+        vv = _normalize_order_status(v)
+        if vv:
+            normed.append(vv)
+    if any(v == 'cancelado' for v in normed):
+        return 'cancelado'
+    best = 'recibido'
+    best_rank = _order_status_rank(best)
+    for v in normed:
+        r = _order_status_rank(v)
+        if r > best_rank:
+            best = v
+            best_rank = r
+    return best
 
 
 def _normalize_email(value: Any) -> Optional[str]:
@@ -2677,7 +2844,7 @@ def _run_add_user_columns() -> dict:
     """Run the same migration logic as `add_user_columns.py` and return a report dict."""
     results = { 'added': [], 'skipped': [], 'failed': [] }
     needed = [
-        ('status', "VARCHAR(50) DEFAULT 'nuevo'"),
+        ('status', "VARCHAR(50) DEFAULT 'recibido'"),
         ('customer_type', "VARCHAR(50) DEFAULT 'mayorista'"),
         ('user_id', 'INTEGER'),
         ('user_full_name', 'VARCHAR(200)'),
@@ -5746,7 +5913,7 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
                     'id': getattr(order, 'id', None),
                     'items': getattr(order, 'items', []),
                     'total': getattr(order, 'total', 0),
-                    'status': getattr(order, 'status', 'nuevo'),
+                    'status': getattr(order, 'status', 'recibido'),
                     'created_at': getattr(order, 'created_at', None),
                 }
             response_payload = _attach_maps_url(response_payload)
@@ -6121,6 +6288,10 @@ def list_orders(
         _prune_status_cache()
     except Exception:
         pass
+
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    status_updates: List[Tuple[int, str]] = []
+
     product_price_map = {}
     try:
         product_rows = db.query(models.Product.id, models.Product.price, models.Product.price_retail).all()
@@ -6325,19 +6496,34 @@ def list_orders(
                     except Exception:
                         pass
             od['customer_type'] = customer_type_value or 'mayorista'
-            # Apply status override if present
+            # Merge DB status + override + auto milestones (next day 09:00/16:00).
             try:
                 oid = od.get('id')
+                db_status_raw = od.get('status')
+                override_raw = None
                 if oid is not None:
-                    ov = None
                     try:
-                        ov = (status_overrides or {}).get(str(oid))
+                        override_raw = (status_overrides or {}).get(str(oid))
                     except Exception:
-                        ov = None
-                    if ov is None:
-                        ov = (ORDER_STATUS_CACHE.get(str(oid)) or {}).get('status')
-                    if ov:
-                        od['status'] = ov
+                        override_raw = None
+                    if override_raw is None:
+                        override_raw = (ORDER_STATUS_CACHE.get(str(oid)) or {}).get('status')
+
+                auto_status = _compute_order_auto_status(
+                    od.get('created_at'),
+                    now_utc=now_utc,
+                    tz_name_hint=str(od.get('delivery_timezone') or '').strip() or None,
+                )
+                effective_status = _merge_order_statuses(db_status_raw, override_raw, auto_status)
+                od['status'] = effective_status
+
+                # Best-effort persist auto advancement to DB (no schedulers required).
+                try:
+                    if auto_status and effective_status == auto_status and effective_status in ('enviado', 'entregado'):
+                        if _order_status_rank(effective_status) > _order_status_rank(db_status_raw):
+                            status_updates.append((int(oid), str(effective_status)))
+                except Exception:
+                    pass
             except Exception:
                 pass
             try:
@@ -6352,6 +6538,25 @@ def list_orders(
             out.append(od)
         except Exception:
             out.append(r)
+
+    # Persist any auto-advanced statuses so subsequent reads are consistent.
+    try:
+        if status_updates:
+            uniq: Dict[int, str] = {}
+            for oid, st in (status_updates or []):
+                try:
+                    uniq[int(oid)] = str(st)
+                except Exception:
+                    continue
+            if uniq:
+                with engine.begin() as conn:
+                    for oid, st in uniq.items():
+                        try:
+                            conn.execute(text('UPDATE orders SET status = :status WHERE id = :id'), {'status': st, 'id': oid})
+                        except Exception:
+                            continue
+    except Exception:
+        pass
     try:
         logger.info('list_orders returning %d rows (sample ids %s)', len(out), [str(x.get('id')) for x in (out or [])][:10])
         if cached_any:
@@ -6379,11 +6584,11 @@ async def update_order_status(order_id: str, request: Request):
             with engine.begin() as conn_local:
                 if 'postgres' in dialect_name_local:
                     try:
-                        conn_local.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'nuevo'"))
+                        conn_local.execute(text("ALTER TABLE orders ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'recibido'"))
                     except Exception:
-                        conn_local.execute(text("ALTER TABLE orders ADD COLUMN status VARCHAR(50) DEFAULT 'nuevo'"))
+                        conn_local.execute(text("ALTER TABLE orders ADD COLUMN status VARCHAR(50) DEFAULT 'recibido'"))
                 else:
-                    conn_local.execute(text("ALTER TABLE orders ADD COLUMN status VARCHAR(50) DEFAULT 'nuevo'"))
+                    conn_local.execute(text("ALTER TABLE orders ADD COLUMN status VARCHAR(50) DEFAULT 'recibido'"))
             try:
                 insp_local = inspect(engine)
                 existing_local = {c['name'] for c in insp_local.get_columns('orders')}
@@ -6415,14 +6620,57 @@ async def update_order_status(order_id: str, request: Request):
             except Exception:
                 return False
 
+    def _get_status_override(order_id_value):
+        try:
+            db_local = SessionLocal()
+            try:
+                overrides = crud.get_setting(db_local, 'order_status_overrides') or {}
+                return overrides.get(str(order_id_value))
+            finally:
+                try:
+                    db_local.close()
+                except Exception:
+                    pass
+        except Exception:
+            try:
+                return (ORDER_STATUS_CACHE.get(str(order_id_value)) or {}).get('status')
+            except Exception:
+                return None
+
+    def _clear_status_override(order_id_value):
+        key = str(order_id_value)
+        try:
+            db_local = SessionLocal()
+            try:
+                overrides = crud.get_setting(db_local, 'order_status_overrides') or {}
+                if key in overrides:
+                    del overrides[key]
+                    crud.set_setting(db_local, 'order_status_overrides', overrides)
+            finally:
+                try:
+                    db_local.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        try:
+            if key in ORDER_STATUS_CACHE:
+                del ORDER_STATUS_CACHE[key]
+        except Exception:
+            pass
+
     try:
         body = await request.json()
     except Exception:
         body = {}
-    status = body.get('status')
-    if not status:
+    status_raw = body.get('status')
+    if status_raw is None or not str(status_raw).strip():
         headers = _cors_headers_for_request(request)
         return JSONResponse(status_code=400, content={'error': 'missing_status'}, headers=headers)
+    status_norm = _normalize_order_status_strict(status_raw)
+    if not status_norm:
+        headers = _cors_headers_for_request(request)
+        return JSONResponse(status_code=400, content={'error': 'invalid_status'}, headers=headers)
 
     # Decide whether we should treat order_id as int or text for SQL WHERE
     use_id_int = False
@@ -6437,16 +6685,79 @@ async def update_order_status(order_id: str, request: Request):
 
     # Best-effort: ensure status column exists before updating
     ok_status_col, existing_cols = _ensure_status_column()
+
+    # Guard against backwards transitions (e.g. already enviado -> visto).
+    try:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        current_override_raw = _get_status_override(order_id)
+        current_status_raw = None
+        current_created_at = None
+        current_delivery_tz = None
+        try:
+            # created_at is always expected; include it so we can apply the auto milestones.
+            pre_cols = ['status', 'created_at']
+            if 'delivery_timezone' in (existing_cols or set()):
+                pre_cols.append('delivery_timezone')
+            pre_cols_sql = ', '.join(pre_cols)
+            if use_id_int:
+                row_pre = _safe_engine_fetchone(f"SELECT {pre_cols_sql} FROM orders WHERE id = :id LIMIT 1", {'id': id_param})
+            else:
+                row_pre = _safe_engine_fetchone(f"SELECT {pre_cols_sql} FROM orders WHERE CAST(id AS TEXT) = :id LIMIT 1", {'id': id_param})
+            if row_pre:
+                try:
+                    idx_status = pre_cols.index('status') if 'status' in pre_cols else -1
+                except Exception:
+                    idx_status = -1
+                try:
+                    idx_created = pre_cols.index('created_at') if 'created_at' in pre_cols else -1
+                except Exception:
+                    idx_created = -1
+                try:
+                    idx_tz = pre_cols.index('delivery_timezone') if 'delivery_timezone' in pre_cols else -1
+                except Exception:
+                    idx_tz = -1
+                if idx_status >= 0:
+                    current_status_raw = row_pre[idx_status]
+                if idx_created >= 0:
+                    current_created_at = row_pre[idx_created]
+                if idx_tz >= 0:
+                    current_delivery_tz = row_pre[idx_tz]
+        except Exception:
+            pass
+
+        auto_status = _compute_order_auto_status(
+            current_created_at,
+            now_utc=now_utc,
+            tz_name_hint=str(current_delivery_tz or '').strip() or None,
+        )
+        effective_current = _merge_order_statuses(current_status_raw, current_override_raw, auto_status)
+        if effective_current == 'cancelado' and status_norm != 'cancelado':
+            headers = _cors_headers_for_request(request)
+            return JSONResponse(
+                status_code=409,
+                content={'error': 'order_cancelled', 'current': effective_current, 'requested': status_norm},
+                headers=headers,
+            )
+        if status_norm != 'cancelado' and _order_status_rank(status_norm) < _order_status_rank(effective_current):
+            headers = _cors_headers_for_request(request)
+            return JSONResponse(
+                status_code=409,
+                content={'error': 'backwards_transition', 'current': effective_current, 'requested': status_norm},
+                headers=headers,
+            )
+    except Exception:
+        pass
+
     db_update_ok = False
     try:
         # Use a transactional context so the UPDATE is committed immediately
         try:
             with engine.begin() as conn:
                 if use_id_int:
-                    conn.execute(text('UPDATE orders SET status = :status WHERE id = :id'), {'status': status, 'id': id_param})
+                    conn.execute(text('UPDATE orders SET status = :status WHERE id = :id'), {'status': status_norm, 'id': id_param})
                 else:
                     # Fall back to text comparison; CAST to TEXT works on SQLite/Postgres
-                    conn.execute(text('UPDATE orders SET status = :status WHERE CAST(id AS TEXT) = :id'), {'status': status, 'id': id_param})
+                    conn.execute(text('UPDATE orders SET status = :status WHERE CAST(id AS TEXT) = :id'), {'status': status_norm, 'id': id_param})
             db_update_ok = True
         except Exception as inner_e:
             # If status column was missing, attempt to add and retry once.
@@ -6457,9 +6768,9 @@ async def update_order_status(order_id: str, request: Request):
                     try:
                         with engine.begin() as conn2:
                             if use_id_int:
-                                conn2.execute(text('UPDATE orders SET status = :status WHERE id = :id'), {'status': status, 'id': id_param})
+                                conn2.execute(text('UPDATE orders SET status = :status WHERE id = :id'), {'status': status_norm, 'id': id_param})
                             else:
-                                conn2.execute(text('UPDATE orders SET status = :status WHERE CAST(id AS TEXT) = :id'), {'status': status, 'id': id_param})
+                                conn2.execute(text('UPDATE orders SET status = :status WHERE CAST(id AS TEXT) = :id'), {'status': status_norm, 'id': id_param})
                         db_update_ok = True
                     except Exception as inner_e2:
                         logger.exception('update_order_status retry failed: %s', inner_e2)
@@ -6479,8 +6790,16 @@ async def update_order_status(order_id: str, request: Request):
         headers = _cors_headers_for_request(request)
         db_update_ok = False
 
-    # Always persist an override so the admin UI can reflect the change even if DB update failed.
-    override_ok = _persist_status_override(order_id, status)
+    # Persist an override only when the DB update failed. When DB update succeeded,
+    # clear any previous override so list endpoints don't get stuck on stale values.
+    override_ok = False
+    try:
+        if db_update_ok:
+            _clear_status_override(order_id)
+        else:
+            override_ok = _persist_status_override(order_id, status_norm)
+    except Exception:
+        override_ok = False
 
     # Fetch updated row safely (only request existing columns)
     try:
@@ -6522,7 +6841,7 @@ async def update_order_status(order_id: str, request: Request):
         # If update failed but we could persist override, return a minimal response.
         if override_ok:
             headers = _cors_headers_for_request(request)
-            return JSONResponse(status_code=200, content=jsonable_encoder({'id': id_param, 'status': status, 'status_fallback': True}), headers=headers)
+            return JSONResponse(status_code=200, content=jsonable_encoder({'id': id_param, 'status': status_norm, 'status_fallback': True}), headers=headers)
         headers = _cors_headers_for_request(request)
         return JSONResponse(status_code=404, content={'error': 'not_found'}, headers=headers)
 
@@ -6532,7 +6851,7 @@ async def update_order_status(order_id: str, request: Request):
     if 'total' not in od:
         od['total'] = 0
     if 'status' not in od:
-        od['status'] = status
+        od['status'] = status_norm
     # parse items and token_preview if present
     try:
         if isinstance(od.get('items'), str):
@@ -6562,7 +6881,8 @@ async def update_order_status(order_id: str, request: Request):
 
     # Ensure status is present in response
     try:
-        od['status'] = od.get('status') or status
+        effective_status = _normalize_order_status(od.get('status') or status_norm)
+        od['status'] = effective_status
         if override_ok and not db_update_ok:
             od['status_fallback'] = True
     except Exception:
@@ -6570,19 +6890,19 @@ async def update_order_status(order_id: str, request: Request):
 
     # Notify customer when order status changes to user-facing milestones.
     try:
-        status_norm = str((od.get('status') or status or '')).strip().lower()
-        if status_norm == 'visto':
+        status_effective = _normalize_order_status(od.get('status') or status_norm)
+        if status_effective == 'visto':
             payload_for_seen = _enrich_order_contact_fields(
-                dict(od) if isinstance(od, dict) else {'id': id_param, 'status': status}
+                dict(od) if isinstance(od, dict) else {'id': id_param, 'status': status_effective}
             )
             send_ok = await _send_order_seen_notification_email(payload_for_seen)
             try:
                 od['_seen_email_sent'] = bool(send_ok)
             except Exception:
                 pass
-        elif status_norm == 'preparado':
+        elif status_effective == 'preparado':
             payload_for_prepared = _enrich_order_contact_fields(
-                dict(od) if isinstance(od, dict) else {'id': id_param, 'status': status}
+                dict(od) if isinstance(od, dict) else {'id': id_param, 'status': status_effective}
             )
             send_ok = await _send_order_prepared_notification_email(payload_for_prepared)
             try:
