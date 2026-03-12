@@ -2331,15 +2331,16 @@ function buildOrderStepperHtml(statusValue){
     { key: 'recibido', label: 'Recibido' },
     { key: 'visto', label: 'Visto' },
     { key: 'preparado', label: 'Preparado' },
-    { key: 'enviado', label: 'Enviado', sub: '09:00' },
-    { key: 'entregado', label: 'Entregado', sub: '16:00' },
+    { key: 'enviado', label: 'Enviado' },
+    { key: 'entregado', label: 'Entregado' },
   ];
   return `
     <ol class="order-stepper" aria-label="Estado del pedido">
       ${steps.map((s) => {
         const r = orderStatusRank(s.key);
         const cls = r < cur ? 'is-done' : (r === cur ? 'is-current' : '');
-        return `<li class="order-step ${cls}"><span class="order-step-dot" aria-hidden="true"></span><span class="order-step-label">${escapeHtml(s.label)}</span>${s.sub ? `<span class="order-step-sub">${escapeHtml(s.sub)}</span>` : ''}</li>`;
+        const aria = r === cur ? ' aria-current="step"' : '';
+        return `<li class="order-step ${cls}"${aria}><span class="order-step-dot" aria-hidden="true"></span><span class="order-step-label">${escapeHtml(s.label)}</span></li>`;
       }).join('')}
     </ol>
   `;
@@ -2998,6 +2999,84 @@ function renderOrders(list, source, dateFilter){
     } finally {
       try{ if(btn) btn.classList.remove('updating'); if(row) row.classList.remove('updating'); }catch(_){ }
       try{ if(btn) btn.disabled = false; }catch(_){ }
+    }
+  }));
+
+  document.querySelectorAll('.markPreparedBtn').forEach(el => el.addEventListener('click', async (ev) => {
+    const btn = el;
+    const id = btn && btn.dataset ? btn.dataset.id : null;
+    if (!id) return;
+    let row = null;
+    try{ row = (btn && btn.closest) ? btn.closest('tr') : null; }catch(_){ }
+    if (!row) try{ row = findOrderRowById(id); }catch(_){ }
+
+    const currentStatus = normalizeOrderStatus((row && row.dataset ? row.dataset.status : '') || '');
+    if (orderStatusRank(currentStatus) >= orderStatusRank('preparado')){
+      showToast('Este pedido ya está marcado (estado: ' + formatOrderStatusLabel(currentStatus) + ')');
+      return;
+    }
+    if (orderStatusRank(currentStatus) < orderStatusRank('visto')){
+      showToast('Primero marcá el pedido como visto.');
+      return;
+    }
+
+    const targetStatus = 'preparado';
+    const oldBtnText = btn && btn.textContent ? btn.textContent : '';
+    try{ if (btn){ btn.textContent = 'Guardando...'; btn.classList.add('updating'); } if (row) row.classList.add('updating'); }catch(_){ }
+    try{ if (btn) btn.disabled = true; }catch(_){ }
+    try{
+      const updated = await safeFetch(API_BASE + '/orders/' + encodeURIComponent(id) + '/status', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: targetStatus })
+      });
+      try{
+        if (row && row.dataset){
+          row.dataset.status = normalizeOrderStatus(updated && updated.status);
+        }
+      }catch(_){ }
+      if (document.getElementById('orderModal') && document.getElementById('orderModal').classList.contains('hidden') === false) {
+        try{ showOrderDetail(updated); }catch(_){ }
+      }
+      try{
+        const uid = String((updated && updated.id) || id);
+        let replacedInPreparations = false;
+        lastPreparationsBase = (lastPreparationsBase || []).map((entry) => {
+          if (String(entry && entry.id) === uid){
+            replacedInPreparations = true;
+            return mergeOrderRecord(entry, updated);
+          }
+          return entry;
+        });
+        if (!replacedInPreparations && updated && updated.id != null){
+          lastPreparationsBase = [updated, ...(lastPreparationsBase || [])];
+        }
+        let replacedInOrders = false;
+        lastOrdersBaseWeb = (lastOrdersBaseWeb || []).map((entry) => {
+          if (String(entry && entry.id) === uid){
+            replacedInOrders = true;
+            return mergeOrderRecord(entry, updated);
+          }
+          return entry;
+        });
+        if (!replacedInOrders && updated && updated.id != null){
+          lastOrdersBaseWeb = [updated, ...(lastOrdersBaseWeb || [])];
+        }
+        if (isPreparationsSectionActive()) renderPreparations(lastPreparationsBase);
+      }catch(_){ }
+      try{ await refreshOrders('web'); }catch(_){ }
+      if (String((updated && updated.status) || targetStatus).toLowerCase() === 'preparado') showToast('Pedido marcado como preparado');
+      else showToast('Pedido actualizado');
+    }catch(e){
+      console.error('mark prepared failed', e);
+      try{ if (btn) btn.textContent = oldBtnText; }catch(_){ }
+      const msg = (e && e.status === 409 && e.payload && e.payload.current)
+        ? ('No se puede volver atrás (actual: ' + formatOrderStatusLabel(e.payload.current) + ').')
+        : 'No se pudo actualizar estado';
+      showToast(msg, 'error');
+    } finally {
+      try{ if (btn) btn.classList.remove('updating'); if (row) row.classList.remove('updating'); }catch(_){ }
+      try{ if (btn) btn.disabled = false; }catch(_){ }
     }
   }));
 }
@@ -3668,7 +3747,9 @@ function orderRowFor(o){
   const orderCustomerTypeLabel = orderCustomerType === 'minorista' ? 'Minorista' : 'Mayorista';
   const orderStatusNorm = normalizeOrderStatus(o && o.status);
   const statusLabel = formatOrderStatusLabel(orderStatusNorm);
-  const canMarkSeen = orderStatusRank(orderStatusNorm) < orderStatusRank('visto');
+  const statusRank = orderStatusRank(orderStatusNorm);
+  const canMarkSeen = statusRank < orderStatusRank('visto');
+  const canMarkPrepared = statusRank === orderStatusRank('visto');
   const fecha = o.created_at ? new Date(o.created_at).toLocaleString('es-ES', { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
   const mapsLinkHtml = getOrderGoogleMapsLinkHtml(o, 'Ver en Google Maps', 'order-map-link-card');
   // Solo mostrar 'pendiente' si NO tiene created_at y está en el caché local como pending
@@ -3681,6 +3762,14 @@ function orderRowFor(o){
     try { delete window.__localOrderRows[String(o.id)]; window.__localOrderIds && window.__localOrderIds.delete(String(o.id)); saveLocalOrderCache && saveLocalOrderCache(); } catch(_){}
     isPending = false;
   }
+  let primaryActionHtml = `<button class="btn" disabled title="Estado actual">${escapeHtml(statusLabel)}</button>`;
+  if (isPending){
+    primaryActionHtml = '<button class="btn" disabled title="Pendiente: sincronizando con servidor">Pendiente</button>';
+  } else if (canMarkSeen){
+    primaryActionHtml = `<button data-id="${o.id}" class="markSeenBtn btn primary" title="Marcar como visto">Marcar visto</button>`;
+  } else if (canMarkPrepared){
+    primaryActionHtml = `<button data-id="${o.id}" class="markPreparedBtn btn primary" title="Marcar como preparado">Marcar preparado</button>`;
+  }
   tr.innerHTML = `
     <td colspan="8" style="padding:0;">
       <div class="order-card-vertical">
@@ -3690,6 +3779,7 @@ function orderRowFor(o){
         </div>
         ${hasConsumo ? '<div class="order-row-banner" style="margin:6px 0 10px;padding:8px 10px;border-radius:10px;background:#fff7ed;border:1px solid rgba(242,107,56,0.25);color:#9a3412;font-weight:800">Pedido con consumo inmediato</div>' : ''}
         <div class="order-row-status"><strong>Estado:</strong> <span class="order-status-pill status-${escapeHtml(orderStatusNorm)}">${escapeHtml(statusLabel)}</span></div>
+        <div class="order-row-progress">${buildOrderStepperHtml(orderStatusNorm)}</div>
         <div class="order-row-items"><strong>Artículos:</strong><ul class="order-items-list">${itemsList}</ul></div>
         <div class="order-row-user"><strong>Cliente:</strong> ${escapeHtml(userDisplay)}</div>
         <div class="order-row-customer-type"><strong>Perfil:</strong> ${escapeHtml(orderCustomerTypeLabel)}</div>
@@ -3703,7 +3793,7 @@ function orderRowFor(o){
         ${isPending ? '<div class="order-row-pending"> pendiente</div>' : ''}
         <div class="order-row-actions">
           <button data-id="${o.id}" class="viewOrderBtn btn">Ver</button>
-          <button data-id="${o.id}" class="markSeenBtn btn" ${(!canMarkSeen || isPending) ? 'disabled' : ''} title="${!canMarkSeen ? 'Pedido ya marcado (progreso avanzado)' : (isPending ? 'Pendiente: sincronizando con servidor' : 'Marcar como visto')}">${canMarkSeen ? 'Marcar visto' : escapeHtml(statusLabel)}</button>
+          ${primaryActionHtml}
         </div>
       </div>
     </td>
@@ -3837,25 +3927,30 @@ function showOrderDetail(order){
       ${scheduledDeliveryLabel ? `<div><strong>Entrega programada:</strong> ${escapeHtml(scheduledDeliveryLabel)}</div>` : ''}
       <div><strong>Total:</strong> $${Number(order.total||0).toFixed(2)}</div>
       <div><strong>Estado:</strong> <span class="order-status-pill status-${escapeHtml(statusNorm)}">${escapeHtml(statusLabel)}</span></div>
+      <div class="order-row-progress">${buildOrderStepperHtml(statusNorm)}</div>
       <div><strong>Forma de pago:</strong> ${escapeHtml(paymentMethod)}${paymentStatus ? ` <span class="muted">(${escapeHtml(paymentStatus)})</span>` : ''}</div>
       ${paymentReference ? `<div><strong>Ref MP:</strong> ${escapeHtml(paymentReference)}</div>` : ''}
       ${hasConsumo ? '<div style="margin-top:8px;padding:8px 10px;border-radius:10px;background:#fff7ed;border:1px solid rgba(242,107,56,0.25);color:#9a3412;font-weight:800">Pedido con consumo inmediato</div>' : ''}
       <div class="mt-8"><strong>Items:</strong><ul class="order-items-list">${itemsHtml}</ul></div>
     </div>
   `;
-  // add action button for marking seen (one-way: recibido -> visto)
+  // add action button for next step (recibido -> visto -> preparado)
   try{
     const actionWrap = document.createElement('div'); actionWrap.style.marginTop = '10px';
-    const canMarkSeen = orderStatusRank(statusNorm) < orderStatusRank('visto');
+    const stRank = orderStatusRank(statusNorm);
+    const canMarkSeen = stRank < orderStatusRank('visto');
+    const canMarkPrepared = stRank === orderStatusRank('visto');
+    const nextTarget = canMarkSeen ? 'visto' : (canMarkPrepared ? 'preparado' : '');
+    const nextLabel = nextTarget === 'visto' ? 'Marcar visto' : (nextTarget === 'preparado' ? 'Marcar preparado' : '');
     const markBtn = document.createElement('button');
-    markBtn.className = 'btn';
-    markBtn.textContent = canMarkSeen ? 'Marcar visto' : statusLabel;
-    markBtn.disabled = !canMarkSeen;
-    markBtn.title = canMarkSeen ? 'Marcar como visto' : 'Pedido ya marcado (progreso avanzado)';
+    markBtn.className = 'btn primary';
+    markBtn.textContent = nextLabel || statusLabel;
+    markBtn.disabled = !nextTarget;
+    markBtn.title = nextTarget ? ('Marcar como ' + nextTarget) : 'Pedido ya marcado (progreso avanzado)';
     markBtn.onclick = async () => {
-      if (!canMarkSeen) return;
-      const targetStatus = 'visto';
-      const oldBtnText = markBtn.textContent || 'Marcar visto';
+      if (!nextTarget) return;
+      const targetStatus = nextTarget;
+      const oldBtnText = markBtn.textContent || nextLabel || 'Guardar';
       try{
         markBtn.disabled = true;
         markBtn.textContent = 'Guardando...';
@@ -3863,7 +3958,9 @@ function showOrderDetail(order){
         const updated = await safeFetch(API_BASE + '/orders/' + encodeURIComponent(order.id) + '/status', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: targetStatus }) });
         showOrderDetail(updated);
         try{ await refreshOrders('web'); }catch(_){ }
-        if (String((updated && updated.status) || targetStatus).toLowerCase() === 'visto') showToast('Pedido marcado como visto y movido a Preparaciones');
+        const updatedStatus = String((updated && updated.status) || targetStatus).toLowerCase();
+        if (updatedStatus === 'visto') showToast('Pedido marcado como visto y movido a Preparaciones');
+        else if (updatedStatus === 'preparado') showToast('Pedido marcado como preparado');
         else showToast('Estado actualizado');
       }catch(e){
         console.error('modal mark seen failed', e);

@@ -644,33 +644,52 @@ def _coerce_datetime(value: Any) -> Optional[datetime.datetime]:
 
 def _compute_order_auto_status(
     created_at_value: Any,
+    scheduled_delivery_date_value: Any = None,
+    status_value: Any = None,
     now_utc: Optional[datetime.datetime] = None,
     tz_name_hint: Optional[str] = None,
 ) -> Optional[str]:
-    """Auto-advance status based on the next-day schedule:
-    - enviado: next day 09:00
-    - entregado: next day 16:00
-    Computed in business timezone.
+    """Auto-advance status for delivery milestones (PedidosYa-style).
+
+    - enviado: 09:00 local time (scheduled delivery day)
+    - entregado: 16:00 local time (scheduled delivery day)
+
+    Important: The auto milestones are applied only after the order reached
+    at least `preparado`. This prevents time-based jumps from blocking the
+    admin workflow (recibido -> visto -> preparado).
     """
-    created_at = _coerce_datetime(created_at_value)
-    if created_at is None:
+    base_status = _normalize_order_status(status_value)
+    if base_status == 'cancelado':
+        return None
+    if _order_status_rank(base_status) < _order_status_rank('preparado'):
         return None
 
     base_utc = now_utc or datetime.datetime.now(datetime.timezone.utc)
     if base_utc.tzinfo is None:
         base_utc = base_utc.replace(tzinfo=datetime.timezone.utc)
 
-    # Treat naive created_at as UTC for consistency across sqlite/postgres.
-    if created_at.tzinfo is None:
-        created_at = created_at.replace(tzinfo=datetime.timezone.utc)
-
     tzinfo = _resolve_order_tzinfo(tz_name_hint)
-    created_local = created_at.astimezone(tzinfo)
     now_local = base_utc.astimezone(tzinfo)
 
-    next_day = created_local.date() + datetime.timedelta(days=1)
-    enviado_at = datetime.datetime.combine(next_day, datetime.time(9, 0), tzinfo=tzinfo)
-    entregado_at = datetime.datetime.combine(next_day, datetime.time(16, 0), tzinfo=tzinfo)
+    target_date = None
+    schedule_key = _normalize_iso_date_key(scheduled_delivery_date_value)
+    if schedule_key:
+        try:
+            target_date = datetime.date.fromisoformat(schedule_key)
+        except Exception:
+            target_date = None
+    if target_date is None:
+        created_at = _coerce_datetime(created_at_value)
+        if created_at is None:
+            return None
+        # Treat naive created_at as UTC for consistency across sqlite/postgres.
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=datetime.timezone.utc)
+        created_local = created_at.astimezone(tzinfo)
+        target_date = created_local.date() + datetime.timedelta(days=1)
+
+    enviado_at = datetime.datetime.combine(target_date, datetime.time(9, 0), tzinfo=tzinfo)
+    entregado_at = datetime.datetime.combine(target_date, datetime.time(16, 0), tzinfo=tzinfo)
 
     if now_local >= entregado_at:
         return 'entregado'
@@ -6496,7 +6515,7 @@ def list_orders(
                     except Exception:
                         pass
             od['customer_type'] = customer_type_value or 'mayorista'
-            # Merge DB status + override + auto milestones (next day 09:00/16:00).
+            # Merge DB status + override + auto milestones (scheduled delivery day 09:00/16:00).
             try:
                 oid = od.get('id')
                 db_status_raw = od.get('status')
@@ -6509,12 +6528,15 @@ def list_orders(
                     if override_raw is None:
                         override_raw = (ORDER_STATUS_CACHE.get(str(oid)) or {}).get('status')
 
+                base_status = _merge_order_statuses(db_status_raw, override_raw)
                 auto_status = _compute_order_auto_status(
                     od.get('created_at'),
+                    scheduled_delivery_date_value=od.get('scheduled_delivery_date'),
+                    status_value=base_status,
                     now_utc=now_utc,
                     tz_name_hint=str(od.get('delivery_timezone') or '').strip() or None,
                 )
-                effective_status = _merge_order_statuses(db_status_raw, override_raw, auto_status)
+                effective_status = _merge_order_statuses(base_status, auto_status)
                 od['status'] = effective_status
 
                 # Best-effort persist auto advancement to DB (no schedulers required).
@@ -6692,10 +6714,13 @@ async def update_order_status(order_id: str, request: Request):
         current_override_raw = _get_status_override(order_id)
         current_status_raw = None
         current_created_at = None
+        current_scheduled_delivery_date = None
         current_delivery_tz = None
         try:
-            # created_at is always expected; include it so we can apply the auto milestones.
+            # created_at is always expected; include it so we can apply auto milestones.
             pre_cols = ['status', 'created_at']
+            if 'scheduled_delivery_date' in (existing_cols or set()):
+                pre_cols.append('scheduled_delivery_date')
             if 'delivery_timezone' in (existing_cols or set()):
                 pre_cols.append('delivery_timezone')
             pre_cols_sql = ', '.join(pre_cols)
@@ -6716,21 +6741,30 @@ async def update_order_status(order_id: str, request: Request):
                     idx_tz = pre_cols.index('delivery_timezone') if 'delivery_timezone' in pre_cols else -1
                 except Exception:
                     idx_tz = -1
+                try:
+                    idx_sched = pre_cols.index('scheduled_delivery_date') if 'scheduled_delivery_date' in pre_cols else -1
+                except Exception:
+                    idx_sched = -1
                 if idx_status >= 0:
                     current_status_raw = row_pre[idx_status]
                 if idx_created >= 0:
                     current_created_at = row_pre[idx_created]
+                if idx_sched >= 0:
+                    current_scheduled_delivery_date = row_pre[idx_sched]
                 if idx_tz >= 0:
                     current_delivery_tz = row_pre[idx_tz]
         except Exception:
             pass
 
+        base_current = _merge_order_statuses(current_status_raw, current_override_raw)
         auto_status = _compute_order_auto_status(
             current_created_at,
+            scheduled_delivery_date_value=current_scheduled_delivery_date,
+            status_value=base_current,
             now_utc=now_utc,
             tz_name_hint=str(current_delivery_tz or '').strip() or None,
         )
-        effective_current = _merge_order_statuses(current_status_raw, current_override_raw, auto_status)
+        effective_current = _merge_order_statuses(base_current, auto_status)
         if effective_current == 'cancelado' and status_norm != 'cancelado':
             headers = _cors_headers_for_request(request)
             return JSONResponse(
