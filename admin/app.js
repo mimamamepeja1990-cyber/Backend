@@ -232,6 +232,217 @@ if (promoImageSelectBtn && promoImageInput && promoImageFileName && promoImageUp
 const apiBaseIndicator = document.getElementById('apiBaseIndicator');
 const wsStatus = document.getElementById('wsStatus');
 if(apiBaseIndicator) apiBaseIndicator.textContent = API_BASE;
+
+// Hidden admin console (4 taps on WS indicator)
+const ADMIN_CLEAR_TARGETS = {
+  '1': { key: 'catalog', label: 'Catalogo' },
+  '2': { key: 'filters', label: 'Filtros' },
+  '3': { key: 'orders', label: 'Pedidos' },
+  '4': { key: 'customers', label: 'Clientes' },
+  '5': { key: 'preparations', label: 'Preparaciones' },
+};
+let wsTapCount = 0;
+let wsTapLastTs = 0;
+const wsTapWindowMs = 900;
+const adminConsoleState = {
+  modal: null,
+  log: null,
+  input: null,
+  form: null,
+  closeBtn: null,
+  openedOnce: false,
+};
+
+function logAdminConsole(message, tone){
+  try{
+    if (!adminConsoleState.log) return;
+    const line = document.createElement('div');
+    const cls = tone ? String(tone) : '';
+    line.className = 'admin-console-line' + (cls ? ' ' + cls : '');
+    line.textContent = String(message || '');
+    adminConsoleState.log.appendChild(line);
+    adminConsoleState.log.scrollTop = adminConsoleState.log.scrollHeight;
+  }catch(_){ }
+}
+
+function closeAdminConsole(){
+  try{
+    if (!adminConsoleState.modal) return;
+    adminConsoleState.modal.classList.add('hidden');
+    adminConsoleState.modal.setAttribute('aria-hidden', 'true');
+  }catch(_){ }
+}
+
+function ensureAdminConsole(){
+  if (adminConsoleState.modal) return adminConsoleState;
+  const modal = document.createElement('div');
+  modal.id = 'adminConsoleModal';
+  modal.className = 'modal hidden';
+  modal.setAttribute('aria-hidden', 'true');
+  modal.setAttribute('role', 'dialog');
+  modal.setAttribute('aria-modal', 'true');
+  modal.innerHTML = `
+    <div class="modal-card admin-console-card">
+      <button id="adminConsoleClose" class="modal-close" aria-label="Cerrar">✕</button>
+      <h2>Consola Admin</h2>
+      <div class="admin-console-body">
+        <div id="adminConsoleLog" class="admin-console-log" role="log" aria-live="polite"></div>
+        <form id="adminConsoleForm" class="admin-console-form" autocomplete="off">
+          <input id="adminConsoleInput" class="admin-console-input" placeholder="Ej: /clear @1" />
+          <button class="btn" type="submit">Ejecutar</button>
+        </form>
+        <div class="admin-console-help">
+          Comandos: <code>/clear @1</code> Catalogo, <code>/clear @2</code> Filtros, <code>/clear @3</code> Pedidos, <code>/clear @4</code> Clientes, <code>/clear @5</code> Preparaciones. <code>/help</code> para ayuda.
+        </div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  adminConsoleState.modal = modal;
+  adminConsoleState.log = modal.querySelector('#adminConsoleLog');
+  adminConsoleState.input = modal.querySelector('#adminConsoleInput');
+  adminConsoleState.form = modal.querySelector('#adminConsoleForm');
+  adminConsoleState.closeBtn = modal.querySelector('#adminConsoleClose');
+
+  if (adminConsoleState.closeBtn) adminConsoleState.closeBtn.addEventListener('click', closeAdminConsole);
+  modal.addEventListener('click', (ev) => { if (ev.target === modal) closeAdminConsole(); });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && adminConsoleState.modal && !adminConsoleState.modal.classList.contains('hidden')) {
+      closeAdminConsole();
+    }
+  });
+
+  if (adminConsoleState.form) {
+    adminConsoleState.form.addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const input = adminConsoleState.input;
+      const raw = input ? String(input.value || '') : '';
+      if (input) input.value = '';
+      await handleAdminConsoleCommand(raw);
+    });
+  }
+
+  return adminConsoleState;
+}
+
+function openAdminConsole(){
+  ensureAdminConsole();
+  if (!adminConsoleState.modal) return;
+  adminConsoleState.modal.classList.remove('hidden');
+  adminConsoleState.modal.setAttribute('aria-hidden', 'false');
+  if (!adminConsoleState.openedOnce){
+    adminConsoleState.openedOnce = true;
+    logAdminConsole('Consola lista. Usa /help para ver comandos.', 'note');
+  }
+  try{ adminConsoleState.input && adminConsoleState.input.focus(); }catch(_){ }
+}
+
+function clearLocalOrderCache(){
+  try{
+    localStorage.removeItem('admin_local_orders_v1');
+    window.__localOrderRows = {};
+    window.__localOrderIds = new Set();
+  }catch(_){ }
+}
+
+async function runAdminClear(target){
+  if (!target || !target.key) return;
+  await ensureApiBase();
+  logAdminConsole(`Limpiando ${target.label}...`, 'note');
+  try{
+    const resp = await safeFetch(`${API_BASE}/debug/clear`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target: target.key }),
+    });
+    const details = [];
+    try{
+      if (resp && resp.deleted){
+        Object.keys(resp.deleted).forEach((k) => {
+          details.push(`${k}:${resp.deleted[k]}`);
+        });
+      }
+      if (resp && resp.updated){
+        Object.keys(resp.updated).forEach((k) => {
+          details.push(`${k}:${resp.updated[k]}`);
+        });
+      }
+    }catch(_){ }
+    logAdminConsole(`OK ${target.label}.`, 'ok');
+    if (details.length) logAdminConsole('Detalle: ' + details.join(', '), 'note');
+
+    if (target.key === 'catalog'){
+      try{ catalogPage = 1; }catch(_){ }
+      try{ allProductsCache = []; allProductsCacheTs = 0; }catch(_){ }
+      try{ await refresh(); }catch(_){ }
+    } else if (target.key === 'filters'){
+      try{ saveFilters([]); }catch(_){ }
+      try{ renderFilters(); }catch(_){ }
+    } else if (target.key === 'orders'){
+      clearLocalOrderCache();
+      try{ await refreshOrders('web'); }catch(_){ }
+      try{ await refreshPreparations(true); }catch(_){ }
+      try{ await refreshCustomers(true); }catch(_){ }
+    } else if (target.key === 'customers'){
+      try{ await refreshCustomers(true); }catch(_){ }
+    } else if (target.key === 'preparations'){
+      try{ await refreshOrders('web'); }catch(_){ }
+      try{ await refreshPreparations(true); }catch(_){ }
+    }
+  }catch(e){
+    const msg = (e && e.payload && (e.payload.detail || e.payload.error)) ? (e.payload.detail || e.payload.error) : (e && e.message ? e.message : 'Error');
+    logAdminConsole('Error: ' + msg, 'err');
+  }
+}
+
+async function handleAdminConsoleCommand(raw){
+  const cmd = String(raw || '').trim();
+  if (!cmd) return;
+  logAdminConsole('> ' + cmd, 'cmd');
+  if (cmd === '/help' || cmd === 'help' || cmd === '/?'){
+    logAdminConsole('Comandos disponibles:', 'note');
+    logAdminConsole('/clear @1 Catalogo', 'note');
+    logAdminConsole('/clear @2 Filtros', 'note');
+    logAdminConsole('/clear @3 Pedidos', 'note');
+    logAdminConsole('/clear @4 Clientes', 'note');
+    logAdminConsole('/clear @5 Preparaciones', 'note');
+    return;
+  }
+  const match = cmd.match(/^\/clear\s+@?(\d+)\s*$/i);
+  if (!match){
+    logAdminConsole('Comando no reconocido. Usa /help.', 'err');
+    return;
+  }
+  const key = String(match[1] || '').trim();
+  const target = ADMIN_CLEAR_TARGETS[key];
+  if (!target){
+    logAdminConsole('Target invalido. Usa /help.', 'err');
+    return;
+  }
+  const ok = confirm(`Vaciar ${target.label}? Esta accion es irreversible.`);
+  if (!ok){
+    logAdminConsole('Cancelado.', 'note');
+    return;
+  }
+  await runAdminClear(target);
+}
+
+function handleWsTap(){
+  const now = Date.now();
+  if (now - wsTapLastTs > wsTapWindowMs) wsTapCount = 0;
+  wsTapLastTs = now;
+  wsTapCount += 1;
+  if (wsTapCount >= 4){
+    wsTapCount = 0;
+    openAdminConsole();
+  }
+}
+
+if (wsStatus){
+  wsStatus.style.cursor = 'pointer';
+  wsStatus.addEventListener('click', handleWsTap);
+}
+
 const salesOrders30El = document.getElementById('salesOrders30');
 const salesRevenue30El = document.getElementById('salesRevenue30');
 const salesAvgTicket30El = document.getElementById('salesAvgTicket30');

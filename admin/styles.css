@@ -440,6 +440,19 @@ th,td{padding:14px 12px;text-align:left;border-bottom:0}
 .modal{z-index:10000}
 .modal-card{background:var(--card);padding:22px;border-radius:14px;min-width:360px;max-width:900px;box-shadow:0 20px 48px rgba(2,6,23,0.18);position:relative}
 .modal-close{position:absolute;right:12px;top:12px;background:transparent;border:none;cursor:pointer;padding:6px;border-radius:6px}
+.admin-console-card{width:min(760px, 92vw);max-height:82vh;display:flex;flex-direction:column}
+.admin-console-body{display:flex;flex-direction:column;gap:12px}
+.admin-console-log{background:#0b1220;color:#e2e8f0;border:1px solid rgba(148,163,184,0.25);border-radius:12px;padding:12px;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;font-size:13px;min-height:180px;max-height:46vh;overflow:auto}
+.admin-console-line{margin-bottom:6px;white-space:pre-wrap}
+.admin-console-line.cmd{color:#fbbf24}
+.admin-console-line.ok{color:#34d399}
+.admin-console-line.err{color:#fca5a5}
+.admin-console-line.note{color:#93c5fd}
+.admin-console-form{display:flex;gap:8px;align-items:center}
+.admin-console-input{flex:1;padding:10px 12px;border-radius:10px;border:1px solid rgba(15,23,42,0.12);background:#fff;font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace}
+.admin-console-help{font-size:12px;color:var(--muted);font-weight:600}
+.admin-console-help code{background:rgba(15,23,42,0.06);padding:2px 6px;border-radius:6px}
+.admin-console-actions{display:flex;gap:8px;flex-wrap:wrap}
 .product-form .row{display:flex;gap:12px;margin-bottom:12px}
 .field{flex:1}
 .field label{font-weight:700;display:block;margin-bottom:8px;color:var(--muted)}

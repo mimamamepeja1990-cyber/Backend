@@ -2933,6 +2933,191 @@ async def debug_echo(request: Request):
     return JSONResponse(status_code=200, content={"echo": data, "headers": dict(request.headers)}, headers=headers)
 
 
+@app.post('/debug/clear')
+async def debug_clear(request: Request):
+    headers = _cors_headers_for_request(request)
+    try:
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        raw_target = body.get('target') if isinstance(body, dict) else None
+        if raw_target is None and isinstance(body, dict):
+            raw_target = body.get('code')
+        target_key = str(raw_target or '').strip().lower()
+        if target_key.startswith('@'):
+            target_key = target_key[1:]
+
+        aliases = {
+            '1': 'catalog',
+            'catalog': 'catalog',
+            'catalogo': 'catalog',
+            'productos': 'catalog',
+            'products': 'catalog',
+            '2': 'filters',
+            'filters': 'filters',
+            'filtros': 'filters',
+            '3': 'orders',
+            'orders': 'orders',
+            'pedidos': 'orders',
+            '4': 'customers',
+            'customers': 'customers',
+            'clientes': 'customers',
+            '5': 'preparations',
+            'preparations': 'preparations',
+            'preparaciones': 'preparations',
+        }
+        target = aliases.get(target_key)
+        if not target:
+            return JSONResponse(status_code=400, content={'detail': 'invalid_target', 'target': target_key}, headers=headers)
+
+        def _table_exists(name: str) -> bool:
+            try:
+                insp_local = inspect(engine)
+                return name in (insp_local.get_table_names() or [])
+            except Exception:
+                return False
+
+        def _delete_all(name: str) -> int:
+            if not _table_exists(name):
+                return 0
+            try:
+                with engine.begin() as conn:
+                    res = conn.execute(text(f"DELETE FROM {name}"))
+                    try:
+                        return int(res.rowcount or 0)
+                    except Exception:
+                        return 0
+            except Exception as e_del:
+                logger.exception('debug/clear failed to delete %s: %s', name, e_del)
+                return 0
+
+        result = {'ok': True, 'target': target, 'deleted': {}, 'updated': {}}
+
+        if target == 'catalog':
+            result['deleted']['products'] = _delete_all('products')
+            result['deleted']['product_changes'] = _delete_all('product_changes')
+            try:
+                PRODUCTS_CACHE.clear()
+                PRODUCTS_COUNT_CACHE.clear()
+            except Exception:
+                pass
+
+        elif target == 'filters':
+            db = SessionLocal()
+            try:
+                try:
+                    crud.set_setting(db, 'filters', [])
+                except Exception:
+                    logger.exception('debug/clear filters: failed to persist DB setting')
+                try:
+                    os.makedirs(CATALOG_DIR, exist_ok=True)
+                    path = os.path.join(CATALOG_DIR, 'filters.json')
+                    with open(path, 'w', encoding='utf-8') as f:
+                        f.write(json.dumps([], ensure_ascii=False, indent=2))
+                    result['updated']['filters_snapshot'] = 1
+                except Exception:
+                    logger.exception('debug/clear filters: failed to write snapshot file')
+                try:
+                    await push_event({'type': 'filters-updated', 'count': 0})
+                except Exception:
+                    pass
+            finally:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+
+        elif target == 'orders':
+            result['deleted']['orders'] = _delete_all('orders')
+            result['deleted']['order_token_previews'] = _delete_all('order_token_previews')
+            db = SessionLocal()
+            try:
+                try:
+                    crud.set_setting(db, 'order_status_overrides', {})
+                except Exception:
+                    logger.exception('debug/clear orders: failed to reset status overrides')
+            finally:
+                try:
+                    db.close()
+                except Exception:
+                    pass
+            try:
+                ORDER_PAYLOAD_CACHE.clear()
+                ORDER_STATUS_CACHE.clear()
+            except Exception:
+                pass
+
+        elif target == 'customers':
+            result['deleted']['user_addresses'] = _delete_all('user_addresses')
+            result['deleted']['users'] = _delete_all('users')
+            result['deleted']['order_token_previews'] = _delete_all('order_token_previews')
+            # Anonymize orders so customer lists derived from orders are cleared.
+            try:
+                if _table_exists('orders'):
+                    insp_local = inspect(engine)
+                    cols = {c['name'] for c in (insp_local.get_columns('orders') or [])}
+                    to_null = [
+                        'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle',
+                        'user_numeracion', 'user_postal_code', 'user_department',
+                        '_token_preview', '_token_received',
+                    ]
+                    existing = [c for c in to_null if c in cols]
+                    if existing:
+                        set_sql = ", ".join([f"{c} = NULL" for c in existing])
+                        with engine.begin() as conn:
+                            res = conn.execute(text(f"UPDATE orders SET {set_sql}"))
+                            try:
+                                result['updated']['orders_anonymized'] = int(res.rowcount or 0)
+                            except Exception:
+                                result['updated']['orders_anonymized'] = 0
+            except Exception:
+                logger.exception('debug/clear customers: failed to anonymize orders')
+            try:
+                ORDER_PAYLOAD_CACHE.clear()
+                ORDER_STATUS_CACHE.clear()
+            except Exception:
+                pass
+
+        elif target == 'preparations':
+            try:
+                if _table_exists('orders'):
+                    insp_local = inspect(engine)
+                    cols = {c['name'] for c in (insp_local.get_columns('orders') or [])}
+                    if 'status' in cols:
+                        with engine.begin() as conn:
+                            res = conn.execute(
+                                text("UPDATE orders SET status = :status WHERE LOWER(status) IN ('visto','preparado','preparando','preparing','prepared','seen','viewed')"),
+                                {'status': 'entregado'}
+                            )
+                            try:
+                                result['updated']['orders_status_updated'] = int(res.rowcount or 0)
+                            except Exception:
+                                result['updated']['orders_status_updated'] = 0
+                db = SessionLocal()
+                try:
+                    try:
+                        crud.set_setting(db, 'order_status_overrides', {})
+                    except Exception:
+                        logger.exception('debug/clear preparations: failed to reset status overrides')
+                finally:
+                    try:
+                        db.close()
+                    except Exception:
+                        pass
+                try:
+                    ORDER_STATUS_CACHE.clear()
+                except Exception:
+                    pass
+            except Exception:
+                logger.exception('debug/clear preparations failed')
+
+        return JSONResponse(status_code=200, content=result, headers=headers)
+    except Exception as e:
+        logger.exception('debug/clear failed: %s', e)
+        return JSONResponse(status_code=500, content={'detail': 'clear_failed'}, headers=headers)
+
+
 # -------------------------------------------------------------------
 # Filters endpoint: serve and persist admin-managed filters so public catalog can fetch them
 # -------------------------------------------------------------------
