@@ -1282,6 +1282,77 @@ def _is_kg_item(it):
     u = _get_item_unit(it)
     return u in ('kg', 'kilo', 'kilos', 'kilogram', 'kilograms', 'kilogramo', 'kilogramos')
 
+def _is_promo_item(it):
+    try:
+        if not isinstance(it, dict):
+            return False
+        raw_id = str(it.get('id', '') or '')
+        if raw_id.startswith('promo:'):
+            return True
+        meta = it.get('meta')
+        if isinstance(meta, dict):
+            if meta.get('is_promo') is True:
+                return True
+            if meta.get('promo_id') is not None:
+                return True
+        return False
+    except Exception:
+        return False
+
+def _expand_promo_items_for_stock(items_list, db):
+    """Expand promo-summary items into per-product items for stock checks/decrements."""
+    try:
+        if not isinstance(items_list, list):
+            return items_list
+        expanded = []
+        for it in items_list:
+            if not _is_promo_item(it):
+                expanded.append(it)
+                continue
+            meta = it.get('meta') if isinstance(it, dict) else None
+            products = meta.get('products') if isinstance(meta, dict) else None
+            if not isinstance(products, list) or not products:
+                expanded.append(it)
+                continue
+            qty_raw = it.get('qty', 1) if isinstance(it, dict) else 1
+            try:
+                qty = float(qty_raw) if qty_raw is not None else 1.0
+            except Exception:
+                qty = 1.0
+            if qty <= 0:
+                continue
+            for pr in products:
+                if not isinstance(pr, dict):
+                    continue
+                pid_raw = pr.get('id') or pr.get('product_id') or pr.get('productId')
+                try:
+                    pid = int(pid_raw)
+                except Exception:
+                    continue
+                prod = None
+                try:
+                    prod = db.query(models.Product).filter(models.Product.id == pid).first()
+                except Exception:
+                    prod = None
+                meta_out = {}
+                try:
+                    if prod is not None:
+                        sale_unit = getattr(prod, 'sale_unit', None) or getattr(prod, 'unit_type', None)
+                        if sale_unit:
+                            meta_out['unit_type'] = str(sale_unit)
+                        kg_per_unit = getattr(prod, 'kg_per_unit', None)
+                        if kg_per_unit is not None:
+                            try:
+                                meta_out['kg_per_unit'] = float(kg_per_unit)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                expanded.append({'id': str(pid), 'qty': qty, 'meta': meta_out})
+        return expanded
+    except Exception:
+        return items_list
+
 
 def _to_float(value, default=0.0):
     try:
@@ -1451,6 +1522,11 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
         items_list = []
 
     items_json = _serialize_order_items_for_storage(items_list, max_chars=None)
+    stock_items = items_list
+    try:
+        stock_items = _expand_promo_items_for_stock(items_list, db)
+    except Exception:
+        stock_items = items_list
 
     # Validate stock availability: consider near-expiry consumos and total stock.
     # Read consumos.json to get available near-expiry quantities (best-effort, file may not exist).
@@ -1514,17 +1590,23 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
             except Exception:
                 return items_list_input, False, {}
 
-        items_list, pre_alloc_consumos, consumos_map = _prealloc_consumos(items_list)
+        items_list, pre_alloc_consumos_items, consumos_map_items = _prealloc_consumos(items_list)
         try:
             items_json = _serialize_order_items_for_storage(items_list, max_chars=None)
         except Exception:
             pass
+        if stock_items is items_list:
+            consumos_map = consumos_map_items
+            pre_alloc_consumos = bool(pre_alloc_consumos_items)
+        else:
+            stock_items, pre_alloc_consumos_stock, consumos_map = _prealloc_consumos(stock_items)
+            pre_alloc_consumos = bool(pre_alloc_consumos_items or pre_alloc_consumos_stock)
     except Exception:
         pre_alloc_consumos = False
         consumos_map = {}
 
     try:
-        for it in items_list:
+        for it in stock_items:
             try:
                 pid = int(it.get('id'))
             except Exception:
@@ -1855,7 +1937,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                                 continue
             except Exception:
                 consumos_disk = {}
-            for it in items_list:
+            for it in stock_items:
                 try:
                     pid = int(it.get('id'))
                 except Exception:
