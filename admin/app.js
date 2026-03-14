@@ -250,6 +250,13 @@ const pageSizeSelect = document.getElementById('pageSizeSelect');
 const exportCsvBtn = document.getElementById('exportCsvBtn');
 const importCsvBtn = document.getElementById('importCsvBtn');
 const importCsvInput = document.getElementById('importCsvInput');
+const importExcelBtn = document.getElementById('importExcelBtn');
+const importExcelInput = document.getElementById('importExcelInput');
+const autoImageProgress = document.getElementById('autoImageProgress');
+const autoImageProgressFill = document.getElementById('autoImageProgressFill');
+const autoImageProgressLabel = document.getElementById('autoImageProgressLabel');
+const autoImageProgressMeta = document.getElementById('autoImageProgressMeta');
+const autoImageProgressStatus = document.getElementById('autoImageProgressStatus');
 const productsPager = document.getElementById('productsPager');
 const prevPageBtn = document.getElementById('prevPageBtn');
 const nextPageBtn = document.getElementById('nextPageBtn');
@@ -296,6 +303,7 @@ const retailSaveAllBtn = document.getElementById('retailSaveAllBtn');
 let currentEditId = null;
 let imageUrl = null;
 let selectedFile = null;
+let autoImagePollTimer = null;
 let retailProductsCache = [];
 let productLookupById = new Map();
 const PROMO_KEY = 'admin_promotions_v1';
@@ -790,6 +798,110 @@ async function importCsvFile(file){
     console.error('importCsvFile failed', e);
     showToast('Error importando CSV', 'error');
   }
+}
+
+async function importExcelFile(file){
+  if (!file) return;
+  try{
+    const fd = new FormData();
+    fd.append('file', file, file.name || 'import.xlsx');
+    const res = await safeFetch(`${API_BASE}/products/import-excel`, {
+      method: 'POST',
+      body: fd,
+    });
+    const created = Number(res && res.created != null ? res.created : 0) || 0;
+    const skipped = Number(res && res.skipped != null ? res.skipped : 0) || 0;
+    const duplicates = Array.isArray(res && res.duplicates) ? res.duplicates.length : 0;
+    const missingName = Number(res && res.missing_name != null ? res.missing_name : 0) || 0;
+    const errors = Array.isArray(res && res.errors) ? res.errors.length : 0;
+    const detail = [];
+    if (skipped) detail.push(`omitidos ${skipped}`);
+    if (duplicates) detail.push(`duplicados ${duplicates}`);
+    if (missingName) detail.push(`sin nombre ${missingName}`);
+    if (errors) detail.push(`errores ${errors}`);
+    showToast(`Importación Excel: ${created} creados${detail.length ? ' · ' + detail.join(' · ') : ''}`, errors ? 'warning' : 'success');
+    await ensureAllProductsCache({ force: true }).catch(()=>null);
+    await refresh();
+    try{ startAutoImageProgressPolling(); }catch(_){ }
+    try{ await fetchAutoImageProgress(); }catch(_){ }
+  }catch(e){
+    console.error('importExcelFile failed', e);
+    let msg = 'Error importando Excel';
+    try{
+      if (e && e.payload && e.payload.detail) msg = e.payload.detail;
+      else if (e && e.payload && typeof e.payload === 'string') msg = e.payload;
+    }catch(_){ }
+    showToast(msg, 'error');
+  }
+}
+
+function parseIsoToMs(value){
+  try{
+    if (!value) return 0;
+    const t = Date.parse(value);
+    return Number.isFinite(t) ? t : 0;
+  }catch(_){
+    return 0;
+  }
+}
+
+function renderAutoImageProgress(state){
+  if (!autoImageProgress) return;
+  if (!state || state.enabled === false || state.status === 'disabled'){
+    autoImageProgress.classList.add('hidden');
+    return;
+  }
+  const total = Math.max(0, Number(state.total || 0));
+  const processed = Math.max(0, Number(state.processed || 0));
+  const attached = Math.max(0, Number(state.attached || 0));
+  const status = state.status || 'idle';
+  const finishedAt = parseIsoToMs(state.finished_at || state.last_update);
+  const recentlyFinished = (status === 'done' || status === 'error') && finishedAt && (Date.now() - finishedAt) < 15000;
+  const shouldShow = status === 'running' || status === 'queued' || status === 'error' || recentlyFinished;
+  if (!shouldShow || (!total && status !== 'running' && status !== 'queued' && !recentlyFinished)){
+    autoImageProgress.classList.add('hidden');
+    return;
+  }
+  autoImageProgress.classList.remove('hidden');
+  const safeTotal = total > 0 ? total : Math.max(processed, 1);
+  const percent = Math.min(100, Math.round((processed / safeTotal) * 100));
+  if (autoImageProgressFill) autoImageProgressFill.style.width = `${percent}%`;
+  if (autoImageProgressLabel) autoImageProgressLabel.textContent = `${percent}%`;
+  if (autoImageProgressMeta) autoImageProgressMeta.textContent = `${processed}/${total || safeTotal} · ${attached} con foto`;
+  if (autoImageProgressStatus){
+    if (status === 'error'){
+      autoImageProgressStatus.textContent = state.last_error ? `Error: ${state.last_error}` : 'Error';
+      autoImageProgressStatus.classList.add('error');
+    } else if (status === 'queued'){
+      autoImageProgressStatus.textContent = 'En cola…';
+      autoImageProgressStatus.classList.remove('error');
+    } else if (status === 'running'){
+      autoImageProgressStatus.textContent = 'Procesando…';
+      autoImageProgressStatus.classList.remove('error');
+    } else if (status === 'done'){
+      autoImageProgressStatus.textContent = 'Listo';
+      autoImageProgressStatus.classList.remove('error');
+    } else {
+      autoImageProgressStatus.textContent = '';
+      autoImageProgressStatus.classList.remove('error');
+    }
+  }
+}
+
+async function fetchAutoImageProgress(){
+  if (!autoImageProgress) return;
+  try{
+    const state = await safeFetch(`${API_BASE}/products/auto-image/status`, { cache: 'no-store' });
+    renderAutoImageProgress(state);
+  }catch(e){
+    autoImageProgress.classList.add('hidden');
+  }
+}
+
+function startAutoImageProgressPolling(){
+  if (!autoImageProgress || autoImagePollTimer) return;
+  autoImagePollTimer = setInterval(()=>{ fetchAutoImageProgress(); }, 2500);
+  fetchAutoImageProgress();
 }
 
 async function downloadExportCsv(){
@@ -1933,6 +2045,16 @@ if(importCsvInput) importCsvInput.onchange = async () => {
     await importCsvFile(file);
   } finally {
     try{ importCsvInput.value = ''; }catch(_){ }
+  }
+};
+if(importExcelBtn) importExcelBtn.onclick = () => { try{ if(importExcelInput) importExcelInput.click(); }catch(_){ } };
+if(importExcelInput) importExcelInput.onchange = async () => {
+  try{
+    const file = importExcelInput.files && importExcelInput.files[0] ? importExcelInput.files[0] : null;
+    if (!file) return;
+    await importExcelFile(file);
+  } finally {
+    try{ importExcelInput.value = ''; }catch(_){ }
   }
 };
 if(retailRefreshBtn) retailRefreshBtn.onclick = () => refreshRetailPrices();
@@ -4912,6 +5034,7 @@ async function bootstrapAdmin(){
   try{ loadLocalOrderCache(); }catch(e){ console.warn('loadLocalOrderCache failed', e); }
   try{ loadOrderMapsCoordCache(); }catch(e){ console.warn('loadOrderMapsCoordCache failed', e); }
   try{ await refreshOrders('web'); }catch(e){ console.warn('refreshOrders web failed', e); }
+  try{ startAutoImageProgressPolling(); }catch(e){ console.warn('auto image polling failed', e); }
 }
 bootstrapAdmin();
 

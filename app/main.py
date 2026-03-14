@@ -1,7 +1,7 @@
 from fastapi import status
 from fastapi import (
     FastAPI, Depends, HTTPException, UploadFile, File,
-    WebSocket, WebSocketDisconnect, Request
+    WebSocket, WebSocketDisconnect, Request, BackgroundTasks, Body
 )
 from fastapi.responses import RedirectResponse, PlainTextResponse, Response, FileResponse, StreamingResponse
 from fastapi.responses import JSONResponse
@@ -22,16 +22,18 @@ import re
 import time
 import datetime
 import unicodedata
-from io import StringIO
+from io import StringIO, BytesIO
 from html import escape as html_escape
 from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 import anyio
 import sys
 import traceback
+import threading
 
 from sqlalchemy.orm import Session
 from sqlalchemy import text
+from sqlalchemy import func
 from sqlalchemy import inspect
 from sqlalchemy import or_
 from types import SimpleNamespace
@@ -598,6 +600,20 @@ PRODUCTS_COUNT_CACHE: Dict[Any, Dict[str, Any]] = {}
 PRODUCTS_COUNT_CACHE_TTL = float(os.environ.get('PRODUCTS_COUNT_CACHE_TTL') or 15.0)
 PROMOTIONS_CACHE: Dict[str, Any] = {'ts': 0.0, 'mtime': None, 'value': None}
 PROMOTIONS_CACHE_TTL = float(os.environ.get('PROMOTIONS_CACHE_TTL') or 15.0)
+
+# Auto-image progress tracking (in-memory, last job wins).
+AUTO_IMAGE_PROGRESS_LOCK = threading.Lock()
+AUTO_IMAGE_PROGRESS: Dict[str, Any] = {
+    'status': 'idle',
+    'total': 0,
+    'processed': 0,
+    'attached': 0,
+    'started_at': None,
+    'finished_at': None,
+    'last_update': None,
+    'source': None,
+    'last_error': None,
+}
 
 
 def _cache_get(cache: Dict[Any, Dict[str, Any]], key: Any, ttl: float):
@@ -4274,7 +4290,7 @@ def auth_replace_addresses(
         raise HTTPException(status_code=500, detail='Could not save addresses')
 
 @app.post("/products")
-async def create_product(payload: schemas.ProductCreate, request: Request):
+async def create_product(payload: schemas.ProductCreate, request: Request, background_tasks: BackgroundTasks):
     """Create a product - no response validation, just raw JSON."""
     # Log incoming payload (helps debug server vs validation failures)
     try:
@@ -4350,6 +4366,20 @@ async def create_product(payload: schemas.ProductCreate, request: Request):
         try:
             await anyio.to_thread.run_sync(write_catalog_snapshot)
         except:
+            pass
+
+        try:
+            if _auto_image_enabled():
+                image_url = str(result.get('image_url') or '').strip()
+                if not image_url and result.get('id'):
+                    background_tasks.add_task(
+                        _auto_fetch_and_set_image,
+                        result.get('id'),
+                        result.get('name'),
+                        result.get('code'),
+                        True,
+                    )
+        except Exception:
             pass
 
         _invalidate_products_cache()
@@ -4473,6 +4503,512 @@ def list_products_paged(
     return { 'total': int(total or 0), 'skip': skip, 'limit': limit, 'items': items }
 
 
+def _normalize_import_header(value: Any) -> str:
+    try:
+        raw = str(value or '').strip().lower()
+    except Exception:
+        return ''
+    if not raw:
+        return ''
+    try:
+        raw = unicodedata.normalize('NFKD', raw)
+        raw = ''.join(ch for ch in raw if not unicodedata.combining(ch))
+    except Exception:
+        pass
+    raw = re.sub(r'[^a-z0-9]+', '_', raw)
+    raw = raw.strip('_')
+    return raw
+
+
+_IMPORT_HEADER_ALIASES = {
+    'code': {'code', 'codigo', 'código', 'sku', 'cod', 'codigo_sku', 'codigo_de_producto'},
+    'name': {'name', 'nombre', 'producto', 'producto_nombre', 'descripcion_producto'},
+    'brand': {'brand', 'marca'},
+    'description': {'description', 'descripcion', 'detalle', 'desc'},
+    'category': {'category', 'categoria', 'rubro', 'familia', 'linea'},
+    'stock': {'stock', 'cantidad', 'existencias', 'stock_actual'},
+    'min_stock': {'min_stock', 'stock_min', 'stock_minimo', 'stock_mínimo', 'minimo', 'mínimo'},
+    'stock_kg': {'stock_kg', 'stock_kilos', 'kg_stock', 'stock_kilogramos'},
+    'kg_per_unit': {'kg_per_unit', 'kg_unidad', 'kg_por_unidad', 'kg_x_unidad', 'unidad_kg', 'peso_unidad'},
+    'sale_unit': {'sale_unit', 'unidad', 'unidad_venta', 'tipo_venta', 'unidad_de_venta'},
+    'active': {'active', 'activo'},
+    'image_url': {'image', 'imagen', 'image_url', 'imagen_url', 'url', 'foto', 'picture', 'img'},
+}
+
+_IMPORT_HEADER_MAP = {alias: key for key, aliases in _IMPORT_HEADER_ALIASES.items() for alias in aliases}
+
+
+def _auto_image_enabled() -> bool:
+    return _is_truthy(os.environ.get('AUTO_IMAGE_FETCH') or os.environ.get('AUTO_IMAGE_SEARCH'))
+
+
+def _auto_image_now_iso() -> str:
+    try:
+        return datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+    except Exception:
+        return datetime.datetime.utcnow().isoformat()
+
+
+def _queue_auto_image_progress(total: int, source: Optional[str] = None) -> None:
+    now = _auto_image_now_iso()
+    with AUTO_IMAGE_PROGRESS_LOCK:
+        AUTO_IMAGE_PROGRESS.update({
+            'status': 'queued',
+            'total': int(total or 0),
+            'processed': 0,
+            'attached': 0,
+            'started_at': None,
+            'finished_at': None,
+            'last_update': now,
+            'source': source,
+            'last_error': None,
+        })
+
+
+def _start_auto_image_progress(total: int, source: Optional[str] = None) -> None:
+    now = _auto_image_now_iso()
+    with AUTO_IMAGE_PROGRESS_LOCK:
+        AUTO_IMAGE_PROGRESS.update({
+            'status': 'running',
+            'total': int(total or 0),
+            'processed': 0,
+            'attached': 0,
+            'started_at': now,
+            'finished_at': None,
+            'last_update': now,
+            'source': source,
+            'last_error': None,
+        })
+
+
+def _advance_auto_image_progress(processed_inc: int = 0, attached_inc: int = 0) -> None:
+    now = _auto_image_now_iso()
+    with AUTO_IMAGE_PROGRESS_LOCK:
+        AUTO_IMAGE_PROGRESS['processed'] = int(AUTO_IMAGE_PROGRESS.get('processed') or 0) + int(processed_inc or 0)
+        AUTO_IMAGE_PROGRESS['attached'] = int(AUTO_IMAGE_PROGRESS.get('attached') or 0) + int(attached_inc or 0)
+        AUTO_IMAGE_PROGRESS['last_update'] = now
+
+
+def _finish_auto_image_progress(status: str = 'done', error: Optional[str] = None) -> None:
+    now = _auto_image_now_iso()
+    with AUTO_IMAGE_PROGRESS_LOCK:
+        AUTO_IMAGE_PROGRESS['status'] = status
+        AUTO_IMAGE_PROGRESS['finished_at'] = now
+        AUTO_IMAGE_PROGRESS['last_update'] = now
+        if error:
+            AUTO_IMAGE_PROGRESS['last_error'] = error
+
+
+def _get_auto_image_progress_snapshot() -> Dict[str, Any]:
+    with AUTO_IMAGE_PROGRESS_LOCK:
+        return dict(AUTO_IMAGE_PROGRESS)
+
+
+def _fetch_pexels_photo(query: str) -> Optional[Dict[str, Any]]:
+    api_key = str(os.environ.get('PEXELS_API_KEY') or '').strip()
+    if not api_key:
+        return None
+    try:
+        params = {'query': query, 'per_page': 1}
+        resp = httpx.get(
+            'https://api.pexels.com/v1/search',
+            params=params,
+            headers={'Authorization': api_key},
+            timeout=10,
+        )
+        if resp.status_code >= 400:
+            logger.warning('Pexels search failed: %s %s', resp.status_code, resp.text[:200])
+            return None
+        payload = resp.json() or {}
+        photos = payload.get('photos') or []
+        if not photos:
+            return None
+        return photos[0]
+    except Exception as e:
+        logger.warning('Pexels search error: %s', e)
+        return None
+
+
+def _download_image_bytes(url: str, max_bytes: int) -> Optional[Tuple[bytes, str, str]]:
+    try:
+        with httpx.stream('GET', url, timeout=15, follow_redirects=True) as resp:
+            if resp.status_code >= 400:
+                return None
+            content_type = str(resp.headers.get('content-type') or 'image/jpeg')
+            if not content_type.startswith('image/'):
+                return None
+            data = bytearray()
+            for chunk in resp.iter_bytes():
+                if not chunk:
+                    continue
+                data.extend(chunk)
+                if len(data) > max_bytes:
+                    logger.warning('Image download exceeded max bytes: %s', max_bytes)
+                    return None
+            filename = os.path.basename(str(url).split('?')[0] or '')
+            return (bytes(data), content_type, filename or 'image')
+    except Exception as e:
+        logger.warning('Image download failed: %s', e)
+        return None
+
+
+def _auto_fetch_and_set_image(
+    product_id: int,
+    name: Optional[str] = None,
+    code: Optional[str] = None,
+    write_snapshot: bool = True,
+) -> Optional[Dict[str, Any]]:
+    if not _auto_image_enabled():
+        return None
+    query = str(name or code or '').strip()
+    if not query:
+        return None
+
+    provider = str(os.environ.get('IMAGE_SEARCH_PROVIDER') or 'pexels').strip().lower()
+    photo = None
+    if provider == 'pexels':
+        photo = _fetch_pexels_photo(query)
+    else:
+        logger.warning('Unsupported image provider: %s', provider)
+        return None
+    if not photo:
+        return None
+
+    src = photo.get('src') or {}
+    size_pref = str(os.environ.get('IMAGE_FETCH_SIZE') or 'medium').strip().lower()
+    candidate = src.get(size_pref) or src.get('large') or src.get('medium') or src.get('portrait') or src.get('original') or src.get('small')
+    if not candidate:
+        return None
+
+    max_bytes = int(os.environ.get('IMAGE_FETCH_MAX_BYTES') or 4_000_000)
+    downloaded = _download_image_bytes(candidate, max_bytes=max_bytes)
+    if not downloaded:
+        return None
+    content, mime, filename = downloaded
+
+    db = SessionLocal()
+    try:
+        prod = db.query(models.Product).filter(models.Product.id == int(product_id)).first()
+        if not prod:
+            return None
+        existing_url = str(getattr(prod, 'image_url', '') or '').strip()
+        if existing_url:
+            return None
+        img = models.Image(data=content, mime=mime, filename=filename)
+        db.add(img)
+        db.commit()
+        db.refresh(img)
+        prod.image_url = f"/images/{img.id}"
+        db.add(prod)
+        db.commit()
+        try:
+            _invalidate_products_cache()
+        except Exception:
+            pass
+        if write_snapshot:
+            try:
+                write_catalog_snapshot()
+            except Exception:
+                pass
+        return {
+            'image_url': prod.image_url,
+            'provider': provider,
+            'photographer': photo.get('photographer'),
+            'photographer_url': photo.get('photographer_url'),
+            'source_url': photo.get('url'),
+        }
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.warning('Auto image attach failed: %s', e)
+        return None
+    finally:
+        db.close()
+
+
+def _auto_fetch_images_for_products(
+    items: List[Dict[str, Any]],
+    write_snapshot: bool = True,
+    source: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not _auto_image_enabled():
+        return {'requested': 0, 'processed': 0, 'attached': 0, 'results': []}
+    if not items:
+        return {'requested': 0, 'processed': 0, 'attached': 0, 'results': []}
+
+    try:
+        max_items = int(os.environ.get('IMAGE_FETCH_BATCH_MAX') or 50)
+    except Exception:
+        max_items = 50
+    if max_items <= 0:
+        max_items = len(items)
+    try:
+        sleep_ms = float(os.environ.get('IMAGE_FETCH_SLEEP_MS') or 0)
+    except Exception:
+        sleep_ms = 0.0
+
+    candidates: List[Dict[str, Any]] = []
+    for item in items:
+        try:
+            pid = item.get('id') if isinstance(item, dict) else getattr(item, 'id', None)
+        except Exception:
+            pid = None
+        if not pid:
+            continue
+        try:
+            existing_url = str(item.get('image_url') or '').strip()
+        except Exception:
+            existing_url = ''
+        if existing_url:
+            continue
+        candidates.append(item)
+    if max_items and max_items > 0:
+        candidates = candidates[:max_items]
+
+    total = len(candidates)
+    _start_auto_image_progress(total, source=source)
+    if total == 0:
+        _finish_auto_image_progress('done')
+        return {'requested': len(items), 'processed': 0, 'attached': 0, 'results': []}
+
+    results: List[Dict[str, Any]] = []
+    processed = 0
+    try:
+        for item in candidates:
+            try:
+                pid = item.get('id') if isinstance(item, dict) else getattr(item, 'id', None)
+            except Exception:
+                pid = None
+            if not pid:
+                continue
+            try:
+                name = item.get('name') if isinstance(item, dict) else getattr(item, 'name', None)
+            except Exception:
+                name = None
+            try:
+                code = item.get('code') if isinstance(item, dict) else getattr(item, 'code', None)
+            except Exception:
+                code = None
+            res = _auto_fetch_and_set_image(pid, name=name, code=code, write_snapshot=False)
+            processed += 1
+            if res:
+                results.append({'id': pid, **res})
+            _advance_auto_image_progress(1, 1 if res else 0)
+            if sleep_ms > 0:
+                try:
+                    time.sleep(sleep_ms / 1000.0)
+                except Exception:
+                    pass
+        _finish_auto_image_progress('done')
+    except Exception as e:
+        logger.warning('Auto image batch failed: %s', e)
+        _finish_auto_image_progress('error', str(e)[:200])
+
+    if write_snapshot and results:
+        try:
+            write_catalog_snapshot()
+        except Exception:
+            pass
+    if results:
+        try:
+            _invalidate_products_cache()
+        except Exception:
+            pass
+    return {
+        'requested': len(items),
+        'processed': processed,
+        'attached': len(results),
+        'results': results,
+    }
+
+def _coerce_int(value: Any) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (int, float)):
+            if not (value == value):  # NaN check
+                return None
+            return int(round(value))
+        raw = str(value).strip()
+        if raw == '':
+            return None
+        raw = raw.replace('.', '').replace(',', '.')
+        num = float(raw)
+        if not (num == num):
+            return None
+        return int(round(num))
+    except Exception:
+        return None
+
+
+def _coerce_float(value: Any) -> Optional[float]:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            if not (value == value):
+                return None
+            return float(value)
+        raw = str(value).strip()
+        if raw == '':
+            return None
+        raw = raw.replace('.', '').replace(',', '.')
+        num = float(raw)
+        if not (num == num):
+            return None
+        return float(num)
+    except Exception:
+        return None
+
+
+def _coerce_bool(value: Any) -> Optional[bool]:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        raw = str(value).strip().lower()
+        if raw in {'1', 'true', 'si', 'sí', 'yes', 'y', 'on'}:
+            return True
+        if raw in {'0', 'false', 'no', 'off'}:
+            return False
+    except Exception:
+        pass
+    return None
+
+
+def _normalize_sale_unit(value: Any) -> Optional[str]:
+    try:
+        raw = str(value or '').strip().lower()
+    except Exception:
+        return None
+    if not raw:
+        return None
+    if raw in {'kg', 'kilo', 'kilos', 'kilogram', 'kilograms', 'kilogramo', 'kilogramos'}:
+        return 'kg'
+    return 'unit'
+
+
+def _parse_import_rows_from_excel(content: bytes, filename: str) -> List[Dict[str, Any]]:
+    lower_name = str(filename or '').lower()
+    if lower_name.endswith('.csv'):
+        text_content = content.decode('utf-8', errors='ignore')
+        try:
+            sample = text_content[:2048]
+            dialect = csv.Sniffer().sniff(sample, delimiters=';,')
+        except Exception:
+            dialect = csv.excel
+        reader = csv.reader(StringIO(text_content), dialect)
+        rows = list(reader)
+    else:
+        try:
+            from openpyxl import load_workbook  # type: ignore
+        except Exception as e:
+            raise RuntimeError('openpyxl_required') from e
+        wb = load_workbook(BytesIO(content), data_only=True, read_only=True)
+        ws = wb.active
+        rows = [[cell for cell in row] for row in ws.iter_rows(values_only=True)]
+
+    if not rows:
+        return []
+    header_row = rows[0]
+    headers = [_normalize_import_header(h) for h in header_row]
+    mapped = []
+    for h in headers:
+        mapped.append(_IMPORT_HEADER_MAP.get(h, h))
+
+    out: List[Dict[str, Any]] = []
+    for row in rows[1:]:
+        if not row:
+            continue
+        if all(cell is None or str(cell).strip() == '' for cell in row):
+            continue
+        entry: Dict[str, Any] = {}
+        for idx, key in enumerate(mapped):
+            if not key:
+                continue
+            if idx >= len(row):
+                continue
+            entry[key] = row[idx]
+        out.append(entry)
+    return out
+
+
+def _normalize_lookup_token(value: Any) -> str:
+    try:
+        raw = str(value or '').strip().lower()
+    except Exception:
+        return ''
+    if not raw:
+        return ''
+    try:
+        raw = unicodedata.normalize('NFKD', raw)
+        raw = ''.join(ch for ch in raw if not unicodedata.combining(ch))
+    except Exception:
+        pass
+    raw = re.sub(r'[^a-z0-9]+', '', raw)
+    return raw
+
+
+def _resolve_import_image_url(db: Session, code: Optional[str], name: Optional[str], provided: Optional[str]) -> Optional[str]:
+    if provided:
+        try:
+            return str(provided).strip()
+        except Exception:
+            return provided
+
+    try:
+        code_text = str(code or '').strip()
+    except Exception:
+        code_text = ''
+    try:
+        name_text = str(name or '').strip()
+    except Exception:
+        name_text = ''
+    code_lower = code_text.lower()
+    name_lower = name_text.lower()
+    code_norm = _normalize_lookup_token(code_text)
+    name_norm = _normalize_lookup_token(name_text)
+
+    try:
+        if code_lower:
+            prod = db.query(models.Product).filter(func.lower(func.trim(models.Product.code)) == code_lower).first()
+            if prod and getattr(prod, 'image_url', None):
+                return prod.image_url
+    except Exception:
+        pass
+    try:
+        if name_lower:
+            prod = db.query(models.Product).filter(func.lower(func.trim(models.Product.name)) == name_lower).first()
+            if prod and getattr(prod, 'image_url', None):
+                return prod.image_url
+    except Exception:
+        pass
+
+    try:
+        if code_norm:
+            img = db.query(models.Image).filter(models.Image.filename.ilike(f"%{code_norm}%")).order_by(models.Image.id.desc()).first()
+            if img:
+                return f"/images/{img.id}"
+    except Exception:
+        pass
+
+    try:
+        if name_norm:
+            token = name_norm[:18]
+            if token:
+                img = db.query(models.Image).filter(models.Image.filename.ilike(f"%{token}%")).order_by(models.Image.id.desc()).first()
+                if img:
+                    return f"/images/{img.id}"
+    except Exception:
+        pass
+    return None
+
+
 @app.get("/products/duplicates")
 def list_product_duplicates(limit: int = 200, db: Session = Depends(get_db)):
     return crud.list_duplicate_product_codes(db, limit=limit)
@@ -4507,6 +5043,239 @@ async def bulk_update_products(payload: List[schemas.ProductBulkUpdateItem], req
         pass
     _invalidate_products_cache()
     return result or {'updated': 0, 'results': []}
+
+
+@app.post("/products/import-excel")
+async def import_products_excel(
+    file: UploadFile = File(...),
+    request: Request = None,
+    background_tasks: BackgroundTasks = None,
+):
+    actor = None
+    try:
+        actor = (request.headers.get('x-actor') or request.headers.get('X-Actor') or '').strip() or None
+    except Exception:
+        actor = None
+
+    content = await file.read()
+    filename = getattr(file, 'filename', '') or ''
+
+    def task():
+        db = SessionLocal()
+        created = 0
+        skipped = 0
+        missing_name = 0
+        duplicates = []
+        errors = []
+        created_ids = []
+        created_products = []
+        try:
+            rows = _parse_import_rows_from_excel(content, filename)
+        except RuntimeError as e:
+            if str(e) == 'openpyxl_required':
+                raise HTTPException(status_code=500, detail='Falta instalar openpyxl para leer Excel')
+            raise
+        except Exception:
+            raise HTTPException(status_code=400, detail='No se pudo leer el archivo Excel')
+
+        seen_codes = set()
+        for idx, row in enumerate(rows, start=2):
+            try:
+                name = row.get('name') or row.get('producto') or row.get('descripcion_producto')
+                if name is not None:
+                    name = str(name).strip()
+                if not name:
+                    missing_name += 1
+                    skipped += 1
+                    continue
+
+                code_val = row.get('code') or row.get('sku') or row.get('codigo')
+                code = None
+                if code_val is not None:
+                    code = str(code_val).strip()
+                    if code == '':
+                        code = None
+
+                code_key = str(code or '').strip().lower()
+                if code_key:
+                    if code_key in seen_codes:
+                        skipped += 1
+                        duplicates.append({'row': idx, 'code': code, 'reason': 'duplicado_en_archivo'})
+                        continue
+                    seen_codes.add(code_key)
+
+                brand = row.get('brand')
+                if brand is not None:
+                    brand = str(brand).strip() or None
+                description = row.get('description')
+                if description is not None:
+                    description = str(description).strip() or ''
+                category = row.get('category')
+                if category is not None:
+                    category = str(category).strip() or ''
+
+                stock = _coerce_int(row.get('stock'))
+                min_stock = _coerce_int(row.get('min_stock'))
+                stock_kg = _coerce_float(row.get('stock_kg'))
+                kg_per_unit = _coerce_float(row.get('kg_per_unit'))
+                sale_unit = _normalize_sale_unit(row.get('sale_unit'))
+                active = _coerce_bool(row.get('active'))
+
+                image_url = _resolve_import_image_url(db, code, name, row.get('image_url'))
+
+                payload = schemas.ProductCreate(
+                    code=code,
+                    name=name,
+                    price=0.0,
+                    price_retail=None,
+                    cost=None,
+                    description=description or '',
+                    category=category or '',
+                    brand=brand,
+                    image_url=image_url,
+                    active=True if active is None else active,
+                    stock=0 if stock is None else max(0, int(stock)),
+                    min_stock=0 if min_stock is None else max(0, int(min_stock)),
+                    stock_kg=stock_kg,
+                    kg_per_unit=kg_per_unit if kg_per_unit is not None else 1.0,
+                    discount=0.0,
+                    sale_unit=sale_unit or 'unit',
+                )
+
+                try:
+                    prod = crud.create_product(db, payload, actor=actor)
+                    created += 1
+                    try:
+                        prod_id = int(prod.get('id') if isinstance(prod, dict) else getattr(prod, 'id', None))
+                        created_ids.append(prod_id)
+                        created_products.append({
+                            'id': prod_id,
+                            'name': name,
+                            'code': code,
+                            'image_url': image_url,
+                        })
+                    except Exception:
+                        pass
+                except HTTPException as he:
+                    if he.status_code == 409:
+                        skipped += 1
+                        duplicates.append({'row': idx, 'code': code, 'reason': 'duplicado_en_bd'})
+                        continue
+                    raise
+            except HTTPException:
+                raise
+            except Exception as e:
+                skipped += 1
+                errors.append({'row': idx, 'error': str(e)[:200]})
+        return {
+            'rows': len(rows),
+            'created': created,
+            'skipped': skipped,
+            'missing_name': missing_name,
+            'duplicates': duplicates[:50],
+            'errors': errors[:50],
+            'created_ids': [c for c in created_ids if c],
+        }, created_products
+    result, created_products = await anyio.to_thread.run_sync(task)
+    try:
+        await push_event({"action": "imported", "created": int(result.get('created') or 0)})
+    except Exception:
+        pass
+    try:
+        await anyio.to_thread.run_sync(write_catalog_snapshot)
+    except Exception:
+        pass
+    try:
+        if background_tasks and _auto_image_enabled() and created_products:
+            try:
+                _queue_auto_image_progress(len(created_products), source='import-excel')
+            except Exception:
+                pass
+            background_tasks.add_task(_auto_fetch_images_for_products, created_products, True, 'import-excel')
+    except Exception:
+        pass
+    _invalidate_products_cache()
+    return result
+
+
+@app.post("/products/auto-image")
+async def auto_image_products(
+    payload: Dict[str, Any] = Body(default=None),
+    background_tasks: BackgroundTasks = None,
+):
+    if not _auto_image_enabled():
+        raise HTTPException(
+            status_code=400,
+            detail='AUTO_IMAGE_FETCH y PEXELS_API_KEY deben estar configurados',
+        )
+    payload = payload or {}
+    ids = payload.get('ids') or []
+    limit_raw = payload.get('limit')
+    only_missing = payload.get('only_missing', True)
+
+    def task():
+        db = SessionLocal()
+        try:
+            query = db.query(models.Product)
+            if ids:
+                try:
+                    parsed_ids = [int(x) for x in ids]
+                except Exception:
+                    parsed_ids = [int(x) for x in ids if str(x).isdigit()]
+                if parsed_ids:
+                    query = query.filter(models.Product.id.in_(parsed_ids))
+            if only_missing:
+                query = query.filter(
+                    or_(
+                        models.Product.image_url.is_(None),
+                        models.Product.image_url == '',
+                    )
+                )
+            try:
+                limit_val = int(limit_raw) if limit_raw is not None else 25
+            except Exception:
+                limit_val = 25
+            if limit_val and limit_val > 0:
+                query = query.order_by(models.Product.created_at.desc()).limit(limit_val)
+            rows = query.all()
+            return [
+                {
+                    'id': r.id,
+                    'name': r.name,
+                    'code': getattr(r, 'code', None),
+                    'image_url': getattr(r, 'image_url', None),
+                }
+                for r in rows
+            ]
+        finally:
+            db.close()
+
+    items = await anyio.to_thread.run_sync(task)
+    if not items:
+        return {'scheduled': 0, 'detail': 'sin_productos_para_procesar'}
+
+    try:
+        if background_tasks:
+            try:
+                _queue_auto_image_progress(len(items), source='manual')
+            except Exception:
+                pass
+            background_tasks.add_task(_auto_fetch_images_for_products, items, True, 'manual')
+    except Exception:
+        pass
+    return {
+        'scheduled': len(items),
+        'ids': [it.get('id') for it in items if it.get('id')],
+    }
+
+
+@app.get("/products/auto-image/status")
+def auto_image_status():
+    data = _get_auto_image_progress_snapshot()
+    data['enabled'] = _auto_image_enabled()
+    if not data.get('enabled'):
+        data['status'] = 'disabled'
+    return data
 
 
 @app.get("/product-changes", response_model=List[schemas.ProductChangeResponse])

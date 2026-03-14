@@ -129,6 +129,21 @@
           <button id="exportCsvBtn" class="btn" title="Exportar productos a CSV">Exportar CSV</button>
           <button id="importCsvBtn" class="btn" title="Importar productos desde CSV">Importar CSV</button>
           <input id="importCsvInput" type="file" accept=".csv,text/csv" hidden />
+          <button id="importExcelBtn" class="btn" title="Importar productos desde Excel">Importar Excel</button>
+          <input id="importExcelInput" type="file" accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" hidden />
+        </div>
+        <div id="autoImageProgress" class="auto-image-progress hidden" aria-live="polite">
+          <div class="auto-image-head">
+            <span>Auto‑imágenes</span>
+            <span id="autoImageProgressLabel">0%</span>
+          </div>
+          <div class="auto-image-track">
+            <div id="autoImageProgressFill" class="auto-image-fill" style="width:0%"></div>
+          </div>
+          <div class="auto-image-meta">
+            <span id="autoImageProgressMeta">0/0</span>
+            <span id="autoImageProgressStatus" class="auto-image-status"></span>
+          </div>
         </div>
         <div id="bulkBar" class="bulk-bar hidden" aria-live="polite">
           <div class="bulk-left">

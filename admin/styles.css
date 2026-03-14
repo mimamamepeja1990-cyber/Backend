@@ -352,6 +352,25 @@ th.col-select input, td.col-select input{width:16px; height:16px}
 /* small progress */
 .progress-sm{width:120px;margin-left:8px}
 
+/* auto image progress bar */
+.auto-image-progress{
+  margin:10px 0 14px;
+  padding:12px 14px;
+  border-radius:14px;
+  background:linear-gradient(180deg,#fff,#f8fafc);
+  border:1px solid rgba(148,163,184,0.25);
+  box-shadow:0 10px 28px rgba(15,23,42,0.08);
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+}
+.auto-image-progress.hidden{display:none}
+.auto-image-head{display:flex;align-items:center;justify-content:space-between;font-weight:700;color:#1f2937;font-size:14px}
+.auto-image-track{width:100%;height:10px;border-radius:999px;background:#eef2ff;overflow:hidden}
+.auto-image-fill{height:100%;width:0%;background:linear-gradient(90deg,var(--accent),var(--accent-2));transition:width .35s ease}
+.auto-image-meta{display:flex;align-items:center;justify-content:space-between;font-size:12px;color:var(--muted)}
+.auto-image-status.error{color:var(--danger);font-weight:700}
+
 /* clear cache button alignment */
 .clear-cache{margin-left:auto}
 
