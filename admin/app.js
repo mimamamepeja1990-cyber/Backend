@@ -236,6 +236,10 @@ const salesOrders30El = document.getElementById('salesOrders30');
 const salesRevenue30El = document.getElementById('salesRevenue30');
 const salesAvgTicket30El = document.getElementById('salesAvgTicket30');
 const salesChartCanvas = document.getElementById('salesChart');
+const alertLowStockEl = document.getElementById('alertLowStock');
+const alertOrdersUnseenEl = document.getElementById('alertOrdersUnseen');
+const alertOrdersUnpreparedEl = document.getElementById('alertOrdersUnprepared');
+const LOW_STOCK_FALLBACK = 5;
 
 const productsTableBody = document.querySelector('#productsTable tbody');
 const searchInput = document.getElementById('searchInput');
@@ -1795,12 +1799,58 @@ async function refreshRetailPrices(){
   }
 }
 
+function updateAlertItem(el, label, count){
+  if (!el) return;
+  const num = Number(count);
+  const safeCount = Number.isFinite(num) ? num : 0;
+  el.textContent = `⚠ ${label}: ${formatNumber(safeCount)}`;
+  el.classList.toggle('alert-ok', safeCount === 0);
+}
+
+function getProductStockValue(p){
+  const unit = normalizeSaleUnit(p && (p.sale_unit || p.unit || ''));
+  const stockRaw = unit === 'kg' ? getProductStockKg(p) : Number(p && (p.stock ?? p.cantidad ?? 0));
+  return Number.isFinite(stockRaw) ? stockRaw : 0;
+}
+
+function isProductLowStock(p){
+  if (!p || p.active === false) return false;
+  const stockVal = getProductStockValue(p);
+  const minStock = Number(p.min_stock ?? 0);
+  if (Number.isFinite(minStock) && minStock > 0){
+    return stockVal <= minStock;
+  }
+  return stockVal <= LOW_STOCK_FALLBACK;
+}
+
+function updateLowStockAlert(products){
+  const list = Array.isArray(products) ? products : [];
+  const lowCount = list.filter(isProductLowStock).length;
+  updateAlertItem(alertLowStockEl, 'Productos con stock bajo', lowCount);
+  return lowCount;
+}
+
+function updateOrderAlertCounts(orders){
+  const list = Array.isArray(orders) ? orders : [];
+  let unseen = 0;
+  let unprepared = 0;
+  list.forEach((o) => {
+    const st = normalizeOrderStatus(o && o.status);
+    if (st === 'recibido') unseen += 1;
+    else if (st === 'visto') unprepared += 1;
+  });
+  updateAlertItem(alertOrdersUnseenEl, 'Pedidos sin ver', unseen);
+  updateAlertItem(alertOrdersUnpreparedEl, 'Pedidos sin preparar', unprepared);
+  return { unseen, unprepared };
+}
+
 function updateStats(products){
   const list = Array.isArray(products) ? products : [];
   const totalActive = list.filter(p => p && p.active).length;
   document.getElementById('totalActive').textContent = formatNumber(totalActive);
   const avg = list.reduce((s,p)=> s + Number((p && p.price) || 0), 0) / (list.length || 1);
   document.getElementById('avgPrice').textContent = formatMoney(avg);
+  updateLowStockAlert(list);
   const byCat = {};
   list.forEach(p => { const k = (p && p.category) ? p.category : 'Sin categoría'; byCat[k] = (byCat[k] || 0) + 1 });
   const ctx = document.getElementById('categoryChart');
@@ -4272,6 +4322,7 @@ async function refreshOrders(source){
       showToast('No se pudo actualizar pedidos (conservando la vista actual)', 'warning');
       return;
     }
+    if (!q && !date) updateOrderAlertCounts(list);
     syncPreparationsSnapshot(list);
     const dateFilter = date || '';
     let toRender = list;
