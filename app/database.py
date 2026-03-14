@@ -17,6 +17,27 @@ def _is_running_on_render() -> bool:
     )
 
 
+def _is_truthy(value: str | None) -> bool:
+    try:
+        return str(value or '').strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+    except Exception:
+        return False
+
+
+def _should_run_import_migrations() -> bool:
+    """Control best-effort migrations that run at import time.
+
+    - Skip by default on Render to avoid blocking port bind.
+    - Allow explicit opt-in via RUN_DB_MIGRATIONS_AT_IMPORT=1.
+    - Allow explicit opt-out via SKIP_DB_MIGRATIONS=1.
+    """
+    if _is_truthy(os.environ.get('SKIP_DB_MIGRATIONS')):
+        return False
+    if _is_truthy(os.environ.get('RUN_DB_MIGRATIONS_AT_IMPORT')):
+        return True
+    return not _is_running_on_render()
+
+
 def _resolve_data_dir() -> Path:
     """Resolve a writable data directory, preferring persistent Render disk paths."""
     candidates = []
@@ -170,7 +191,8 @@ def _migrate_orders_optional_columns() -> None:
             pass
 
 
-_migrate_orders_optional_columns()
+if _should_run_import_migrations():
+    _migrate_orders_optional_columns()
 
 
 def _migrate_products_optional_columns() -> None:
@@ -206,7 +228,8 @@ def _migrate_products_optional_columns() -> None:
                 pass
 
 
-_migrate_products_optional_columns()
+if _should_run_import_migrations():
+    _migrate_products_optional_columns()
 
 
 def get_db():
