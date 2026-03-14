@@ -1937,11 +1937,37 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                                 continue
             except Exception:
                 consumos_disk = {}
+            # Deterministic lock order to reduce deadlocks under high concurrency.
+            stock_items_sorted = []
             for it in stock_items:
                 try:
                     pid = int(it.get('id'))
                 except Exception:
                     pid = None
+                stock_items_sorted.append((pid, it))
+            stock_items_sorted.sort(key=lambda x: (x[0] is None, x[0] if x[0] is not None else 0))
+
+            product_ids = [pid for pid, _ in stock_items_sorted if pid is not None]
+            prod_rows = {}
+            if product_ids:
+                try:
+                    rows = (
+                        db.query(models.Product)
+                        .filter(models.Product.id.in_(product_ids))
+                        .order_by(models.Product.id)
+                        .with_for_update()
+                        .all()
+                    )
+                except Exception:
+                    rows = (
+                        db.query(models.Product)
+                        .filter(models.Product.id.in_(product_ids))
+                        .order_by(models.Product.id)
+                        .all()
+                    )
+                prod_rows = {r.id: r for r in rows}
+
+            for pid, it in stock_items_sorted:
                 if pid is None:
                     continue
                 raw_qty = it.get('qty', 1)
@@ -1952,10 +1978,14 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                 if qty <= 0:
                     continue
                 # Lock product row when possible so stock updates remain consistent.
-                try:
-                    prod_row = db.query(models.Product).filter(models.Product.id == pid).with_for_update().first()
-                except Exception:
-                    prod_row = db.query(models.Product).filter(models.Product.id == pid).first()
+                prod_row = prod_rows.get(pid)
+                if not prod_row:
+                    try:
+                        prod_row = db.query(models.Product).filter(models.Product.id == pid).with_for_update().first()
+                    except Exception:
+                        prod_row = db.query(models.Product).filter(models.Product.id == pid).first()
+                    if prod_row:
+                        prod_rows[pid] = prod_row
                 if not prod_row:
                     continue
                 # Kg-based stock is stored/decremented in kilograms.
@@ -2000,6 +2030,10 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
                     take_from_consumos = min(consumos_disk.get(pid, 0), qty)
                 if take_from_consumos > 0:
                     consumed_map[pid] = consumed_map.get(pid, 0) + take_from_consumos
+                    try:
+                        consumos_disk[pid] = max(0, int(consumos_disk.get(pid, 0) or 0) - int(take_from_consumos))
+                    except Exception:
+                        pass
                 remaining = qty - take_from_consumos
                 if remaining <= 0:
                     continue

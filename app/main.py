@@ -37,7 +37,7 @@ from types import SimpleNamespace
 
 from app import models, schemas, crud, utils
 from app.database import engine, Base, get_db, SessionLocal
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError, DBAPIError
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from typing import Tuple
 
@@ -5485,6 +5485,64 @@ async def create_mercadopago_preference(request: Request, payload: schemas.Merca
     )
 
 
+def _is_transient_db_error(exc: Exception) -> bool:
+    """Detect serialization/deadlock/lock-timeout errors that can be retried safely."""
+    try:
+        if isinstance(exc, (OperationalError, DBAPIError)):
+            orig = getattr(exc, 'orig', None)
+            pgcode = getattr(orig, 'pgcode', None) or getattr(orig, 'code', None)
+            if pgcode in {'40001', '40P01', '55P03', '57014'}:
+                return True
+    except Exception:
+        pass
+    msg = str(exc).lower()
+    transient_snippets = (
+        'deadlock detected',
+        'could not serialize access',
+        'serialization failure',
+        'lock timeout',
+        'could not obtain lock',
+        'lock not available',
+        'database is locked',
+        'too many connections',
+    )
+    return any(snippet in msg for snippet in transient_snippets)
+
+
+def _create_order_with_retry(payload: schemas.OrderCreate, token_payload: Optional[dict] = None):
+    max_attempts = int(os.environ.get('ORDER_RETRY_ATTEMPTS') or 3)
+    base_delay = float(os.environ.get('ORDER_RETRY_DELAY_SEC') or 0.08)
+    last_exc = None
+    for attempt in range(1, max_attempts + 1):
+        db = SessionLocal()
+        try:
+            return crud.create_order(db, payload, current_user=token_payload)
+        except HTTPException:
+            # Business rule errors should not be retried.
+            raise
+        except Exception as exc:
+            last_exc = exc
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            if attempt < max_attempts and _is_transient_db_error(exc):
+                try:
+                    logger.warning('create_order transient DB error, retrying (%s/%s): %s', attempt, max_attempts, str(exc)[:200])
+                except Exception:
+                    pass
+                time.sleep(base_delay * attempt)
+                continue
+            raise
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+    if last_exc:
+        raise last_exc
+
+
 @app.post('/orders', response_model=schemas.OrderResponse)
 async def create_order(request: Request, payload: schemas.OrderCreate):
     # Deep logging of payload for debugging (may include PII)
@@ -5667,15 +5725,11 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
         logger.warning(f'[create_order] Error normalizando customer_type, se forzó a mayorista: {e}')
 
     def task():
-        db = SessionLocal()
         try:
-            try:
-                return crud.create_order(db, payload, current_user=token_payload)
-            except Exception as inner_e:
-                logger.exception('Error in create_order DB task: %s', inner_e)
-                raise
-        finally:
-            db.close()
+            return _create_order_with_retry(payload, token_payload=token_payload)
+        except Exception as inner_e:
+            logger.exception('Error in create_order DB task: %s', inner_e)
+            raise
 
     try:
         order = await anyio.to_thread.run_sync(task)
@@ -5857,40 +5911,55 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
                     def _apply_consumos(consumed_map):
                         try:
                             path = os.path.join(CATALOG_DIR, 'consumos.json')
-                            cur = []
-                            if os.path.exists(path):
+                            if not os.path.exists(path):
+                                return None
+                            try:
+                                import fcntl  # Unix-only; best-effort lock
+                            except Exception:
+                                fcntl = None
+                            with open(path, 'r+', encoding='utf-8') as f:
+                                if fcntl:
+                                    try:
+                                        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                                    except Exception:
+                                        pass
                                 try:
-                                    with open(path, 'r', encoding='utf-8') as f:
-                                        cur = json.load(f) or []
+                                    f.seek(0)
+                                    cur = json.load(f) or []
                                 except Exception:
                                     cur = []
-                            # Build map of existing entries
-                            emap = { int(c.get('id')): c for c in cur }
-                            changed = False
-                            for pid_s, delta in consumed_map.items():
-                                try:
-                                    pid = int(pid_s)
-                                except Exception:
-                                    continue
-                                if pid not in emap:
-                                    continue
-                                try:
-                                    curqty = int(emap[pid].get('qty', 0) or 0)
-                                except Exception:
-                                    curqty = 0
-                                newqty = max(0, curqty - int(delta or 0))
-                                if newqty <= 0:
-                                    del emap[pid]
-                                    changed = True
-                                else:
-                                    emap[pid]['qty'] = newqty
-                                    changed = True
-                            if changed:
-                                new_list = list(emap.values())
-                                with open(path, 'w', encoding='utf-8') as f:
-                                    json.dump(new_list, f, ensure_ascii=False, indent=2)
-                                return new_list
-                            return None
+                                # Build map of existing entries
+                                emap = { int(c.get('id')): c for c in cur }
+                                changed = False
+                                for pid_s, delta in consumed_map.items():
+                                    try:
+                                        pid = int(pid_s)
+                                    except Exception:
+                                        continue
+                                    if pid not in emap:
+                                        continue
+                                    try:
+                                        curqty = int(emap[pid].get('qty', 0) or 0)
+                                    except Exception:
+                                        curqty = 0
+                                    newqty = max(0, curqty - int(delta or 0))
+                                    if newqty <= 0:
+                                        del emap[pid]
+                                        changed = True
+                                    else:
+                                        emap[pid]['qty'] = newqty
+                                        changed = True
+                                if changed:
+                                    new_list = list(emap.values())
+                                    try:
+                                        f.seek(0)
+                                        f.truncate()
+                                        json.dump(new_list, f, ensure_ascii=False, indent=2)
+                                        f.flush()
+                                    except Exception:
+                                        pass
+                                    return new_list
+                                return None
                         except Exception:
                             return None
                     new_consumos = await anyio.to_thread.run_sync(lambda: _apply_consumos(consumed))

@@ -13,7 +13,7 @@ from app.database import engine
 from sqlalchemy import inspect
 
 COLS = [
-    ("status", "VARCHAR(50) DEFAULT 'nuevo'"),
+    ("status", "VARCHAR(50) DEFAULT 'recibido'"),
     ("customer_type", "VARCHAR(50) DEFAULT 'mayorista'"),
     ("user_id", "INTEGER"),
     ("user_full_name", "VARCHAR(200)"),
@@ -21,6 +21,8 @@ COLS = [
     ("user_barrio", "VARCHAR(200)"),
     ("user_calle", "VARCHAR(200)"),
     ("user_numeracion", "VARCHAR(100)"),
+    ("user_postal_code", "VARCHAR(20)"),
+    ("user_department", "VARCHAR(120)"),
     ("_token_received", "BOOLEAN"),
     ("_token_preview", "TEXT"),
     ("source", "VARCHAR(50) DEFAULT 'web'"),

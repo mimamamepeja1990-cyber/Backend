@@ -236,6 +236,7 @@ const salesOrders30El = document.getElementById('salesOrders30');
 const salesRevenue30El = document.getElementById('salesRevenue30');
 const salesAvgTicket30El = document.getElementById('salesAvgTicket30');
 const salesChartCanvas = document.getElementById('salesChart');
+const dashboardAlertsWrap = document.querySelector('.dashboard-alerts');
 const alertLowStockEl = document.getElementById('alertLowStock');
 const alertOrdersUnseenEl = document.getElementById('alertOrdersUnseen');
 const alertOrdersUnpreparedEl = document.getElementById('alertOrdersUnprepared');
@@ -474,7 +475,8 @@ function renderSalesStats(stats){
             yAxisID: 'y',
             borderColor: '#0a2240',
             backgroundColor: 'rgba(10,34,64,0.14)',
-            pointRadius: 0,
+            pointRadius: 2,
+            pointHoverRadius: 4,
             tension: 0.35,
             fill: true,
           },
@@ -483,8 +485,9 @@ function renderSalesStats(stats){
       options: {
         responsive: true,
         maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
         plugins: {
-          legend: { position: 'bottom' },
+          legend: { position: 'bottom', labels: { boxWidth: 10, boxHeight: 10 } },
           tooltip: {
             callbacks: {
               title: (items) => {
@@ -506,6 +509,10 @@ function renderSalesStats(stats){
           }
         },
         scales: {
+          x: {
+            grid: { display: false },
+            ticks: { maxRotation: 0, autoSkip: true }
+          },
           y: {
             position: 'left',
             beginAtZero: true,
@@ -1799,12 +1806,23 @@ async function refreshRetailPrices(){
   }
 }
 
+function updateDashboardAlertsVisibility(){
+  if (!dashboardAlertsWrap) return;
+  try{
+    const items = Array.from(dashboardAlertsWrap.querySelectorAll('.alert-item'));
+    const anyVisible = items.some(it => !it.classList.contains('hidden'));
+    dashboardAlertsWrap.classList.toggle('hidden', !anyVisible);
+  }catch(_){ }
+}
+
 function updateAlertItem(el, label, count){
   if (!el) return;
   const num = Number(count);
   const safeCount = Number.isFinite(num) ? num : 0;
   el.textContent = `⚠ ${label}: ${formatNumber(safeCount)}`;
+  el.classList.toggle('hidden', safeCount === 0);
   el.classList.toggle('alert-ok', safeCount === 0);
+  updateDashboardAlertsVisibility();
 }
 
 function getProductStockValue(p){

@@ -186,7 +186,7 @@
 }
 *{box-sizing:border-box}
 html,body{height:100%}
-body{font-family:"Space Grotesk",ui-sans-serif,system-ui,Arial;color:var(--text);background:var(--bg);margin:0}
+body{font-family:"Manrope",ui-sans-serif,system-ui,Arial;color:var(--text);background:var(--bg);margin:0}
 body.sidebar-open{overflow:hidden}
 .app{display:flex;min-height:100vh}
 .sidebar{
@@ -370,7 +370,8 @@ th.col-select input, td.col-select input{width:16px; height:16px}
 .alert-item{background:#fff7ed;border:1px solid rgba(242,107,56,0.25);color:#9a3412;padding:10px 12px;border-radius:12px;font-weight:700;box-shadow:0 4px 12px rgba(2,6,23,0.04)}
 .alert-item.alert-ok{background:#f8fafc;border-color:rgba(148,163,184,0.35);color:#475569}
 .charts{margin-top:18px;display:grid;grid-template-columns:repeat(auto-fit, minmax(320px, 1fr));gap:16px;align-items:stretch}
-.chart-card{background:var(--card);padding:14px;border-radius:12px;box-shadow:0 6px 20px rgba(11,15,28,0.06);display:flex;flex-direction:column;align-items:center;min-height:240px;max-width:none}
+.chart-card{background:linear-gradient(180deg,#fff,#f8fafc);padding:16px;border-radius:14px;border:1px solid rgba(15,23,42,0.06);box-shadow:0 10px 30px rgba(11,15,28,0.08);display:flex;flex-direction:column;align-items:center;min-height:240px;max-width:none}
+.chart-card h4{margin:0 0 6px;font-size:15px;color:var(--muted);letter-spacing:.2px}
 .chart-card canvas{display:block;width:100%;max-width:520px;height:220px;max-height:260px}
 @media (max-width:700px){ .chart-card{max-width:260px;min-height:160px} .chart-card canvas{max-width:220px;height:160px;max-height:180px} }
 /* prevent chart from forcing very large layout; clip overflow if something goes wrong */

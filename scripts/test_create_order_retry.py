@@ -47,7 +47,7 @@ class _FakeConnection:
                 int(self._session._last_id or 1),
                 self._session._last_items_json or "[]",
                 float(self._session._last_total or 0.0),
-                "nuevo",
+                "recibido",
                 "2026-01-01T00:00:00",
             )
             return _FakeExecResult(row=row)
