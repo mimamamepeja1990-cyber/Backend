@@ -73,11 +73,22 @@ else:
 # Use `str(DB_PATH)` to ensure a proper path string is embedded in the sqlite URL.
 SQLALCHEMY_DATABASE_URL = os.environ.get('DATABASE_URL') or f"sqlite:///{str(DB_PATH)}"
 
-# For sqlite we need the special connect arg; for other DBs (e.g. postgres) do not pass it.
+# For sqlite we need the special connect arg; for other DBs (e.g. postgres) tune pool defaults.
 if SQLALCHEMY_DATABASE_URL.startswith('sqlite'):
     engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={'check_same_thread': False})
 else:
-    engine = create_engine(SQLALCHEMY_DATABASE_URL)
+    pool_size = int(os.environ.get('DB_POOL_SIZE') or 15)
+    max_overflow = int(os.environ.get('DB_MAX_OVERFLOW') or 30)
+    pool_timeout = int(os.environ.get('DB_POOL_TIMEOUT') or 60)
+    pool_recycle = int(os.environ.get('DB_POOL_RECYCLE') or 1800)
+    engine = create_engine(
+        SQLALCHEMY_DATABASE_URL,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+        pool_timeout=pool_timeout,
+        pool_recycle=pool_recycle,
+        pool_pre_ping=True,
+    )
 
 
 SessionLocal = sessionmaker(
