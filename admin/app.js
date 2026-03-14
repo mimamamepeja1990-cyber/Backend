@@ -12,6 +12,9 @@ document.querySelectorAll('.sidebar nav a[data-section]').forEach(link => {
     if (this.getAttribute('data-section') === 'dashboard') {
       try{ refreshSalesStats({ force: false, quiet: true }); }catch(_){ }
     }
+    if (this.getAttribute('data-section') === 'customers') {
+      try{ refreshCustomers(false); }catch(_){ }
+    }
     // On mobile, close the sidebar after navigation
     try{
       const sidebar = document.querySelector('.sidebar');
@@ -1891,6 +1894,7 @@ document.querySelectorAll('.sidebar nav a').forEach(a => a.onclick = () => {
     'promo-images': 'Imágenes Promocionales',
     'filters': 'Filtros',
     'orders': 'Pedidos',
+    'customers': 'Clientes',
     'preparations': 'Preparaciones',
   };
   document.getElementById('title').textContent = sectionTitles[a.dataset.section] || 'Administración';
@@ -1901,6 +1905,7 @@ document.querySelectorAll('.sidebar nav a').forEach(a => a.onclick = () => {
   try{ if(a.dataset.section === 'promo-images') fetchPromoImages(); }catch(e){ console.warn('fetchPromoImages guard failed', e); }
   try{ if(a.dataset.section === 'retail-prices') refreshRetailPrices(); }catch(e){ console.warn('refreshRetailPrices guard failed', e); }
   try{ if(a.dataset.section === 'preparations') refreshPreparations(false); }catch(e){ console.warn('refreshPreparations guard failed', e); }
+  try{ if(a.dataset.section === 'customers') refreshCustomers(false); }catch(e){ console.warn('refreshCustomers guard failed', e); }
 });
 
 // Theme toggle
@@ -2429,11 +2434,12 @@ const addFilterBtn = document.getElementById('addFilterBtn');
 const importFiltersBtn = document.getElementById('importFiltersBtn');
 const filtersTableBody = document.querySelector('#filtersTable tbody');
 
-async function fetchOrders(q = '', date = '', source = ''){
+async function fetchOrders(q = '', date = '', source = '', limit = ''){
   const params = new URLSearchParams();
   if(q) params.append('q', q);
   if(date) params.append('date', date);
   if(source) params.append('source', source);
+  if(limit) params.append('limit', String(limit));
   const url = `${API_BASE}/orders` + (params.toString() ? ('?'+params.toString()) : '');
   try{
     // Prevent browser caching (304) from returning stale snapshots for orders
@@ -3453,6 +3459,276 @@ function getOrderItemsSummary(order){
   }catch(_){ return 'Sin items'; }
 }
 
+function ensureCustomersMonthDefault(){
+  if (!customersMonthInput) return;
+  if (customersMonthInput.value) return;
+  const now = new Date();
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  customersMonthInput.value = `${now.getFullYear()}-${mm}`;
+}
+
+function getMonthRangeFromInput(value){
+  const raw = String(value || '').trim();
+  let year = 0;
+  let monthIndex = 0;
+  if (/^\d{4}-\d{2}$/.test(raw)){
+    const parts = raw.split('-');
+    year = Number(parts[0]);
+    monthIndex = Math.max(0, Math.min(11, Number(parts[1]) - 1));
+  } else {
+    const now = new Date();
+    year = now.getFullYear();
+    monthIndex = now.getMonth();
+  }
+  const start = new Date(year, monthIndex, 1, 0, 0, 0, 0);
+  const end = new Date(year, monthIndex + 1, 1, 0, 0, 0, 0);
+  const key = `${year}-${String(monthIndex + 1).padStart(2, '0')}`;
+  let label = '';
+  try{
+    label = start.toLocaleDateString('es-AR', { month: 'long', year: 'numeric' });
+  }catch(_){
+    label = key;
+  }
+  return { start, end, key, label };
+}
+
+function getOrderTotalValue(order){
+  try{
+    const raw = order && (order.total ?? order.total_amount ?? order.amount ?? order.price_total);
+    const num = Number(raw);
+    return Number.isFinite(num) ? num : 0;
+  }catch(_){ return 0; }
+}
+
+function getCustomerIdentity(order){
+  const nameRaw = getOrderPrimaryName(order);
+  const emailRaw = getOrderEmail(order);
+  const userIdRaw = order && order.user_id ? String(order.user_id).trim() : '';
+  const name = (nameRaw && nameRaw !== '—') ? String(nameRaw).trim() : '';
+  const email = (emailRaw && emailRaw !== '—') ? String(emailRaw).trim() : '';
+  const isAnonymous = !userIdRaw && !email && !name;
+  const displayName = name || 'Cliente sin identificar';
+  let key = '';
+  if (userIdRaw) key = `id:${userIdRaw}`;
+  else if (email) key = `email:${email.toLowerCase()}`;
+  else if (name) key = `name:${name.toLowerCase()}`;
+  else key = `anon:${String(order && order.id || Math.random())}`;
+  return { key, name: displayName, email, isAnonymous };
+}
+
+function getOrderItemQtyNumber(it){
+  try{
+    if (!it || typeof it !== 'object') return 1;
+    const meta = (it.meta && typeof it.meta === 'object') ? it.meta : {};
+    const raw = (typeof it.qty !== 'undefined') ? it.qty
+      : (typeof it.cantidad !== 'undefined') ? it.cantidad
+      : (typeof it.quantity !== 'undefined') ? it.quantity
+      : (typeof meta.qty !== 'undefined') ? meta.qty
+      : (typeof meta.quantity !== 'undefined') ? meta.quantity
+      : 1;
+    const num = Number(raw);
+    return Number.isFinite(num) && num > 0 ? num : 1;
+  }catch(_){ return 1; }
+}
+
+function buildCustomerStats(orders, monthInfo){
+  const list = [];
+  if (!Array.isArray(orders) || !monthInfo) return { list, activeCount: 0, monthOrders: 0, monthRevenue: 0 };
+  const startMs = monthInfo.start.getTime();
+  const endMs = monthInfo.end.getTime();
+  const map = new Map();
+  let monthOrders = 0;
+  let monthRevenue = 0;
+  orders.forEach((order) => {
+    const ts = getOrderCreatedTimestamp(order);
+    if (!ts) return;
+    const identity = getCustomerIdentity(order);
+    if (identity.isAnonymous) return;
+    let entry = map.get(identity.key);
+    if (!entry){
+      entry = {
+        key: identity.key,
+        name: identity.name,
+        email: identity.email,
+        orders_month: 0,
+        total_month: 0,
+        orders_total: 0,
+        last_order_ts: 0,
+        product_counts: {},
+      };
+      map.set(identity.key, entry);
+    } else {
+      if ((!entry.name || entry.name === 'Cliente sin identificar') && identity.name) entry.name = identity.name;
+      if (!entry.email && identity.email) entry.email = identity.email;
+    }
+    entry.orders_total += 1;
+    if (ts > entry.last_order_ts) entry.last_order_ts = ts;
+    if (ts >= startMs && ts < endMs){
+      entry.orders_month += 1;
+      const totalVal = getOrderTotalValue(order);
+      entry.total_month += totalVal;
+      monthOrders += 1;
+      monthRevenue += totalVal;
+      const itemsArr = safeParseItems(order && order.items ? order.items : []);
+      if (Array.isArray(itemsArr) && itemsArr.length){
+        itemsArr.forEach((it) => {
+          const name = getOrderItemPlainName(it) || getOrderItemPromoName(it) || (typeof it === 'string' ? String(it) : '');
+          if (!name) return;
+          const qty = getOrderItemQtyNumber(it);
+          entry.product_counts[name] = (entry.product_counts[name] || 0) + qty;
+        });
+      }
+    }
+  });
+  map.forEach((entry) => {
+    let topProduct = '—';
+    let topQty = 0;
+    Object.keys(entry.product_counts || {}).forEach((name) => {
+      const qty = Number(entry.product_counts[name] || 0);
+      if (qty > topQty){
+        topQty = qty;
+        topProduct = name;
+      }
+    });
+    entry.top_product = topProduct;
+    list.push(entry);
+  });
+  list.sort((a, b) => {
+    if (b.orders_month !== a.orders_month) return b.orders_month - a.orders_month;
+    if (b.total_month !== a.total_month) return b.total_month - a.total_month;
+    return b.last_order_ts - a.last_order_ts;
+  });
+  const activeCount = list.filter(c => c.orders_month > 0).length;
+  return { list, activeCount, monthOrders, monthRevenue };
+}
+
+function applyCustomerFilters(list){
+  let filtered = Array.isArray(list) ? list.slice() : [];
+  const q = customersSearchInput ? String(customersSearchInput.value || '').trim().toLowerCase() : '';
+  if (q){
+    filtered = filtered.filter((entry) => {
+      const name = String(entry.name || '').toLowerCase();
+      const email = String(entry.email || '').toLowerCase();
+      const top = String(entry.top_product || '').toLowerCase();
+      return name.includes(q) || email.includes(q) || top.includes(q);
+    });
+  }
+  if (customersActiveOnlyToggle && customersActiveOnlyToggle.checked){
+    filtered = filtered.filter(entry => Number(entry.orders_month || 0) > 0);
+  }
+  return filtered;
+}
+
+function updateCustomersSummary(stats){
+  try{ if (customersActiveCountEl) customersActiveCountEl.textContent = formatNumber(stats.activeCount || 0); }catch(_){ }
+  try{ if (customersOrdersCountEl) customersOrdersCountEl.textContent = formatNumber(stats.monthOrders || 0); }catch(_){ }
+  try{ if (customersRevenueTotalEl) customersRevenueTotalEl.textContent = formatMoney(stats.monthRevenue || 0); }catch(_){ }
+}
+
+function renderCustomers(list, monthInfo, meta){
+  if (!customersTableBody) return;
+  customersTableBody.innerHTML = '';
+  const filtered = applyCustomerFilters(list);
+  if (!filtered.length){
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td colspan="5" class="empty-note">No hay clientes para mostrar.</td>';
+    customersTableBody.appendChild(tr);
+  } else {
+    filtered.forEach((entry) => {
+      const tr = document.createElement('tr');
+      if (!entry.orders_month) tr.classList.add('customer-inactive');
+      const lastLabel = entry.last_order_ts
+        ? new Date(entry.last_order_ts).toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', year: '2-digit' })
+        : '—';
+      const nameHtml = `<div class="customer-name">${escapeHtml(entry.name || '—')}</div>` +
+        (entry.email ? `<div class="customer-meta">${escapeHtml(entry.email)}</div>` : '');
+      tr.innerHTML = `
+        <td>${nameHtml}</td>
+        <td>${formatNumber(entry.orders_month || 0)}</td>
+        <td>${formatMoney(entry.total_month || 0)}</td>
+        <td class="customer-top-product">${escapeHtml(entry.top_product || '—')}</td>
+        <td>${escapeHtml(lastLabel)}</td>
+      `;
+      customersTableBody.appendChild(tr);
+    });
+  }
+  if (customersNoteEl && monthInfo){
+    const label = monthInfo.label ? (monthInfo.label.charAt(0).toUpperCase() + monthInfo.label.slice(1)) : monthInfo.key;
+    const totalOrders = meta && Number(meta.totalOrders || 0) ? Number(meta.totalOrders || 0) : 0;
+    const limit = meta && Number(meta.limit || 0) ? Number(meta.limit || 0) : 0;
+    const truncated = limit && totalOrders >= limit;
+    const activeLabel = formatNumber((meta && meta.activeCount) ? meta.activeCount : (list || []).filter(c => c.orders_month > 0).length);
+    let note = `Mes: ${label} · Clientes activos: ${activeLabel} · Pedidos analizados: ${formatNumber(totalOrders)}`;
+    if (truncated) note += ` (límite ${limit})`;
+    customersNoteEl.textContent = note;
+  }
+}
+
+function renderCustomersFromCache(){
+  if (!customersSection) return;
+  ensureCustomersMonthDefault();
+  const monthInfo = getMonthRangeFromInput(customersMonthInput ? customersMonthInput.value : '');
+  const activeCount = Array.isArray(lastCustomersBase)
+    ? lastCustomersBase.filter(c => Number(c.orders_month || 0) > 0).length
+    : 0;
+  renderCustomers(lastCustomersBase || [], monthInfo, {
+    totalOrders: lastCustomersOrdersRaw.length,
+    limit: lastCustomersOrdersMeta.limit,
+    activeCount,
+  });
+}
+
+function recomputeCustomersFromOrders(){
+  if (!lastCustomersOrdersRaw || !lastCustomersOrdersRaw.length){
+    refreshCustomers(true);
+    return;
+  }
+  ensureCustomersMonthDefault();
+  const monthInfo = getMonthRangeFromInput(customersMonthInput ? customersMonthInput.value : '');
+  const stats = buildCustomerStats(lastCustomersOrdersRaw, monthInfo);
+  lastCustomersBase = stats.list;
+  lastCustomersMonthKey = monthInfo.key;
+  updateCustomersSummary(stats);
+  renderCustomers(stats.list, monthInfo, {
+    totalOrders: lastCustomersOrdersRaw.length,
+    limit: lastCustomersOrdersMeta.limit,
+    activeCount: stats.activeCount,
+  });
+}
+
+async function refreshCustomers(force = true){
+  try{
+    if (!customersSection) return;
+    if (!force && Array.isArray(lastCustomersOrdersRaw) && lastCustomersOrdersRaw.length){
+      recomputeCustomersFromOrders();
+      return;
+    }
+    ensureCustomersMonthDefault();
+    const monthInfo = getMonthRangeFromInput(customersMonthInput ? customersMonthInput.value : '');
+    const limit = 1200;
+    if (customersNoteEl) customersNoteEl.textContent = 'Cargando clientes...';
+    const orders = await fetchOrders('', '', 'web', limit);
+    if (!Array.isArray(orders)){
+      if (customersNoteEl) customersNoteEl.textContent = 'No se pudieron cargar los pedidos.';
+      return;
+    }
+    lastCustomersOrdersRaw = orders;
+    lastCustomersOrdersMeta = { totalOrders: orders.length, limit };
+    const stats = buildCustomerStats(orders, monthInfo);
+    lastCustomersBase = stats.list;
+    lastCustomersMonthKey = monthInfo.key;
+    updateCustomersSummary(stats);
+    renderCustomers(stats.list, monthInfo, {
+      totalOrders: orders.length,
+      limit,
+      activeCount: stats.activeCount,
+    });
+  }catch(e){
+    console.warn('refreshCustomers failed', e);
+    if (customersNoteEl) customersNoteEl.textContent = 'No se pudieron cargar los clientes.';
+  }
+}
+
 function getPreparationItemsListHtml(order){
   try{
     const itemsArr = safeParseItems(order && order.items ? order.items : []);
@@ -4044,6 +4320,21 @@ const ordersSection = document.getElementById('orders');
 const tabWebBtn = document.getElementById('tab_web');
 const badgeWeb = document.getElementById('badge_web');
 const clearOrderCacheBtn = document.getElementById('clearOrderCache');
+const customersSection = document.getElementById('customers');
+const customersTableBody = document.querySelector('#customersTable tbody');
+const customersMonthInput = document.getElementById('customersMonth');
+const customersSearchInput = document.getElementById('customersSearch');
+const customersActiveOnlyToggle = document.getElementById('customersActiveOnly');
+const refreshCustomersBtn = document.getElementById('refreshCustomersBtn');
+const customersActiveCountEl = document.getElementById('customersActiveCount');
+const customersOrdersCountEl = document.getElementById('customersOrdersCount');
+const customersRevenueTotalEl = document.getElementById('customersRevenueTotal');
+const customersNoteEl = document.getElementById('customersNote');
+
+let lastCustomersBase = [];
+let lastCustomersMonthKey = '';
+let lastCustomersOrdersMeta = { totalOrders: 0, limit: 0 };
+let lastCustomersOrdersRaw = [];
 
 function showTab(){
   try{
@@ -4056,6 +4347,11 @@ function showTab(){
 
 if(tabWebBtn) tabWebBtn.addEventListener('click', ()=> showTab());
 if(clearOrderCacheBtn) clearOrderCacheBtn.addEventListener('click', ()=>{ try{ localStorage.removeItem('admin_local_orders_v1'); window.__localOrderRows = {}; window.__localOrderIds = new Set(); showToast('Cache local de pedidos limpiada', 'info'); refreshOrders('web'); }catch(e){ console.warn('clearOrderCache failed', e); showToast('No se pudo limpiar cache','error'); } });
+if(customersMonthInput) customersMonthInput.addEventListener('change', ()=> recomputeCustomersFromOrders());
+if(customersSearchInput) customersSearchInput.addEventListener('input', ()=> renderCustomersFromCache());
+if(customersActiveOnlyToggle) customersActiveOnlyToggle.addEventListener('change', ()=> renderCustomersFromCache());
+if(refreshCustomersBtn) refreshCustomersBtn.addEventListener('click', ()=> refreshCustomers(true));
+ensureCustomersMonthDefault();
 
 function setOrdersCustomerType(type){
   currentOrderCustomerType = normalizeOrderCustomerType(type);

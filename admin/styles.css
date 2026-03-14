@@ -378,6 +378,14 @@ tr.updating td{opacity:0.8;transition:opacity .12s}
 .markSeenBtn.updating{opacity:0.7}
 .controls{display:flex;gap:8px;margin-bottom:10px}
 .controls input, .controls select{padding:10px;border-radius:8px;border:1px solid #e6e9ef;background:#fff}
+.section-subtle{color:var(--muted);font-size:14px;margin:-4px 0 12px}
+.checkbox-inline{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
+.checkbox-inline input{accent-color:var(--accent)}
+.checkbox-inline span{line-height:1.2}
+.customers-table-note{color:var(--muted);font-size:12px;margin-top:8px;display:block}
+#customersTable tbody tr.customer-inactive{opacity:0.65}
+#customersTable .customer-name{font-weight:700}
+#customersTable .customer-meta{color:var(--muted);font-size:12px}
 .table-wrap{background:var(--card);border-radius:10px;padding:6px 6px 18px 6px;box-shadow:0 4px 16px rgba(11,15,28,0.04)}
 table{width:100%;border-collapse:separate;border-spacing:0 10px}
 th,td{padding:14px 12px;text-align:left;border-bottom:0}

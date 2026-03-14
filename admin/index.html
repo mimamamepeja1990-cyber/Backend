@@ -35,6 +35,7 @@
         <a data-section="promo-images">Imágenes Promocionales</a>
         <a data-section="filters">Filtros</a>
         <a data-section="orders">Pedidos</a>
+        <a data-section="customers">Clientes</a>
         <a data-section="preparations">Preparaciones</a>
       </nav>
       <div class="footer-controls">
@@ -291,6 +292,49 @@
           </table>
         </div>
         </section>
+      </section>
+
+      <section id="customers" class="section hidden">
+        <h2>Clientes</h2>
+        <p class="section-subtle">Resumen mensual de consumo por cliente a partir de los pedidos registrados.</p>
+        <div class="controls center">
+          <input id="customersMonth" type="month" />
+          <input id="customersSearch" placeholder="Buscar cliente por nombre o email..." />
+          <label class="checkbox-inline">
+            <input id="customersActiveOnly" type="checkbox" />
+            <span>Solo con pedidos este mes</span>
+          </label>
+          <button id="refreshCustomersBtn" class="btn">Actualizar clientes</button>
+        </div>
+        <div class="cards">
+          <div class="card">
+            <h3>Clientes activos</h3>
+            <div id="customersActiveCount" class="stat">—</div>
+          </div>
+          <div class="card">
+            <h3>Pedidos del mes</h3>
+            <div id="customersOrdersCount" class="stat">—</div>
+          </div>
+          <div class="card">
+            <h3>Total comprado</h3>
+            <div id="customersRevenueTotal" class="stat">—</div>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table id="customersTable">
+            <thead>
+              <tr>
+                <th>Cliente</th>
+                <th>Pedidos este mes</th>
+                <th>Total comprado</th>
+                <th>Producto más comprado</th>
+                <th>Último pedido</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <small id="customersNote" class="customers-table-note"></small>
       </section>
 
       <section id="preparations" class="section hidden">
