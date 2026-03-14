@@ -1078,7 +1078,11 @@ def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate,
         # Enforce SKU uniqueness (best-effort) when code changes.
         if 'code' in updates:
             normalized = _normalize_product_code_value(updates.get('code'))
-            if normalized:
+            try:
+                current_norm = _normalize_product_code_value(getattr(obj, 'code', None))
+            except Exception:
+                current_norm = None
+            if normalized and normalized != current_norm:
                 conflict = _find_code_conflict(db, normalized, exclude_id=product_id)
                 if conflict:
                     raise HTTPException(status_code=409, detail=f"Código/SKU duplicado: {normalized} (existe en id={conflict.get('id')})")
@@ -1122,6 +1126,7 @@ def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate,
             updates['cost'] = float(updates['cost']) if updates['cost'] is not None else None
         except Exception:
             updates.pop('cost', None)
+    current_code_norm = None
     if 'code' in updates:
         try:
             updates['code'] = str(updates['code']).strip() if updates['code'] is not None else None
@@ -1129,6 +1134,13 @@ def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate,
                 updates['code'] = None
         except Exception:
             updates.pop('code', None)
+    try:
+        if isinstance(obj, dict):
+            current_code_norm = _normalize_product_code_value(obj.get('code'))
+        else:
+            current_code_norm = _normalize_product_code_value(getattr(obj, 'code', None))
+    except Exception:
+        current_code_norm = None
     if 'brand' in updates:
         try:
             updates['brand'] = str(updates['brand']).strip() if updates['brand'] is not None else None
@@ -1146,9 +1158,13 @@ def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate,
 
     # Enforce SKU uniqueness (best-effort) when code changes.
     if updates.get('code'):
-        conflict = _find_code_conflict(db, updates['code'], exclude_id=product_id)
-        if conflict:
-            raise HTTPException(status_code=409, detail=f"Código/SKU duplicado: {updates['code']} (existe en id={conflict.get('id')})")
+        normalized_code = _normalize_product_code_value(updates['code'])
+        if normalized_code:
+            updates['code'] = normalized_code
+        if normalized_code and normalized_code != current_code_norm:
+            conflict = _find_code_conflict(db, normalized_code, exclude_id=product_id)
+            if conflict:
+                raise HTTPException(status_code=409, detail=f"Código/SKU duplicado: {normalized_code} (existe en id={conflict.get('id')})")
 
     set_cols = [k for k in updates.keys() if (not existing) or (k in existing)]
     if not set_cols:
