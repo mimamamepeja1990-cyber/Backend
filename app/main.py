@@ -66,7 +66,7 @@ async def push_snapshot_to_gist(content: str) -> bool:
         logger.warning('push_snapshot_to_gist failed: %s', e)
         return False
 
-async def fetch_snapshot_from_gist() -> Optional[str]:
+def fetch_snapshot_from_gist() -> Optional[str]:
     """Fetch the products.json content from the configured Gist (if available)."""
     if GIST_ID:
         url = f"https://api.github.com/gists/{GIST_ID}"
@@ -91,7 +91,7 @@ async def fetch_snapshot_from_gist() -> Optional[str]:
     return None
 
 
-async def fetch_promotions_from_gist() -> Optional[str]:
+def fetch_promotions_from_gist() -> Optional[str]:
     """Fetch the promotions.json content from the configured Gist (if available)."""
     if GIST_ID:
         url = f"https://api.github.com/gists/{GIST_ID}"
@@ -192,11 +192,33 @@ def _safe_engine_fetchone(sql, params=None):
             logger.exception('safe_engine_fetchone retry failed: %s', e2)
             return None
 
-# -------------------------------------------------------------------
-# LIFESPAN (startup / shutdown)
-# -------------------------------------------------------------------
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+def _is_truthy(value: Optional[str]) -> bool:
+    try:
+        return str(value or '').strip().lower() in {'1', 'true', 'yes', 'y', 'on'}
+    except Exception:
+        return False
+
+
+def _running_on_render() -> bool:
+    return bool(
+        os.environ.get('RENDER')
+        or os.environ.get('RENDER_SERVICE_ID')
+        or os.environ.get('RENDER_EXTERNAL_HOSTNAME')
+    )
+
+
+def _startup_skip_enabled() -> bool:
+    return _is_truthy(os.environ.get('SKIP_STARTUP_BOOTSTRAP') or os.environ.get('SKIP_STARTUP'))
+
+
+def _startup_background_enabled() -> bool:
+    if os.environ.get('STARTUP_BACKGROUND') is not None:
+        return _is_truthy(os.environ.get('STARTUP_BACKGROUND'))
+    return _running_on_render()
+
+
+def _startup_bootstrap_sync() -> None:
+    """Run blocking startup tasks in a background thread when desired."""
     # Startup
     Base.metadata.create_all(bind=engine)
 
@@ -429,7 +451,7 @@ async def lifespan(app: FastAPI):
             # try to restore from remote backup (gist or public URL) or from local snapshot before seeding demo data
             restored = False
             try:
-                content = await fetch_snapshot_from_gist()
+                content = fetch_snapshot_from_gist()
                 if content:
                     logger.info('Restoring products from configured backup');
                     items = json.loads(content)
@@ -470,7 +492,7 @@ async def lifespan(app: FastAPI):
         try:
             restored_promos = False
             try:
-                prom_content = await fetch_promotions_from_gist()
+                prom_content = fetch_promotions_from_gist()
                 if prom_content:
                     try:
                         # ensure catalog dir exists
@@ -490,6 +512,34 @@ async def lifespan(app: FastAPI):
     finally:
         db.close()
 
+
+# -------------------------------------------------------------------
+# LIFESPAN (startup / shutdown)
+# -------------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if _startup_skip_enabled():
+        logger.warning('Skipping startup bootstrap (SKIP_STARTUP_BOOTSTRAP enabled).')
+        yield
+        return
+
+    if _startup_background_enabled():
+        logger.info('Running startup bootstrap in background thread.')
+
+        async def _run_background() -> None:
+            try:
+                await asyncio.to_thread(_startup_bootstrap_sync)
+            except Exception:
+                logger.exception('Background startup bootstrap failed')
+
+        try:
+            app.state.startup_task = asyncio.create_task(_run_background())
+        except Exception:
+            asyncio.create_task(_run_background())
+        yield
+        return
+
+    await asyncio.to_thread(_startup_bootstrap_sync)
     yield
     # Shutdown (nada)
 
