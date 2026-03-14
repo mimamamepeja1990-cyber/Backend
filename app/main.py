@@ -4575,7 +4575,20 @@ async def update_product(product_id: int, payload: schemas.ProductUpdate, reques
     def task():
         db = SessionLocal()
         try:
-            return crud.update_product(db, product_id, payload, actor=actor, action='update')
+            prod = crud.update_product(db, product_id, payload, actor=actor, action='update')
+            if isinstance(prod, dict):
+                return prod
+            # Convert ORM instance to plain dict before session closes
+            try:
+                return {k: getattr(prod, k) for k in ('id','code','name','brand','price','price_retail','cost','description','category','image_url','active','stock','min_stock','stock_kg','kg_per_unit','discount','sale_unit','created_at','updated_at') if hasattr(prod, k)}
+            except Exception:
+                try:
+                    return jsonable_encoder(prod)
+                except Exception:
+                    try:
+                        return {'id': getattr(prod, 'id', None)}
+                    except Exception:
+                        return {}
         finally:
             db.close()
 
