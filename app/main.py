@@ -9,6 +9,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 from contextlib import asynccontextmanager
 
 from typing import List, Optional, Dict, Any
@@ -278,6 +279,18 @@ def _startup_bootstrap_sync() -> None:
                     logger.info('Added missing column to orders: %s', col)
                 except Exception as e:
                     logger.warning('Could not add column %s to orders: %s', col, e)
+            try:
+                conn.execute(text("CREATE INDEX IF NOT EXISTS idx_orders_created_at ON orders(created_at);"))
+            except Exception:
+                pass
+            try:
+                conn.execute(text("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);"))
+            except Exception:
+                pass
+            try:
+                conn.execute(text("CREATE INDEX IF NOT EXISTS idx_orders_source ON orders(source);"))
+            except Exception:
+                pass
     except Exception:
         logger.exception('ensure orders columns step failed')
 
@@ -353,6 +366,23 @@ def _startup_bootstrap_sync() -> None:
                     """))
             except Exception as e:
                 logger.warning('Could not backfill stock_kg from stock: %s', e)
+            # Add lightweight indexes for common filters/sorts
+            try:
+                conn.execute(text("CREATE INDEX IF NOT EXISTS idx_products_category ON products(category);"))
+            except Exception:
+                pass
+            try:
+                conn.execute(text("CREATE INDEX IF NOT EXISTS idx_products_active ON products(active);"))
+            except Exception:
+                pass
+            try:
+                conn.execute(text("CREATE INDEX IF NOT EXISTS idx_products_name ON products(name);"))
+            except Exception:
+                pass
+            try:
+                conn.execute(text("CREATE INDEX IF NOT EXISTS idx_products_price ON products(price);"))
+            except Exception:
+                pass
     except Exception:
         logger.exception('ensure products columns step failed')
 
@@ -547,6 +577,7 @@ async def lifespan(app: FastAPI):
 # APP
 # -------------------------------------------------------------------
 app = FastAPI(title="Catálogo API", lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=int(os.environ.get('GZIP_MIN_SIZE') or 1000))
 
 # In-memory cache of recently created order payloads (id -> { payload, ts })
 # Used to surface token previews in the admin list when the DB lacks persisted user_* columns.
@@ -557,6 +588,111 @@ ORDER_PAYLOAD_CACHE_MAX_AGE = 60 * 60 * 2  # keep for 2 hours
 # Used as a fallback if DB status column is missing or update fails.
 ORDER_STATUS_CACHE = {}
 ORDER_STATUS_CACHE_MAX_AGE = 60 * 60 * 24  # keep for 24 hours
+
+# Catalog endpoint caches (short TTL to reduce load during bursts)
+PRODUCTS_CACHE: Dict[Any, Dict[str, Any]] = {}
+PRODUCTS_CACHE_MAX = int(os.environ.get('PRODUCTS_CACHE_MAX') or 200)
+PRODUCTS_CACHE_TTL = float(os.environ.get('PRODUCTS_CACHE_TTL') or 10.0)
+PRODUCTS_CACHE_LIMIT_MAX = int(os.environ.get('PRODUCTS_CACHE_LIMIT_MAX') or 1000)
+PRODUCTS_COUNT_CACHE: Dict[Any, Dict[str, Any]] = {}
+PRODUCTS_COUNT_CACHE_TTL = float(os.environ.get('PRODUCTS_COUNT_CACHE_TTL') or 15.0)
+PROMOTIONS_CACHE: Dict[str, Any] = {'ts': 0.0, 'mtime': None, 'value': None}
+PROMOTIONS_CACHE_TTL = float(os.environ.get('PROMOTIONS_CACHE_TTL') or 15.0)
+
+
+def _cache_get(cache: Dict[Any, Dict[str, Any]], key: Any, ttl: float):
+    try:
+        entry = cache.get(key)
+        if not entry:
+            return None
+        if (time.time() - float(entry.get('ts') or 0)) > ttl:
+            cache.pop(key, None)
+            return None
+        return entry.get('value')
+    except Exception:
+        return None
+
+
+def _cache_set(cache: Dict[Any, Dict[str, Any]], key: Any, value: Any, max_size: int):
+    try:
+        cache[key] = {'value': value, 'ts': time.time()}
+        if len(cache) > max_size:
+            # prune oldest entries
+            ordered = sorted(cache.items(), key=lambda item: item[1].get('ts', 0))
+            for k, _ in ordered[: max(0, len(cache) - max_size)]:
+                cache.pop(k, None)
+    except Exception:
+        pass
+
+
+def _normalize_cache_text(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        return str(value).strip().lower() or None
+    except Exception:
+        return None
+
+
+def _products_cache_key(skip: int, limit: int, q: Optional[str], category: Optional[str], active: Optional[bool], sort: Optional[str]):
+    return (
+        int(skip or 0),
+        int(limit or 0),
+        _normalize_cache_text(q),
+        _normalize_cache_text(category),
+        None if active is None else bool(active),
+        _normalize_cache_text(sort),
+    )
+
+
+def _serialize_products(items: Any) -> List[Dict[str, Any]]:
+    try:
+        return jsonable_encoder(items)  # detach ORM instances
+    except Exception:
+        out = []
+        for it in (items or []):
+            if isinstance(it, dict):
+                out.append(it)
+                continue
+            try:
+                data = {k: v for k, v in vars(it).items() if not k.startswith('_')}
+                out.append(data)
+            except Exception:
+                continue
+        return out
+
+
+def _invalidate_products_cache() -> None:
+    PRODUCTS_CACHE.clear()
+    PRODUCTS_COUNT_CACHE.clear()
+
+
+def _invalidate_promotions_cache() -> None:
+    PROMOTIONS_CACHE.update({'ts': 0.0, 'mtime': None, 'value': None})
+
+
+def _get_promotions_cached() -> List[Dict[str, Any]]:
+    path = os.path.join(CATALOG_DIR, 'promotions.json')
+    try:
+        if not os.path.exists(path):
+            return []
+        mtime = os.path.getmtime(path)
+        now = time.time()
+        cached = PROMOTIONS_CACHE.get('value')
+        if (
+            cached is not None
+            and PROMOTIONS_CACHE.get('mtime') == mtime
+            and (now - float(PROMOTIONS_CACHE.get('ts') or 0)) < PROMOTIONS_CACHE_TTL
+        ):
+            return cached
+        with open(path, 'r', encoding='utf-8') as f:
+            data = _normalize_promotions_payload(json.load(f))
+        PROMOTIONS_CACHE.update({'value': data, 'mtime': mtime, 'ts': now})
+        return data
+    except Exception as e:
+        logger.exception('promotions cache read failed: %s', e)
+        cached = PROMOTIONS_CACHE.get('value')
+        return cached if isinstance(cached, list) else []
 
 def _prune_order_cache():
     try:
@@ -4215,6 +4351,8 @@ async def create_product(payload: schemas.ProductCreate, request: Request):
             await anyio.to_thread.run_sync(write_catalog_snapshot)
         except:
             pass
+
+        _invalidate_products_cache()
         
         return result
     except HTTPException:
@@ -4242,8 +4380,19 @@ def list_products(
     sort: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
+    limit_max = int(os.environ.get('PRODUCTS_LIST_LIMIT_MAX') or 5000)
+    limit = max(1, min(int(limit or 100), limit_max))
+    skip = max(0, int(skip or 0))
+    cache_key = _products_cache_key(skip, limit, q, category, active, sort)
+    cached = _cache_get(PRODUCTS_CACHE, cache_key, PRODUCTS_CACHE_TTL)
+    if cached is not None:
+        return cached
     try:
-        return crud.get_products(db, skip, limit, q, category, active, sort)
+        items = crud.get_products(db, skip, limit, q, category, active, sort)
+        serialized = _serialize_products(items)
+        if limit <= PRODUCTS_CACHE_LIMIT_MAX:
+            _cache_set(PRODUCTS_CACHE, cache_key, serialized, PRODUCTS_CACHE_MAX)
+        return serialized
     except Exception:
         logger.exception('list_products ORM failed, attempting raw fallback')
         # Try raw fallback select to avoid failing when DB lacks mapped columns
@@ -4289,6 +4438,8 @@ def list_products(
             for row in rows:
                 objd = {cols[i]: row[i] for i in range(len(cols))}
                 result.append(objd)
+            if limit <= PRODUCTS_CACHE_LIMIT_MAX:
+                _cache_set(PRODUCTS_CACHE, cache_key, result, PRODUCTS_CACHE_MAX)
             return result
         except Exception:
             logger.exception('list_products raw fallback failed')
@@ -4304,10 +4455,21 @@ def list_products_paged(
     sort: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
-    limit = max(1, min(int(limit or 50), 200))
+    limit_max = int(os.environ.get('PRODUCTS_LIST_LIMIT_MAX') or 5000)
+    limit = max(1, min(int(limit or 50), min(200, limit_max)))
     skip = max(0, int(skip or 0))
-    total = crud.count_products(db, q=q, category=category, active=active)
-    items = crud.get_products(db, skip=skip, limit=limit, q=q, category=category, active=active, sort=sort)
+    count_key = (_normalize_cache_text(q), _normalize_cache_text(category), None if active is None else bool(active))
+    total = _cache_get(PRODUCTS_COUNT_CACHE, count_key, PRODUCTS_COUNT_CACHE_TTL)
+    if total is None:
+        total = crud.count_products(db, q=q, category=category, active=active)
+        _cache_set(PRODUCTS_COUNT_CACHE, count_key, int(total or 0), PRODUCTS_CACHE_MAX)
+    items_key = _products_cache_key(skip, limit, q, category, active, sort)
+    cached_items = _cache_get(PRODUCTS_CACHE, items_key, PRODUCTS_CACHE_TTL)
+    if cached_items is None:
+        items_raw = crud.get_products(db, skip=skip, limit=limit, q=q, category=category, active=active, sort=sort)
+        cached_items = _serialize_products(items_raw)
+        _cache_set(PRODUCTS_CACHE, items_key, cached_items, PRODUCTS_CACHE_MAX)
+    items = cached_items
     return { 'total': int(total or 0), 'skip': skip, 'limit': limit, 'items': items }
 
 
@@ -4343,6 +4505,7 @@ async def bulk_update_products(payload: List[schemas.ProductBulkUpdateItem], req
         await anyio.to_thread.run_sync(write_catalog_snapshot)
     except Exception:
         pass
+    _invalidate_products_cache()
     return result or {'updated': 0, 'results': []}
 
 
@@ -4440,6 +4603,7 @@ async def update_product(product_id: int, payload: schemas.ProductUpdate, reques
         await anyio.to_thread.run_sync(write_catalog_snapshot)
     except Exception:
         pass
+    _invalidate_products_cache()
     return prod
 
 @app.delete("/products/{product_id}")
@@ -4460,6 +4624,7 @@ async def delete_product(product_id: int, request: Request):
     await anyio.to_thread.run_sync(task)
     await push_event({"action": "deleted", "product": {"id": product_id}})
     await anyio.to_thread.run_sync(write_catalog_snapshot)
+    _invalidate_products_cache()
     return {"detail": "deleted"}
 
 
@@ -4716,10 +4881,7 @@ def write_promotions_snapshot(promos):
 def list_promotions():
     """Return persisted promotions snapshot if present, otherwise return empty list."""
     try:
-        path = os.path.join(CATALOG_DIR, 'promotions.json')
-        if os.path.exists(path):
-            with open(path, 'r', encoding='utf-8') as f:
-                return _normalize_promotions_payload(json.load(f))
+        return _get_promotions_cached()
     except Exception as e:
         logger.exception('list_promotions failed: %s', e)
     return []
@@ -4734,6 +4896,7 @@ def save_promotions(promos: List[Dict[str, Any]]):
         ok = write_promotions_snapshot(normalized_promos)
         if not ok:
             raise HTTPException(status_code=500, detail='failed to write promotions')
+        _invalidate_promotions_cache()
         return { 'detail': 'ok', 'count': len(normalized_promos) }
     except HTTPException:
         raise
