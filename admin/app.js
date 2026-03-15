@@ -493,6 +493,9 @@ const cancelBtn = document.getElementById('cancelBtn');
 const uploadImageBtn = document.getElementById('uploadImageBtn');
 const imageInput = document.getElementById('imageInput');
 const imagePreview = document.getElementById('imagePreview');
+const imageUrlInput = document.getElementById('imageUrlInput');
+const imageUrlBtn = document.getElementById('imageUrlBtn');
+const imageSearchBtn = document.getElementById('imageSearchBtn');
 const fileNameEl = document.getElementById('fileName');
 const toast = document.getElementById('toast');
 const modalClose = document.getElementById('modalClose');
@@ -1685,6 +1688,7 @@ if(imageInput) imageInput.onchange = () =>{
   selectedFile = f || null;
   fileNameEl.textContent = f ? f.name : 'Ningún archivo seleccionado';
   imagePreview.innerHTML = '';
+  try{ if(imageUrlInput) imageUrlInput.value = ''; }catch(_){ }
   if(f){
     const reader = new FileReader();
     reader.onload = e => { const img = document.createElement('img'); img.src = e.target.result; imagePreview.appendChild(img); };
@@ -1730,6 +1734,64 @@ function uploadImageWithProgress(file, onProgress){
     xhr.send(fd);
   });
 }
+
+function buildImagePreviewSrc(rawUrl){
+  try{
+    if (!rawUrl) return '';
+    const u = String(rawUrl);
+    if (u.startsWith('http://') || u.startsWith('https://') || u.startsWith('//')) return u;
+    if (u.startsWith('/')) return API_BASE + u;
+    return API_BASE + '/' + u.replace(/^\//, '');
+  }catch(_){ return ''; }
+}
+
+async function uploadImageFromUrl(url){
+  return await safeFetch(`${API_BASE}/upload-image-url`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url }),
+  });
+}
+
+if (imageUrlBtn) imageUrlBtn.onclick = async () => {
+  const raw = imageUrlInput ? String(imageUrlInput.value || '').trim() : '';
+  if (!raw) return showToast('Pegá una URL primero', 'error');
+  const prevText = imageUrlBtn.textContent;
+  imageUrlBtn.disabled = true; imageUrlBtn.textContent = 'Cargando...';
+  try{
+    const res = await uploadImageFromUrl(raw);
+    imageUrl = (res && res.image_url) ? res.image_url : raw;
+    selectedFile = null;
+    try{ if(imageInput) imageInput.value = ''; }catch(_){ }
+    if (uploadImageBtn) uploadImageBtn.disabled = true;
+    const previewSrc = buildImagePreviewSrc(imageUrl);
+    imagePreview.innerHTML = previewSrc ? `<img src="${previewSrc}" onerror="this.onerror=null;this.src='../images/default.png'"/>` : '';
+    try{ fileNameEl.textContent = imageUrl ? imageUrl.split('/').pop() : 'Ningún archivo seleccionado'; }catch(_){ }
+    showToast('Imagen cargada desde URL');
+  }catch(e){
+    console.error('uploadImageFromUrl failed', e);
+    let msg = 'No se pudo cargar imagen desde URL';
+    try{
+      if (e && e.payload && e.payload.detail) msg = e.payload.detail;
+    }catch(_){ }
+    showToast(msg, 'error');
+  }finally{
+    imageUrlBtn.disabled = false;
+    imageUrlBtn.textContent = prevText || 'Usar URL';
+    validateForm();
+  }
+};
+
+if (imageSearchBtn) imageSearchBtn.onclick = () => {
+  try{
+    const name = productForm && productForm.name ? String(productForm.name.value || '').trim() : '';
+    if (!name) { showToast('Escribí el nombre del producto primero', 'error'); return; }
+    const q = encodeURIComponent(name);
+    window.open(`https://www.google.com/search?tbm=isch&q=${q}`, '_blank', 'noopener');
+  }catch(e){
+    console.warn('imageSearchBtn failed', e);
+  }
+};
 
 // CRUD fetchers
 async function fetchProducts(q = '', category = '', sort = '', opts = {}){
@@ -2494,6 +2556,7 @@ async function onEdit(id){
   imagePreview.innerHTML = previewSrc ? `<img src="${previewSrc}" onerror="this.onerror=null;this.src='../images/default.png'"/>` : '';
     imageUrl = p.image_url;
     selectedFile = null; fileNameEl.textContent = p.image_url ? p.image_url.split('/').pop() : 'Ningún archivo seleccionado';
+    try{ if(imageUrlInput) imageUrlInput.value = p.image_url || ''; }catch(_){ }
 
     // populate category checkboxes (ensure filters sync first, then mapping)
     try{
@@ -2525,6 +2588,7 @@ async function onDuplicate(id){
     imageUrl = p.image_url || null;
     selectedFile = null;
     try{ fileNameEl.textContent = imageUrl ? String(imageUrl).split('/').pop() : 'Ningun archivo seleccionado'; }catch(_){ }
+    try{ if(imageUrlInput) imageUrlInput.value = imageUrl || ''; }catch(_){ }
 
     // Prefill with a safe duplicate (force new SKU + zero stock)
     productForm.name.value = String(p.name || '').trim() ? (String(p.name).trim() + ' (Copia)') : 'Producto (Copia)';
@@ -4796,7 +4860,7 @@ async function openModal(){
   setTimeout(()=> productForm.name.focus(), 120);
 }
 function closeModal(){
-  modal.classList.add('hidden'); modal.setAttribute('aria-hidden', 'true'); currentEditId = null; imageUrl = null; selectedFile = null; fileNameEl.textContent = 'Ningun archivo seleccionado'; imagePreview.innerHTML = ''; productForm.reset(); try{ if(productForm.sale_unit) productForm.sale_unit.value = 'unit'; }catch(_){ } try{ if(productForm.kg_per_unit) productForm.kg_per_unit.value = '1'; }catch(_){ } try{ syncProductUnitFields(); }catch(_){ } validateForm();
+  modal.classList.add('hidden'); modal.setAttribute('aria-hidden', 'true'); currentEditId = null; imageUrl = null; selectedFile = null; fileNameEl.textContent = 'Ningun archivo seleccionado'; imagePreview.innerHTML = ''; try{ if(imageUrlInput) imageUrlInput.value = ''; }catch(_){ } productForm.reset(); try{ if(productForm.sale_unit) productForm.sale_unit.value = 'unit'; }catch(_){ } try{ if(productForm.kg_per_unit) productForm.kg_per_unit.value = '1'; }catch(_){ } try{ syncProductUnitFields(); }catch(_){ } validateForm();
 }
 // Close modal when clicking outside the modal card
 if(modal) modal.addEventListener('click', e => { if(e.target === modal) closeModal(); });

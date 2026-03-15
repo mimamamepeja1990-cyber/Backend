@@ -483,6 +483,17 @@
           </div>
           <div id="imagePreview" class="preview"></div>
         </div>
+        <div class="row image-url-row">
+          <div class="field">
+            <label for="imageUrlInput">Imagen por URL</label>
+            <div class="image-url-controls">
+              <input id="imageUrlInput" placeholder="https://ejemplo.com/imagen.jpg" />
+              <button id="imageUrlBtn" type="button" class="btn">Usar URL</button>
+              <button id="imageSearchBtn" type="button" class="btn">Buscar en Google</button>
+            </div>
+            <div class="field-hint">Abrí Google Images con el nombre exacto, copiá la URL directa de la imagen y pegala acá.</div>
+          </div>
+        </div>
         <div class="form-actions">
           <button type="button" id="saveBtn" class="btn primary" disabled>Guardar</button>
           <button id="cancelBtn" type="button" class="btn">Cancelar</button>
@@ -566,6 +577,6 @@
     window.addEventListener('error', function(e){ try{ window.adminFallback('JS error: ' + (e && e.message ? e.message : e)); }catch(_){} });
     window.addEventListener('unhandledrejection', function(e){ try{ var r = e && e.reason ? (e.reason.message || JSON.stringify(e.reason)) : e; window.adminFallback('Unhandled promise rejection: ' + r); }catch(_){} });
   </script>
-  <script src="app.js?v=16"></script>
+  <script src="app.js?v=17"></script>
 </body>
 </html>

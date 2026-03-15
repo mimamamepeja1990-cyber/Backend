@@ -4276,6 +4276,40 @@ async def upload_image(file: UploadFile = File(...)):
     return {"image_url": f"/images/{img_id}"}
 
 
+@app.post("/upload-image-url")
+async def upload_image_url(payload: Dict[str, Any] = Body(default=None)):
+    payload = payload or {}
+    url_raw = payload.get('url') or payload.get('image_url') or payload.get('image') or payload.get('link')
+    normalized = _normalize_import_image_url(url_raw)
+    if not normalized:
+        raise HTTPException(status_code=400, detail='URL inválida')
+    if normalized.startswith('/'):
+        # Accept local paths as-is
+        return {"image_url": normalized, "source_url": normalized, "stored": False}
+    if not re.match(r'^https?://', normalized, re.IGNORECASE):
+        raise HTTPException(status_code=400, detail='URL inválida')
+
+    max_bytes = int(os.environ.get('IMAGE_FETCH_MAX_BYTES') or 4_000_000)
+    downloaded = _download_image_bytes(normalized, max_bytes=max_bytes)
+    if not downloaded:
+        raise HTTPException(status_code=400, detail='No se pudo descargar la imagen')
+    content, mime, filename = downloaded
+
+    def task():
+        db = SessionLocal()
+        try:
+            img = models.Image(data=content, mime=mime, filename=filename)
+            db.add(img)
+            db.commit()
+            db.refresh(img)
+            return img.id
+        finally:
+            db.close()
+
+    img_id = await anyio.to_thread.run_sync(task)
+    return {"image_url": f"/images/{img_id}", "source_url": normalized, "stored": True}
+
+
 @app.get('/images/{image_id}')
 def get_image(image_id: int, db: Session = Depends(get_db)):
     img = db.query(models.Image).filter(models.Image.id == image_id).first()
@@ -5601,15 +5635,7 @@ async def import_products_excel(
         await anyio.to_thread.run_sync(write_catalog_snapshot)
     except Exception:
         pass
-    try:
-        if background_tasks and _auto_image_enabled() and created_products:
-            try:
-                _queue_auto_image_progress(len(created_products), source='import-excel')
-            except Exception:
-                pass
-            background_tasks.add_task(_auto_fetch_images_for_products, created_products, True, 'import-excel')
-    except Exception:
-        pass
+    # Auto-image lookup intentionally disabled for Excel imports (manual only).
     _invalidate_products_cache()
     return result
 
