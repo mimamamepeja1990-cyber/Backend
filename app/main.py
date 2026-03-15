@@ -5171,12 +5171,88 @@ def _normalize_lookup_token(value: Any) -> str:
     return raw
 
 
-def _resolve_import_image_url(db: Session, code: Optional[str], name: Optional[str], provided: Optional[str]) -> Optional[str]:
-    if provided:
+def _normalize_import_image_url(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    try:
+        raw = str(value).strip()
+    except Exception:
+        return None
+    if not raw:
+        return None
+    # Handle accidental formula-style cells
+    if raw.startswith('='):
+        raw = raw.lstrip('=').strip()
+    if not raw:
+        return None
+    lower = raw.lower()
+    if lower.startswith('http://') or lower.startswith('https://'):
+        return raw
+    if raw.startswith('//'):
+        return 'https:' + raw
+    # Normalize uploads paths
+    if re.match(r'^/?uploads/', raw, re.IGNORECASE):
+        return '/' + raw.lstrip('/')
+    # Keep bare filenames (e.g. "producto.jpg") as-is so we can resolve in DB
+    if re.match(r'^[^/]+\\.(png|jpe?g|webp|gif|svg)$', lower):
+        return raw
+    # Treat "www.example.com/..." as https
+    if lower.startswith('www.'):
+        return 'https://' + raw
+    # If it looks like a bare domain, add scheme
+    if re.match(r'^[a-z0-9.-]+\\.[a-z]{2,}(/|$)', lower):
+        return 'https://' + raw
+    return raw
+
+
+def _find_image_by_filename(db: Session, name_text: Optional[str], allow_contains: bool = False):
+    try:
+        raw = str(name_text or '').strip()
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        name_lower = raw.lower()
+    except Exception:
+        name_lower = raw
+    try:
+        # Exact filename match (case-insensitive)
+        img = db.query(models.Image).filter(func.lower(models.Image.filename) == name_lower).order_by(models.Image.id.desc()).first()
+        if img:
+            return img
+    except Exception:
+        img = None
+    try:
+        if '.' not in raw:
+            img = db.query(models.Image).filter(func.lower(models.Image.filename).like(name_lower + '.%')).order_by(models.Image.id.desc()).first()
+            if img:
+                return img
+    except Exception:
+        img = None
+    if allow_contains:
         try:
-            return str(provided).strip()
+            img = db.query(models.Image).filter(func.lower(models.Image.filename).like('%' + name_lower + '%')).order_by(models.Image.id.desc()).first()
+            if img:
+                return img
         except Exception:
-            return provided
+            return None
+    return None
+
+
+def _resolve_import_image_url(db: Session, code: Optional[str], name: Optional[str], provided: Optional[str]) -> Optional[str]:
+    if provided is not None:
+        normalized = _normalize_import_image_url(provided)
+        if normalized:
+            # If it's a filename or relative token, try to resolve to stored image
+            if not re.match(r'^https?://', normalized, re.IGNORECASE) and not normalized.startswith('/'):
+                try:
+                    img = _find_image_by_filename(db, normalized, allow_contains=True)
+                    if img:
+                        return f"/images/{img.id}"
+                except Exception:
+                    pass
+            return normalized
 
     try:
         code_text = str(code or '').strip()
@@ -5203,6 +5279,22 @@ def _resolve_import_image_url(db: Session, code: Optional[str], name: Optional[s
             prod = db.query(models.Product).filter(func.lower(func.trim(models.Product.name)) == name_lower).first()
             if prod and getattr(prod, 'image_url', None):
                 return prod.image_url
+    except Exception:
+        pass
+
+    # Try exact/contains filename matches by code or name (case-insensitive, preserving spaces)
+    try:
+        if code_text:
+            img = _find_image_by_filename(db, code_text, allow_contains=True)
+            if img:
+                return f"/images/{img.id}"
+    except Exception:
+        pass
+    try:
+        if name_text:
+            img = _find_image_by_filename(db, name_text, allow_contains=True)
+            if img:
+                return f"/images/{img.id}"
     except Exception:
         pass
 
