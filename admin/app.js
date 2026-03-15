@@ -1021,11 +1021,13 @@ async function importExcelFile(file){
       body: fd,
     });
     const created = Number(res && res.created != null ? res.created : 0) || 0;
+    const updated = Number(res && res.updated != null ? res.updated : 0) || 0;
     const skipped = Number(res && res.skipped != null ? res.skipped : 0) || 0;
     const duplicates = Array.isArray(res && res.duplicates) ? res.duplicates.length : 0;
     const missingName = Number(res && res.missing_name != null ? res.missing_name : 0) || 0;
     const errors = Array.isArray(res && res.errors) ? res.errors.length : 0;
     const detail = [];
+    if (updated) detail.push(`actualizados ${updated}`);
     if (skipped) detail.push(`omitidos ${skipped}`);
     if (duplicates) detail.push(`duplicados ${duplicates}`);
     if (missingName) detail.push(`sin nombre ${missingName}`);

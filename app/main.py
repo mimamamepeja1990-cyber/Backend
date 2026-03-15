@@ -4711,13 +4711,17 @@ _IMPORT_HEADER_ALIASES = {
     'brand': {'brand', 'marca'},
     'description': {'description', 'descripcion', 'detalle', 'desc'},
     'category': {'category', 'categoria', 'rubro', 'familia', 'linea'},
+    'price': {'price', 'precio', 'precio_mayorista', 'mayorista', 'precio_may', 'precio_wholesale', 'precio_mayoreo'},
+    'price_retail': {'price_retail', 'precio_minorista', 'minorista', 'precio_minor', 'precio_retail', 'precio_venta', 'precio_menudeo'},
+    'cost': {'cost', 'costo', 'coste', 'precio_costo', 'costo_unitario'},
+    'discount': {'discount', 'descuento', 'descuento_pct', 'descuento_%', 'dto'},
     'stock': {'stock', 'cantidad', 'existencias', 'stock_actual'},
     'min_stock': {'min_stock', 'stock_min', 'stock_minimo', 'stock_mínimo', 'minimo', 'mínimo'},
     'stock_kg': {'stock_kg', 'stock_kilos', 'kg_stock', 'stock_kilogramos'},
     'kg_per_unit': {'kg_per_unit', 'kg_unidad', 'kg_por_unidad', 'kg_x_unidad', 'unidad_kg', 'peso_unidad'},
     'sale_unit': {'sale_unit', 'unidad', 'unidad_venta', 'tipo_venta', 'unidad_de_venta'},
     'active': {'active', 'activo'},
-    'image_url': {'image', 'imagen', 'image_url', 'imagen_url', 'url', 'foto', 'picture', 'img'},
+    'image_url': {'image', 'imagen', 'image_url', 'imagen_url', 'url', 'foto', 'picture', 'img', 'url_imagen', 'url_de_imagen', 'imagen_link', 'image_link', 'foto_url', 'img_url', 'link_imagen'},
 }
 
 _IMPORT_HEADER_MAP = {alias: key for key, aliases in _IMPORT_HEADER_ALIASES.items() for alias in aliases}
@@ -5008,6 +5012,36 @@ def _auto_fetch_images_for_products(
         'results': results,
     }
 
+def _normalize_number_text(value: Any) -> str:
+    try:
+        raw = str(value or '').strip()
+    except Exception:
+        return ''
+    if not raw:
+        return ''
+    try:
+        raw = re.sub(r'[^0-9,.\-]+', '', raw)
+    except Exception:
+        pass
+    if not raw:
+        return ''
+    if ',' in raw and '.' in raw:
+        if raw.rfind(',') > raw.rfind('.'):
+            raw = raw.replace('.', '').replace(',', '.')
+        else:
+            raw = raw.replace(',', '')
+    elif ',' in raw:
+        parts = raw.split(',')
+        if len(parts) > 2:
+            raw = ''.join(parts)
+        else:
+            raw = raw.replace(',', '.')
+    elif '.' in raw:
+        if raw.count('.') > 1:
+            raw = raw.replace('.', '')
+    return raw
+
+
 def _coerce_int(value: Any) -> Optional[int]:
     try:
         if value is None:
@@ -5018,10 +5052,9 @@ def _coerce_int(value: Any) -> Optional[int]:
             if not (value == value):  # NaN check
                 return None
             return int(round(value))
-        raw = str(value).strip()
+        raw = _normalize_number_text(value)
         if raw == '':
             return None
-        raw = raw.replace('.', '').replace(',', '.')
         num = float(raw)
         if not (num == num):
             return None
@@ -5038,10 +5071,9 @@ def _coerce_float(value: Any) -> Optional[float]:
             if not (value == value):
                 return None
             return float(value)
-        raw = str(value).strip()
+        raw = _normalize_number_text(value)
         if raw == '':
             return None
-        raw = raw.replace('.', '').replace(',', '.')
         num = float(raw)
         if not (num == num):
             return None
@@ -5248,11 +5280,13 @@ async def import_products_excel(
     def task():
         db = SessionLocal()
         created = 0
+        updated = 0
         skipped = 0
         missing_name = 0
         duplicates = []
         errors = []
         created_ids = []
+        updated_ids = []
         created_products = []
         try:
             rows = _parse_import_rows_from_excel(content, filename)
@@ -5291,13 +5325,19 @@ async def import_products_excel(
 
                 brand = row.get('brand')
                 if brand is not None:
-                    brand = str(brand).strip() or None
+                    brand = str(brand).strip()
+                    if brand == '':
+                        brand = None
                 description = row.get('description')
                 if description is not None:
-                    description = str(description).strip() or ''
+                    description = str(description).strip()
+                    if description == '':
+                        description = None
                 category = row.get('category')
                 if category is not None:
-                    category = str(category).strip() or ''
+                    category = str(category).strip()
+                    if category == '':
+                        category = None
 
                 stock = _coerce_int(row.get('stock'))
                 min_stock = _coerce_int(row.get('min_stock'))
@@ -5306,14 +5346,111 @@ async def import_products_excel(
                 sale_unit = _normalize_sale_unit(row.get('sale_unit'))
                 active = _coerce_bool(row.get('active'))
 
+                price = _coerce_float(row.get('price'))
+                price_retail = _coerce_float(row.get('price_retail'))
+                cost = _coerce_float(row.get('cost'))
+                discount = _coerce_float(row.get('discount'))
                 image_url = _resolve_import_image_url(db, code, name, row.get('image_url'))
+
+                existing = None
+                try:
+                    if code:
+                        code_lower = str(code).strip().lower()
+                        existing = db.query(models.Product).filter(func.lower(func.trim(models.Product.code)) == code_lower).first()
+                except Exception:
+                    existing = None
+                if not existing:
+                    try:
+                        name_lower = str(name or '').strip().lower()
+                    except Exception:
+                        name_lower = ''
+                    if name_lower:
+                        try:
+                            matches = db.query(models.Product).filter(func.lower(func.trim(models.Product.name)) == name_lower).limit(2).all()
+                            if matches and len(matches) == 1:
+                                existing = matches[0]
+                            elif matches and len(matches) > 1:
+                                skipped += 1
+                                errors.append({'row': idx, 'error': 'nombre_duplicado'})
+                                continue
+                        except Exception:
+                            existing = None
+
+                if existing:
+                    updates = {}
+                    if code:
+                        try:
+                            current_code = str(getattr(existing, 'code', '') or '').strip()
+                        except Exception:
+                            current_code = ''
+                        if current_code != code:
+                            updates['code'] = code
+                    if name:
+                        try:
+                            current_name = str(getattr(existing, 'name', '') or '').strip()
+                        except Exception:
+                            current_name = ''
+                        if current_name != name:
+                            updates['name'] = name
+                    if brand is not None:
+                        updates['brand'] = brand
+                    if description is not None:
+                        updates['description'] = description
+                    if category is not None:
+                        updates['category'] = category
+                    if price is not None:
+                        updates['price'] = float(price)
+                    if price_retail is not None:
+                        updates['price_retail'] = float(price_retail)
+                    if cost is not None:
+                        updates['cost'] = float(cost)
+                    if discount is not None:
+                        updates['discount'] = float(discount)
+                    if stock is not None:
+                        updates['stock'] = max(0, int(stock))
+                    if min_stock is not None:
+                        updates['min_stock'] = max(0, int(min_stock))
+                    if stock_kg is not None:
+                        updates['stock_kg'] = float(stock_kg)
+                    if kg_per_unit is not None:
+                        updates['kg_per_unit'] = float(kg_per_unit)
+                    if sale_unit:
+                        updates['sale_unit'] = sale_unit
+                    if active is not None:
+                        updates['active'] = bool(active)
+                    if image_url is not None:
+                        try:
+                            image_url = str(image_url).strip()
+                        except Exception:
+                            image_url = image_url
+                        if image_url:
+                            updates['image_url'] = image_url
+
+                    if not updates:
+                        skipped += 1
+                        continue
+                    try:
+                        upd_payload = schemas.ProductUpdate(**updates)
+                        prod = crud.update_product(db, int(getattr(existing, 'id', 0) or 0), upd_payload, actor=actor, action='import-excel')
+                        updated += 1
+                        try:
+                            prod_id = int(prod.get('id') if isinstance(prod, dict) else getattr(prod, 'id', None))
+                            if prod_id:
+                                updated_ids.append(prod_id)
+                        except Exception:
+                            pass
+                        continue
+                    except Exception as e_upd:
+                        skipped += 1
+                        errors.append({'row': idx, 'error': str(e_upd)[:200]})
+                        continue
 
                 payload = schemas.ProductCreate(
                     code=code,
                     name=name,
-                    price=0.0,
-                    price_retail=None,
-                    cost=None,
+                    price=0.0 if price is None else float(price),
+                    price_retail=None if price_retail is None else float(price_retail),
+                    cost=None if cost is None else float(cost),
                     description=description or '',
                     category=category or '',
                     brand=brand,
@@ -5323,7 +5460,7 @@ async def import_products_excel(
                     min_stock=0 if min_stock is None else max(0, int(min_stock)),
                     stock_kg=stock_kg,
                     kg_per_unit=kg_per_unit if kg_per_unit is not None else 1.0,
-                    discount=0.0,
+                    discount=0.0 if discount is None else float(discount),
                     sale_unit=sale_unit or 'unit',
                 )
 
@@ -5355,11 +5492,13 @@ async def import_products_excel(
         return {
             'rows': len(rows),
             'created': created,
+            'updated': updated,
             'skipped': skipped,
             'missing_name': missing_name,
             'duplicates': duplicates[:50],
             'errors': errors[:50],
             'created_ids': [c for c in created_ids if c],
+            'updated_ids': [u for u in updated_ids if u],
         }, created_products
     result, created_products = await anyio.to_thread.run_sync(task)
     try:
