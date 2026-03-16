@@ -98,6 +98,32 @@ class StatsResponse(BaseModel):
     average_price: float
 
 
+# --- Admin users / staff auth ---
+class AdminUserCreate(BaseModel):
+    username: str
+    password: str
+    role: Optional[str] = 'admin'
+    full_name: Optional[str] = None
+    zone: Optional[str] = None
+
+
+class AdminUserResponse(BaseModel):
+    id: int
+    username: str
+    full_name: Optional[str] = None
+    role: str
+    zone: Optional[str] = None
+    is_active: bool
+    created_by: Optional[str] = None
+    created_at: Optional[datetime] = None
+
+    model_config = { 'from_attributes': True }
+
+
+class AdminUserUpdate(BaseModel):
+    zone: Optional[str] = None
+
+
 # --- Users / Auth ---
 class UserCreate(BaseModel):
     full_name: str
@@ -228,6 +254,19 @@ class OrderResponse(BaseModel):
     delivery_cutoff_applied: Optional[bool] = None
     delivery_timezone: Optional[str] = None
     delivery_cutoff_hour: Optional[int] = None
+    assigned_driver_id: Optional[int] = None
+    assigned_driver_username: Optional[str] = None
+    assigned_driver_name: Optional[str] = None
+    assigned_driver_zone: Optional[str] = None
+    assigned_at: Optional[datetime] = None
+    delivery_lat: Optional[float] = None
+    delivery_lon: Optional[float] = None
+    route_id: Optional[str] = None
+    route_order: Optional[int] = None
+    route_generated_at: Optional[datetime] = None
+    delivered_at: Optional[datetime] = None
+    delivered_by_id: Optional[int] = None
+    delivered_by_username: Optional[str] = None
 
     model_config = { 'from_attributes': True }
 

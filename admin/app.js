@@ -11,6 +11,8 @@ const SECTION_TITLES = {
   'orders': 'Pedidos',
   'customers': 'Clientes',
   'preparations': 'Preparaciones',
+  'routes': 'Rutas',
+  'deliveries': 'Entregas',
   'users': 'Usuarios',
   'admin-console': 'Consola Admin',
 };
@@ -19,7 +21,7 @@ let currentAdminUser = null;
 function canAccessSection(sectionId){
   if (!currentAdminUser || !sectionId) return false;
   if (currentAdminUser.role === 'owner') return true;
-  if (currentAdminUser.role === 'admin') return sectionId !== 'admin-console' && sectionId !== 'users';
+  if (currentAdminUser.role === 'admin') return sectionId !== 'admin-console';
   return false;
 }
 
@@ -43,6 +45,8 @@ function activateSection(sectionId){
   if (sectionId === 'customers') { try{ refreshCustomers(false); }catch(_){ } }
   if (sectionId === 'retail-prices') { try{ refreshRetailPrices(); }catch(_){ } }
   if (sectionId === 'preparations') { try{ refreshPreparations(false); }catch(_){ } }
+  if (sectionId === 'routes') { try{ refreshRoutes(false); }catch(_){ } }
+  if (sectionId === 'deliveries') { try{ refreshDeliveries(false); }catch(_){ } }
   if (sectionId === 'admin-console') {
     try{
       ensureAdminConsole();
@@ -53,7 +57,7 @@ function activateSection(sectionId){
       adminConsoleState.input && adminConsoleState.input.focus();
     }catch(_){ }
   }
-  if (sectionId === 'users') { try{ renderUsers(); }catch(_){ } }
+  if (sectionId === 'users') { try{ const p = renderUsers(); if (p && p.catch) p.catch(()=>{}); }catch(_){ } }
   return true;
 }
 
@@ -87,14 +91,8 @@ function getActor(){
   return 'admin-panel';
 }
 
-const AUTH_USERS_KEY = 'admin:users:v1';
-const AUTH_SESSION_KEY = 'admin:session:v1';
-const DEFAULT_OWNER = {
-  username: 'emiliano',
-  password: 'badbunni33',
-  role: 'owner',
-  fullName: 'Emiliano',
-};
+const ADMIN_TOKEN_KEY = 'admin:token:v1';
+const ADMIN_SESSION_KEY = 'admin:session:v2';
 
 function readLocalJson(key, fallback){
   try{
@@ -113,70 +111,47 @@ function normalizeUsername(value){
   return String(value || '').trim().toLowerCase();
 }
 
-function ensureDefaultUsers(){
-  let users = readLocalJson(AUTH_USERS_KEY, []);
-  if (!Array.isArray(users)) users = [];
-  let changed = false;
-  users = users.map((u) => {
-    const next = Object.assign({}, u || {});
-    if (!next.username && next.usernameLower) next.username = next.usernameLower;
-    const normalized = normalizeUsername(next.username || next.usernameLower);
-    if (!next.usernameLower) { next.usernameLower = normalized; changed = true; }
-    if (!next.role) { next.role = 'admin'; changed = true; }
-    return next;
-  });
-  const hasOwner = users.some(u => u.role === 'owner' || normalizeUsername(u.username) === normalizeUsername(DEFAULT_OWNER.username));
-  if (!hasOwner){
-    users.push({
-      id: 'owner-1',
-      username: DEFAULT_OWNER.username,
-      usernameLower: normalizeUsername(DEFAULT_OWNER.username),
-      password: DEFAULT_OWNER.password,
-      role: 'owner',
-      fullName: DEFAULT_OWNER.fullName,
-      createdAt: Date.now(),
-    });
-    changed = true;
-  }
-  if (changed) writeLocalJson(AUTH_USERS_KEY, users);
-  return users;
+function getAdminToken(){
+  try{
+    const t = localStorage.getItem(ADMIN_TOKEN_KEY);
+    return t ? String(t) : '';
+  }catch(_){ return ''; }
 }
 
-function saveUsers(users){
-  writeLocalJson(AUTH_USERS_KEY, Array.isArray(users) ? users : []);
+function setAdminToken(token){
+  try{
+    if (token) localStorage.setItem(ADMIN_TOKEN_KEY, String(token));
+  }catch(_){ }
 }
 
-function findUser(username, users){
-  const normalized = normalizeUsername(username);
-  const list = Array.isArray(users) ? users : ensureDefaultUsers();
-  return list.find(u => normalizeUsername(u.username || u.usernameLower) === normalized);
+function clearAdminToken(){
+  try{
+    localStorage.removeItem(ADMIN_TOKEN_KEY);
+  }catch(_){ }
 }
 
 function getSessionUser(){
-  const session = readLocalJson(AUTH_SESSION_KEY, null);
-  if (!session || !session.usernameLower) return null;
-  const users = ensureDefaultUsers();
-  const user = users.find(u => normalizeUsername(u.username || u.usernameLower) === session.usernameLower);
-  if (!user) return null;
-  if (session.role && user.role !== session.role) return null;
-  return user;
+  const session = readLocalJson(ADMIN_SESSION_KEY, null);
+  if (!session || !session.username) return null;
+  return session;
 }
 
 function setSessionUser(user){
   if (!user) return;
   const session = {
+    id: user.id,
     username: user.username,
-    usernameLower: normalizeUsername(user.username),
     role: user.role,
+    full_name: user.full_name || null,
     loginAt: Date.now(),
   };
-  writeLocalJson(AUTH_SESSION_KEY, session);
+  writeLocalJson(ADMIN_SESSION_KEY, session);
   try{ localStorage.setItem('admin:actor', user.username); }catch(_){ }
 }
 
 function clearSessionUser(){
   try{
-    localStorage.removeItem(AUTH_SESSION_KEY);
+    localStorage.removeItem(ADMIN_SESSION_KEY);
     localStorage.removeItem('admin:actor');
   }catch(_){ }
 }
@@ -206,6 +181,7 @@ function updateUserUI(user){
 function applyRoleAccess(user){
   currentAdminUser = user || null;
   updateUserUI(user);
+  updateUserFormAccess();
   const role = user ? user.role : null;
 
   if (role === 'repartidor'){
@@ -227,7 +203,6 @@ function applyRoleAccess(user){
 }
 
 function initAuth(){
-  ensureDefaultUsers();
   const loginForm = document.getElementById('authLoginForm');
   const userInput = document.getElementById('authUser');
   const passInput = document.getElementById('authPass');
@@ -248,7 +223,7 @@ function initAuth(){
   if (userInput) userInput.addEventListener('input', () => setAuthError(''));
   if (passInput) passInput.addEventListener('input', () => setAuthError(''));
   if (loginForm){
-    loginForm.addEventListener('submit', (ev) => {
+    loginForm.addEventListener('submit', async (ev) => {
       ev.preventDefault();
       const username = userInput ? String(userInput.value || '').trim() : '';
       const password = passInput ? String(passInput.value || '') : '';
@@ -256,26 +231,50 @@ function initAuth(){
         setAuthError('Ingresá usuario y contraseña.');
         return;
       }
-      const users = ensureDefaultUsers();
-      const user = findUser(username, users);
-      if (!user){
-        setAuthError('Usuario no encontrado.');
-        return;
-      }
-      if (String(user.password || '') !== password){
-        setAuthError('Contraseña incorrecta.');
-        return;
-      }
-      setSessionUser(user);
-      setAuthLocked(false);
       setAuthError('');
-      applyRoleAccess(user);
-      activateSection('dashboard');
+      try{
+        await ensureApiBase();
+      }catch(_){ }
+      try{
+        const body = new URLSearchParams();
+        body.set('username', username);
+        body.set('password', password);
+        const res = await fetch(API_BASE + '/admin/auth/token', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: body.toString(),
+        });
+        if (!res || !res.ok){
+          setAuthError('Usuario o contraseña incorrecta.');
+          return;
+        }
+        const payload = await res.json().catch(() => null);
+        const token = payload && payload.access_token ? String(payload.access_token) : '';
+        if (!token){
+          setAuthError('No se pudo iniciar sesión.');
+          return;
+        }
+        setAdminToken(token);
+        const me = await safeFetch(API_BASE + '/admin/auth/me').catch(() => null);
+        if (!me || !me.username){
+          setAuthError('No se pudo validar la sesión.');
+          clearAdminToken();
+          return;
+        }
+        setSessionUser(me);
+        setAuthLocked(false);
+        applyRoleAccess(me);
+        activateSection('dashboard');
+      }catch(e){
+        console.error('admin login failed', e);
+        setAuthError('No se pudo iniciar sesión.');
+      }
     });
   }
 
   if (logoutBtn){
     logoutBtn.addEventListener('click', () => {
+      clearAdminToken();
       clearSessionUser();
       setAuthLocked(true);
       currentAdminUser = null;
@@ -283,14 +282,25 @@ function initAuth(){
     });
   }
 
-  const sessionUser = getSessionUser();
-  if (sessionUser){
-    setAuthLocked(false);
-    applyRoleAccess(sessionUser);
-  } else {
+  (async () => {
+    try{
+      await ensureApiBase();
+    }catch(_){ }
+    const token = getAdminToken();
+    if (token){
+      const me = await safeFetch(API_BASE + '/admin/auth/me').catch(() => null);
+      if (me && me.username){
+        setSessionUser(me);
+        setAuthLocked(false);
+        applyRoleAccess(me);
+        return;
+      }
+    }
+    clearAdminToken();
+    clearSessionUser();
     setAuthLocked(true);
     try{ userInput && userInput.focus(); }catch(_){ }
-  }
+  })();
 }
 initAuth();
 // Small helper to wrap fetch and provide consistent errors and JSON parsing
@@ -299,6 +309,10 @@ async function safeFetch(url, opts) {
   try{
     const headers = new Headers(next.headers || {});
     headers.set('X-Actor', getActor());
+    const token = getAdminToken();
+    if (token && !headers.has('Authorization')) {
+      headers.set('Authorization', 'Bearer ' + token);
+    }
     next.headers = headers;
   }catch(_){ }
   const res = await fetch(url, next);
@@ -710,8 +724,25 @@ const userForm = document.getElementById('userForm');
 const userUsernameInput = document.getElementById('userUsername');
 const userPasswordInput = document.getElementById('userPassword');
 const userRoleSelect = document.getElementById('userRole');
+const userZoneSelect = document.getElementById('userZone');
 const userFormMsg = document.getElementById('userFormMsg');
 const usersTableBody = document.querySelector('#usersTable tbody');
+
+function getZoneOptions(){
+  const opts = [];
+  if (userZoneSelect && userZoneSelect.options){
+    Array.from(userZoneSelect.options).forEach((o) => {
+      opts.push({ value: String(o.value || ''), label: String(o.textContent || o.value || '') });
+    });
+  }
+  return opts;
+}
+
+function updateUserFormAccess(){
+  if (!userForm) return;
+  const isOwner = currentAdminUser && currentAdminUser.role === 'owner';
+  userForm.classList.toggle('role-hidden', !isOwner);
+}
 let currentEditId = null;
 let imageUrl = null;
 let selectedFile = null;
@@ -831,10 +862,23 @@ function formatUserDate(ts){
   }catch(_){ return '—'; }
 }
 
-function renderUsers(){
+let adminUsersCache = [];
+
+async function fetchAdminUsers(){
+  try{
+    const list = await safeFetch(`${API_BASE}/admin/users`).catch(() => []);
+    adminUsersCache = Array.isArray(list) ? list : [];
+  }catch(_){
+    adminUsersCache = [];
+  }
+  return adminUsersCache;
+}
+
+async function renderUsers(){
   if (!usersTableBody) return;
-  if (!currentAdminUser || currentAdminUser.role !== 'owner') return;
-  const users = ensureDefaultUsers().slice();
+  if (!currentAdminUser || (currentAdminUser.role !== 'owner' && currentAdminUser.role !== 'admin')) return;
+  updateUserFormAccess();
+  const users = await fetchAdminUsers();
   const roleOrder = { owner: 0, admin: 1, repartidor: 2 };
   users.sort((a, b) => {
     const ra = roleOrder[a.role] ?? 99;
@@ -843,27 +887,86 @@ function renderUsers(){
     return String(a.username || '').localeCompare(String(b.username || ''));
   });
   usersTableBody.innerHTML = '';
+  const zoneOptions = getZoneOptions();
+  const canAssignZone = currentAdminUser && (currentAdminUser.role === 'owner' || currentAdminUser.role === 'admin');
   users.forEach((u) => {
     const tr = document.createElement('tr');
     const tdUser = document.createElement('td');
     tdUser.textContent = u.username || '—';
     const tdRole = document.createElement('td');
     tdRole.textContent = formatRoleLabel(u.role);
+    const tdZone = document.createElement('td');
+    const isRepartidor = String(u.role || '').toLowerCase() === 'repartidor';
+    if (isRepartidor && canAssignZone){
+      const select = document.createElement('select');
+      select.className = 'user-zone-select';
+      zoneOptions.forEach((opt) => {
+        const option = document.createElement('option');
+        option.value = opt.value;
+        option.textContent = opt.label || opt.value;
+        select.appendChild(option);
+      });
+      const currentZone = String(u.zone || '');
+      select.value = currentZone;
+      const saveBtn = document.createElement('button');
+      saveBtn.type = 'button';
+      saveBtn.className = 'btn small user-zone-save-btn';
+      saveBtn.textContent = 'Guardar';
+      saveBtn.disabled = true;
+      select.addEventListener('change', () => {
+        saveBtn.disabled = (String(select.value || '') === currentZone);
+      });
+      saveBtn.addEventListener('click', async () => {
+        const nextZone = String(select.value || '').trim();
+        if (!nextZone){
+          showToast('Elegí una zona válida', 'error');
+          return;
+        }
+        saveBtn.disabled = true;
+        const prevText = saveBtn.textContent;
+        saveBtn.textContent = 'Guardando...';
+        try{
+          await ensureApiBase();
+        }catch(_){ }
+        try{
+          await safeFetch(`${API_BASE}/admin/users/${encodeURIComponent(u.id)}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ zone: nextZone }),
+          });
+          showToast('Zona actualizada');
+          await renderUsers();
+        }catch(e){
+          const msg = (e && e.payload && (e.payload.detail || e.payload.error)) ? String(e.payload.detail || e.payload.error) : 'No se pudo actualizar la zona.';
+          showToast(msg, 'error');
+          saveBtn.disabled = false;
+          saveBtn.textContent = prevText;
+        }
+      });
+      const wrap = document.createElement('div');
+      wrap.className = 'user-zone-control';
+      wrap.appendChild(select);
+      wrap.appendChild(saveBtn);
+      tdZone.appendChild(wrap);
+    } else {
+      tdZone.textContent = u.zone ? String(u.zone) : '—';
+    }
     const tdCreated = document.createElement('td');
-    tdCreated.textContent = formatUserDate(u.createdAt);
+    tdCreated.textContent = formatUserDate(u.created_at || u.createdAt);
     const tdActions = document.createElement('td');
-    if (u.role === 'owner'){
+    if (!currentAdminUser || currentAdminUser.role !== 'owner' || u.role === 'owner'){
       tdActions.textContent = '—';
     } else {
       const delBtn = document.createElement('button');
       delBtn.className = 'btn danger user-delete-btn';
       delBtn.type = 'button';
-      delBtn.dataset.user = normalizeUsername(u.username || u.usernameLower);
+      delBtn.dataset.userId = String(u.id || '');
       delBtn.textContent = 'Eliminar';
       tdActions.appendChild(delBtn);
     }
     tr.appendChild(tdUser);
     tr.appendChild(tdRole);
+    tr.appendChild(tdZone);
     tr.appendChild(tdCreated);
     tr.appendChild(tdActions);
     usersTableBody.appendChild(tr);
@@ -879,6 +982,7 @@ function handleUserFormSubmit(ev){
   const username = userUsernameInput ? String(userUsernameInput.value || '').trim() : '';
   const password = userPasswordInput ? String(userPasswordInput.value || '') : '';
   const role = userRoleSelect ? String(userRoleSelect.value || 'admin') : 'admin';
+  const zone = userZoneSelect ? String(userZoneSelect.value || '').trim() : '';
   if (!username || !password){
     setUserFormMessage('Completá usuario y contraseña.', 'error');
     return;
@@ -887,25 +991,28 @@ function handleUserFormSubmit(ev){
     setUserFormMessage('No se pueden crear owners adicionales.', 'error');
     return;
   }
-  const users = ensureDefaultUsers();
-  if (findUser(username, users)){
-    setUserFormMessage('Ese usuario ya existe.', 'error');
+  if (role === 'repartidor' && !zone){
+    setUserFormMessage('Elegí una zona para el repartidor.', 'error');
     return;
   }
-  const newUser = {
-    id: 'u-' + Date.now(),
-    username,
-    usernameLower: normalizeUsername(username),
-    password,
-    role,
-    createdAt: Date.now(),
-    createdBy: currentAdminUser.username,
-  };
-  users.push(newUser);
-  saveUsers(users);
-  setUserFormMessage('Usuario creado correctamente.', 'success');
-  if (userForm) userForm.reset();
-  renderUsers();
+  (async () => {
+    try{
+      await ensureApiBase();
+    }catch(_){ }
+    try{
+      await safeFetch(`${API_BASE}/admin/users`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password, role, zone: zone || null }),
+      });
+      setUserFormMessage('Usuario creado correctamente.', 'success');
+      if (userForm) userForm.reset();
+      renderUsers();
+    }catch(e){
+      const msg = (e && e.payload && (e.payload.detail || e.payload.error)) ? String(e.payload.detail || e.payload.error) : 'No se pudo crear el usuario.';
+      setUserFormMessage(msg, 'error');
+    }
+  })();
 }
 
 function setupUserManagement(){
@@ -921,17 +1028,26 @@ function setupUserManagement(){
         setUserFormMessage('Solo el owner puede eliminar usuarios.', 'error');
         return;
       }
-      const usernameLower = String(btn.dataset.user || '');
-      const users = ensureDefaultUsers();
-      const user = users.find(u => normalizeUsername(u.username || u.usernameLower) === usernameLower);
-      if (!user) return;
-      if (user.role === 'owner') return;
-      const ok = confirm(`Eliminar usuario "${user.username}"?`);
+      const userId = String(btn.dataset.userId || '').trim();
+      if (!userId) return;
+      const user = (Array.isArray(adminUsersCache) ? adminUsersCache : []).find(u => String(u.id || '') === userId);
+      const uname = user && user.username ? user.username : userId;
+      if (user && user.role === 'owner') return;
+      const ok = confirm(`Eliminar usuario "${uname}"?`);
       if (!ok) return;
-      const nextUsers = users.filter(u => normalizeUsername(u.username || u.usernameLower) !== usernameLower);
-      saveUsers(nextUsers);
-      renderUsers();
-      setUserFormMessage('Usuario eliminado.', 'success');
+      (async () => {
+        try{
+          await ensureApiBase();
+        }catch(_){ }
+        try{
+          await safeFetch(`${API_BASE}/admin/users/${encodeURIComponent(userId)}`, { method: 'DELETE' });
+          await renderUsers();
+          setUserFormMessage('Usuario eliminado.', 'success');
+        }catch(e){
+          const msg = (e && e.payload && (e.payload.detail || e.payload.error)) ? String(e.payload.detail || e.payload.error) : 'No se pudo eliminar el usuario.';
+          setUserFormMessage(msg, 'error');
+        }
+      })();
     });
   }
 }
@@ -4762,6 +4878,357 @@ async function refreshPreparations(forceFetch){
     console.error('refreshPreparations failed', e);
     showToast('Error al cargar preparaciones', 'error');
   }
+}
+
+// ---------------------- Rutas (asignación y optimización) ----------------------
+const routesDriverSelect = document.getElementById('routesDriverSelect');
+const routesRefreshBtn = document.getElementById('routesRefreshBtn');
+const routesOptimizeBtn = document.getElementById('routesOptimizeBtn');
+const routesAutoAssignBtn = document.getElementById('routesAutoAssignBtn');
+const routesUnassigned = document.getElementById('routesUnassigned');
+const routesAssigned = document.getElementById('routesAssigned');
+let routesDriversCache = [];
+let routesAssignedBase = [];
+let routesUnassignedBase = [];
+
+function renderRoutesEmpty(container, message){
+  if (!container) return;
+  container.innerHTML = `<div class="empty-note">${escapeHtml(message || 'Sin datos.')}</div>`;
+}
+
+function renderRouteDriversSelect(drivers){
+  if (!routesDriverSelect) return;
+  const prev = String(routesDriverSelect.value || '');
+  routesDriverSelect.innerHTML = '';
+  if (!drivers || !drivers.length){
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'Sin repartidores';
+    routesDriverSelect.appendChild(opt);
+    return;
+  }
+  drivers.forEach((d) => {
+    const opt = document.createElement('option');
+    opt.value = String(d.id || '');
+    const zoneLabel = d.zone ? ` · ${d.zone}` : '';
+    opt.textContent = `${d.username || 'repartidor'}${zoneLabel}`;
+    routesDriverSelect.appendChild(opt);
+  });
+  if (prev && Array.from(routesDriverSelect.options).some(o => String(o.value) === prev)){
+    routesDriverSelect.value = prev;
+  }
+}
+
+function getSelectedRouteDriver(){
+  if (!routesDriverSelect) return null;
+  const id = String(routesDriverSelect.value || '').trim();
+  if (!id) return null;
+  return (routesDriversCache || []).find(d => String(d.id || '') === id) || null;
+}
+
+async function fetchRouteDrivers(){
+  try{
+    await ensureApiBase();
+  }catch(_){ }
+  const list = await safeFetch(`${API_BASE}/admin/users`).catch(() => []);
+  const arr = Array.isArray(list) ? list : [];
+  routesDriversCache = arr.filter(u => String(u.role || '').toLowerCase() === 'repartidor');
+  return routesDriversCache;
+}
+
+function computeRouteOrder(orders){
+  const list = Array.isArray(orders) ? orders.slice() : [];
+  const withCoords = [];
+  const withoutCoords = [];
+  list.forEach((o) => {
+    const snap = getOrderAddressSnapshot(o);
+    const lat = Number(snap.lat);
+    const lon = Number(snap.lon);
+    if (Number.isFinite(lat) && Number.isFinite(lon)){
+      withCoords.push({ order: o, lat, lon });
+    } else {
+      withoutCoords.push(o);
+    }
+  });
+  if (withCoords.length < 2){
+    return { ordered: list, optimized: false, missing: withoutCoords.length };
+  }
+  const remaining = withCoords.slice();
+  const ordered = [];
+  let current = remaining.shift();
+  ordered.push(current);
+  while (remaining.length){
+    let bestIdx = 0;
+    let bestDist = Infinity;
+    for (let i = 0; i < remaining.length; i++){
+      const cand = remaining[i];
+      const d = haversineKm(current.lat, current.lon, cand.lat, cand.lon);
+      if (d < bestDist){
+        bestDist = d;
+        bestIdx = i;
+      }
+    }
+    current = remaining.splice(bestIdx, 1)[0];
+    ordered.push(current);
+  }
+  const orderedOrders = ordered.map(x => x.order).concat(withoutCoords);
+  return { ordered: orderedOrders, optimized: true, missing: withoutCoords.length };
+}
+
+function haversineKm(lat1, lon1, lat2, lon2){
+  const toRad = (v) => (v * Math.PI) / 180;
+  const R = 6371;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+function renderRoutesUnassigned(list, driver){
+  if (!routesUnassigned) return;
+  const rows = Array.isArray(list) ? list : [];
+  if (!rows.length){
+    renderRoutesEmpty(routesUnassigned, 'No hay pedidos preparados sin asignar.');
+    return;
+  }
+  routesUnassigned.innerHTML = '';
+  rows.forEach((order) => {
+    const card = document.createElement('div');
+    card.className = 'routes-card';
+    const statusNorm = normalizeOrderStatus(order && order.status);
+    const statusLabel = formatOrderStatusLabel(statusNorm);
+    const mapsLinkHtml = getOrderGoogleMapsLinkHtml(order, 'Abrir en Maps', 'route-map-link');
+    card.innerHTML = `
+      <div class="routes-card-top">
+        <div class="routes-card-meta">
+          <span class="order-id">#${escapeHtml(order.id)}</span>
+          <span class="routes-status">${escapeHtml(statusLabel)}</span>
+        </div>
+      </div>
+      <div class="routes-row"><strong>Cliente:</strong> ${escapeHtml(getOrderPrimaryName(order))}</div>
+      <div class="routes-row"><strong>Dirección:</strong> ${escapeHtml(getOrderAddress(order))}</div>
+      ${mapsLinkHtml ? `<div class="routes-row">${mapsLinkHtml}</div>` : ''}
+      <div class="routes-row">
+        <button class="btn small routes-assign-btn" data-id="${escapeHtml(order.id)}">Asignar a ${escapeHtml(driver.username || 'repartidor')}</button>
+      </div>
+    `;
+    routesUnassigned.appendChild(card);
+  });
+  routesUnassigned.querySelectorAll('.routes-assign-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn && btn.dataset ? String(btn.dataset.id || '') : '';
+      if (!id || !driver) return;
+      btn.disabled = true;
+      const prevText = btn.textContent;
+      btn.textContent = 'Asignando...';
+      try{
+        await ensureApiBase();
+      }catch(_){ }
+      try{
+        await safeFetch(`${API_BASE}/admin/orders/${encodeURIComponent(id)}/assign`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ driver_id: driver.id }),
+        });
+        showToast('Pedido asignado');
+        await refreshRoutes(true);
+      }catch(e){
+        const msg = (e && e.payload && (e.payload.detail || e.payload.error)) ? String(e.payload.detail || e.payload.error) : 'No se pudo asignar.';
+        showToast(msg, 'error');
+        btn.disabled = false;
+        btn.textContent = prevText;
+      }
+    });
+  });
+}
+
+function renderRoutesAssigned(list, optimized){
+  if (!routesAssigned) return;
+  const rows = Array.isArray(list) ? list : [];
+  if (!rows.length){
+    renderRoutesEmpty(routesAssigned, 'No hay pedidos asignados a este repartidor.');
+    return;
+  }
+  routesAssigned.innerHTML = '';
+  rows.forEach((order, idx) => {
+    const card = document.createElement('div');
+    card.className = 'routes-card';
+    const statusNorm = normalizeOrderStatus(order && order.status);
+    const statusLabel = formatOrderStatusLabel(statusNorm);
+    const mapsLinkHtml = getOrderGoogleMapsLinkHtml(order, 'Abrir en Maps', 'route-map-link');
+    card.innerHTML = `
+      <div class="routes-card-top">
+        <div class="routes-card-meta">
+          <span class="route-index">${idx + 1}</span>
+          <span class="order-id">#${escapeHtml(order.id)}</span>
+          <span class="routes-status">${escapeHtml(statusLabel)}</span>
+        </div>
+        ${optimized ? '<span class="muted" style="font-size:12px">Ruta optimizada</span>' : ''}
+      </div>
+      <div class="routes-row"><strong>Cliente:</strong> ${escapeHtml(getOrderPrimaryName(order))}</div>
+      <div class="routes-row"><strong>Dirección:</strong> ${escapeHtml(getOrderAddress(order))}</div>
+      ${mapsLinkHtml ? `<div class="routes-row">${mapsLinkHtml}</div>` : ''}
+    `;
+    routesAssigned.appendChild(card);
+  });
+}
+
+async function refreshRoutes(forceFetch){
+  try{
+    if (!routesDriverSelect || !routesUnassigned || !routesAssigned) return;
+    if (forceFetch || !routesDriversCache.length){
+      await fetchRouteDrivers();
+    }
+    renderRouteDriversSelect(routesDriversCache);
+    const driver = getSelectedRouteDriver();
+    if (!driver){
+      renderRoutesEmpty(routesUnassigned, 'Seleccioná un repartidor.');
+      renderRoutesEmpty(routesAssigned, 'Seleccioná un repartidor.');
+      return;
+    }
+    if (forceFetch){
+      try{
+        await safeFetch(`${API_BASE}/admin/routes/auto-assign`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ driver_id: driver.id, include_assigned: true }),
+        });
+      }catch(_){ }
+    }
+    routesUnassigned.innerHTML = '<div class="empty-note">Cargando pedidos...</div>';
+    routesAssigned.innerHTML = '<div class="empty-note">Cargando pedidos...</div>';
+    const zoneParam = driver.zone ? `&zone=${encodeURIComponent(driver.zone)}` : '';
+    const unassignedAll = await safeFetch(`${API_BASE}/admin/orders?status=preparado${zoneParam}`).catch(() => []);
+    const unassignedRows = (Array.isArray(unassignedAll) ? unassignedAll : []).filter(o => !o.assigned_driver_id && !o.assigned_driver_username);
+    routesUnassignedBase = unassignedRows;
+    renderRoutesUnassigned(unassignedRows, driver);
+    const assignedRows = await safeFetch(`${API_BASE}/admin/orders?status=preparado,enviado&driver_id=${encodeURIComponent(driver.id)}`).catch(() => []);
+    routesAssignedBase = Array.isArray(assignedRows) ? assignedRows : [];
+    renderRoutesAssigned(routesAssignedBase, false);
+  }catch(e){
+    console.error('refreshRoutes failed', e);
+    renderRoutesEmpty(routesUnassigned, 'No se pudieron cargar pedidos.');
+    renderRoutesEmpty(routesAssigned, 'No se pudieron cargar pedidos.');
+  }
+}
+
+if (routesRefreshBtn){
+  routesRefreshBtn.addEventListener('click', () => refreshRoutes(true));
+}
+if (routesOptimizeBtn){
+  routesOptimizeBtn.addEventListener('click', () => {
+    const optimized = computeRouteOrder(routesAssignedBase || []);
+    renderRoutesAssigned(optimized.ordered, optimized.optimized);
+    if (optimized.optimized && optimized.missing){
+      showToast('Ruta optimizada (algunos pedidos sin coordenadas)', 'info');
+    } else if (optimized.optimized){
+      showToast('Ruta optimizada');
+    } else {
+      showToast('No hay coordenadas suficientes para optimizar', 'warning');
+    }
+  });
+}
+if (routesAutoAssignBtn){
+  routesAutoAssignBtn.addEventListener('click', async () => {
+    try{
+      await ensureApiBase();
+      await safeFetch(`${API_BASE}/admin/routes/auto-assign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ include_assigned: true }),
+      });
+      showToast('Rutas optimizadas por zona');
+      await refreshRoutes(true);
+    }catch(e){
+      console.error('routes auto-assign failed', e);
+      showToast('No se pudo auto-optimizar', 'error');
+    }
+  });
+}
+if (routesDriverSelect){
+  routesDriverSelect.addEventListener('change', () => refreshRoutes(true));
+}
+
+// ---------------------- Entregas (historial) ----------------------
+const deliveriesDriverSelect = document.getElementById('deliveriesDriverSelect');
+const deliveriesDateFrom = document.getElementById('deliveriesDateFrom');
+const deliveriesDateTo = document.getElementById('deliveriesDateTo');
+const deliveriesRefreshBtn = document.getElementById('deliveriesRefreshBtn');
+const deliveriesTableBody = document.querySelector('#deliveriesTable tbody');
+
+function renderDeliveriesDriversSelect(drivers){
+  if (!deliveriesDriverSelect) return;
+  deliveriesDriverSelect.innerHTML = '';
+  const optAll = document.createElement('option');
+  optAll.value = '';
+  optAll.textContent = 'Todos los repartidores';
+  deliveriesDriverSelect.appendChild(optAll);
+  (drivers || []).forEach((d) => {
+    const opt = document.createElement('option');
+    opt.value = String(d.id || '');
+    const zoneLabel = d.zone ? ` · ${d.zone}` : '';
+    opt.textContent = `${d.username || 'repartidor'}${zoneLabel}`;
+    deliveriesDriverSelect.appendChild(opt);
+  });
+}
+
+function renderDeliveries(list){
+  if (!deliveriesTableBody) return;
+  const rows = Array.isArray(list) ? list : [];
+  deliveriesTableBody.innerHTML = '';
+  if (!rows.length){
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td colspan="7" class="empty-note">Sin entregas en el período.</td>';
+    deliveriesTableBody.appendChild(tr);
+    return;
+  }
+  rows.forEach((o) => {
+    const tr = document.createElement('tr');
+    const deliveredAt = o.delivered_at ? new Date(o.delivered_at).toLocaleString('es-AR', { dateStyle:'short', timeStyle:'short' }) : '—';
+    const driverName = o.delivered_by_username || o.assigned_driver_username || '—';
+    const zone = o.assigned_driver_zone || '—';
+    tr.innerHTML = `
+      <td>#${escapeHtml(o.id)}</td>
+      <td>${escapeHtml(driverName)}</td>
+      <td>${escapeHtml(zone)}</td>
+      <td>${escapeHtml(deliveredAt)}</td>
+      <td>${escapeHtml(getOrderPrimaryName(o))}</td>
+      <td>${escapeHtml(getOrderAddress(o))}</td>
+      <td>$${Number(o.total || 0).toFixed(2)}</td>
+    `;
+    deliveriesTableBody.appendChild(tr);
+  });
+}
+
+async function refreshDeliveries(force){
+  try{
+    if (!deliveriesTableBody) return;
+    await ensureApiBase();
+    if (force || !routesDriversCache.length){
+      await fetchRouteDrivers();
+    }
+    renderDeliveriesDriversSelect(routesDriversCache);
+    const driverId = deliveriesDriverSelect ? String(deliveriesDriverSelect.value || '').trim() : '';
+    const from = deliveriesDateFrom ? String(deliveriesDateFrom.value || '').trim() : '';
+    const to = deliveriesDateTo ? String(deliveriesDateTo.value || '').trim() : '';
+    const params = [];
+    if (driverId) params.push('driver_id=' + encodeURIComponent(driverId));
+    if (from) params.push('date_from=' + encodeURIComponent(from));
+    if (to) params.push('date_to=' + encodeURIComponent(to));
+    const url = `${API_BASE}/admin/deliveries${params.length ? '?' + params.join('&') : ''}`;
+    const list = await safeFetch(url).catch(() => []);
+    renderDeliveries(list);
+  }catch(e){
+    console.error('refreshDeliveries failed', e);
+    if (deliveriesTableBody){
+      deliveriesTableBody.innerHTML = '<tr><td colspan="7" class="empty-note">No se pudieron cargar las entregas.</td></tr>';
+    }
+  }
+}
+
+if (deliveriesRefreshBtn){
+  deliveriesRefreshBtn.addEventListener('click', () => refreshDeliveries(true));
 }
 
 function orderRowFor(o){

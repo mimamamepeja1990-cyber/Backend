@@ -909,6 +909,56 @@ body.auth-locked .auth-overlay{display:flex}
 /* Role-based hiding */
 .role-hidden{display:none !important}
 
+/* Routes panel */
+.routes-controls{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin:10px 0 18px}
+.routes-buttons{display:flex;gap:8px}
+.routes-columns{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.routes-col{background:#f8fafc;border:1px solid #e5e7eb;border-radius:14px;padding:12px}
+.routes-col-head{font-weight:700;color:#0f172a;margin-bottom:10px}
+.routes-list{display:flex;flex-direction:column;gap:10px}
+.routes-card{background:#fff;border:1px solid #e5e7eb;border-radius:12px;padding:10px 12px}
+.routes-card-top{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
+.routes-card-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.route-index{background:#111827;color:#fff;border-radius:999px;padding:2px 8px;font-size:12px;font-weight:700}
+.routes-status{font-size:12px;font-weight:700;color:#1f2937;background:#e2e8f0;border-radius:999px;padding:2px 8px}
+.routes-row{font-size:13px;color:#334155;margin-top:6px}
+.user-zone-control{display:flex;align-items:center;gap:8px}
+.user-zone-control select{min-width:160px}
+@media (max-width: 1000px){
+  .routes-columns{grid-template-columns:1fr}
+}
+
+/* Repartidor app */
+.repartidor-body{background:#0f172a;color:#0f172a;font-family:'Manrope', sans-serif}
+.repartidor-shell{max-width:1200px;margin:0 auto;padding:22px 18px 40px}
+.repartidor-header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;color:#f8fafc}
+.repartidor-header h1{margin:0 0 6px;font-size:28px;color:#f8fafc}
+.repartidor-meta{display:flex;gap:14px;flex-wrap:wrap;font-size:14px;color:#e2e8f0}
+.repartidor-actions{display:flex;gap:8px}
+.repartidor-grid{display:grid;grid-template-columns:1.3fr 1fr;gap:18px;margin-top:18px}
+.repartidor-map-card{background:#0b1220;border:1px solid rgba(148,163,184,0.2);border-radius:16px;overflow:hidden;min-height:520px;position:relative}
+#routeMap{height:100%;min-height:520px}
+.map-status{position:absolute;left:16px;bottom:16px;background:rgba(15,23,42,0.9);color:#f8fafc;padding:8px 12px;border-radius:999px;font-size:12px}
+.repartidor-panel{display:flex;flex-direction:column;gap:14px}
+.current-card,.route-list-card{background:#fff;border-radius:16px;padding:16px 16px;box-shadow:0 18px 30px rgba(2,6,23,0.18)}
+.current-header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:10px}
+.current-header h2{margin:0;font-size:20px}
+.current-details{font-size:14px;color:#334155;line-height:1.6}
+.current-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+.route-list-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.route-list{display:flex;flex-direction:column;gap:10px;max-height:360px;overflow:auto}
+.route-item{border:1px solid #e2e8f0;border-radius:12px;padding:10px 12px;cursor:pointer;background:#f8fafc}
+.route-item.active{border-color:#0ea5e9;background:#e0f2fe}
+.route-item-top{display:flex;align-items:center;gap:8px}
+.route-item-index{background:#0f172a;color:#fff;border-radius:999px;padding:2px 8px;font-size:12px}
+.route-item-id{font-weight:700}
+.route-item-status{font-size:12px;color:#475569;background:#e2e8f0;border-radius:999px;padding:2px 8px}
+.route-item-address{margin-top:6px;font-size:13px;color:#475569}
+@media (max-width: 980px){
+  .repartidor-grid{grid-template-columns:1fr}
+  #routeMap{min-height:380px}
+}
+
 /* User panel */
 .user-panel{
   display:flex;

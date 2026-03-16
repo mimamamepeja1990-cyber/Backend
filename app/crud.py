@@ -2741,6 +2741,10 @@ def get_orders(
         '_token_received', '_token_preview', 'source',
         'payment_method', 'payment_status', 'payment_reference',
         'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
+        'assigned_driver_id', 'assigned_driver_username', 'assigned_driver_name', 'assigned_driver_zone', 'assigned_at',
+        'delivery_lat', 'delivery_lon',
+        'route_id', 'route_order', 'route_generated_at',
+        'delivered_at', 'delivered_by_id', 'delivered_by_username',
     ]
     for c in optional:
         if c in existing:
@@ -2905,6 +2909,130 @@ def authenticate_user(db: Session, email: str, plain_password: str):
     from app.utils import verify_password
     if not verify_password(plain_password, user.hashed_password):
         return None
+    return user
+
+
+# --- Admin users CRUD (staff/admin panel) ---
+def _normalize_admin_role(value: Optional[str]) -> str:
+    role = str(value or '').strip().lower()
+    if role not in ('owner', 'admin', 'repartidor'):
+        role = 'admin'
+    return role
+
+
+def _normalize_admin_username(value: Optional[str]) -> str:
+    try:
+        return str(value or '').strip()
+    except Exception:
+        return ''
+
+
+def _normalize_admin_zone(value: Optional[str]) -> Optional[str]:
+    try:
+        zone = str(value or '').strip()
+    except Exception:
+        zone = ''
+    return zone or None
+
+
+def get_admin_user_by_username(db: Session, username: str) -> Optional[models.AdminUser]:
+    uname = _normalize_admin_username(username)
+    if not uname:
+        return None
+    try:
+        return db.query(models.AdminUser).filter(func.lower(models.AdminUser.username) == uname.lower()).first()
+    except Exception:
+        return None
+
+
+def get_admin_user_by_id(db: Session, user_id: int) -> Optional[models.AdminUser]:
+    try:
+        return db.query(models.AdminUser).filter(models.AdminUser.id == int(user_id)).first()
+    except Exception:
+        return None
+
+
+def list_admin_users(db: Session) -> List[models.AdminUser]:
+    try:
+        return db.query(models.AdminUser).order_by(models.AdminUser.role.asc(), models.AdminUser.username.asc()).all()
+    except Exception:
+        return []
+
+
+def create_admin_user(
+    db: Session,
+    payload: schemas.AdminUserCreate,
+    hashed_password: str,
+    created_by: Optional[str] = None,
+    force_role: Optional[str] = None,
+) -> models.AdminUser:
+    username = _normalize_admin_username(payload.username)
+    if not username:
+        raise HTTPException(status_code=400, detail='Username requerido')
+    role = _normalize_admin_role(force_role or payload.role)
+    obj = models.AdminUser(
+        username=username,
+        full_name=str(getattr(payload, 'full_name', None) or '').strip() or None,
+        role=role,
+        zone=_normalize_admin_zone(getattr(payload, 'zone', None)),
+        hashed_password=hashed_password,
+        is_active=True,
+        created_by=str(created_by).strip() if created_by else None,
+    )
+    db.add(obj)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise
+    db.refresh(obj)
+    return obj
+
+
+def authenticate_admin_user(db: Session, username: str, plain_password: str):
+    user = get_admin_user_by_username(db, username)
+    if not user or not getattr(user, 'is_active', True):
+        return None
+    from app.utils import verify_password
+    if not verify_password(plain_password, user.hashed_password):
+        return None
+    return user
+
+
+def delete_admin_user(db: Session, user_id: int) -> bool:
+    user = get_admin_user_by_id(db, user_id)
+    if not user:
+        return False
+    db.delete(user)
+    try:
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise
+    return True
+
+
+def update_admin_user_zone(db: Session, user_id: int, zone: Optional[str]) -> Optional[models.AdminUser]:
+    user = get_admin_user_by_id(db, user_id)
+    if not user:
+        return None
+    user.zone = _normalize_admin_zone(zone)
+    db.add(user)
+    try:
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise
+    try:
+        db.refresh(user)
+    except Exception:
+        pass
     return user
 
 

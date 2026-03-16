@@ -46,6 +46,19 @@ class ProductChange(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class AdminUser(Base):
+    __tablename__ = "admin_users"
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String(80), nullable=False, unique=True, index=True)
+    full_name = Column(String(200), nullable=True)
+    role = Column(String(50), nullable=False, default='admin')
+    zone = Column(String(120), nullable=True)
+    hashed_password = Column(String(200), nullable=False)
+    is_active = Column(Boolean, default=True)
+    created_by = Column(String(80), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class Order(Base):
     __tablename__ = "orders"
     id = Column(Integer, primary_key=True, index=True)
@@ -80,6 +93,20 @@ class Order(Base):
     delivery_cutoff_applied = Column(Boolean, nullable=True, default=False)
     delivery_timezone = Column(String(80), nullable=True)
     delivery_cutoff_hour = Column(Integer, nullable=True)
+    # Assignment to delivery driver (admin users)
+    assigned_driver_id = Column(Integer, nullable=True)
+    assigned_driver_username = Column(String(80), nullable=True)
+    assigned_driver_name = Column(String(200), nullable=True)
+    assigned_driver_zone = Column(String(120), nullable=True)
+    assigned_at = Column(DateTime(timezone=True), nullable=True)
+    delivery_lat = Column(Float, nullable=True)
+    delivery_lon = Column(Float, nullable=True)
+    route_id = Column(String(120), nullable=True)
+    route_order = Column(Integer, nullable=True)
+    route_generated_at = Column(DateTime(timezone=True), nullable=True)
+    delivered_at = Column(DateTime(timezone=True), nullable=True)
+    delivered_by_id = Column(Integer, nullable=True)
+    delivered_by_username = Column(String(80), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

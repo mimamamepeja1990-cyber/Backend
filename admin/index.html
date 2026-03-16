@@ -63,7 +63,9 @@
         <a data-section="orders">Pedidos</a>
         <a data-section="customers">Clientes</a>
         <a data-section="preparations">Preparaciones</a>
-        <a data-section="users" data-role="owner">Usuarios</a>
+        <a data-section="routes" data-role="owner,admin">Rutas</a>
+        <a data-section="deliveries" data-role="owner,admin">Entregas</a>
+        <a data-section="users" data-role="owner,admin">Usuarios</a>
         <a data-section="admin-console" data-role="owner">Consola</a>
       </nav>
       <div class="footer-controls">
@@ -405,9 +407,62 @@
         <div id="preparationsList" class="preparations-list"></div>
       </section>
 
-      <section id="users" class="section hidden" data-role="owner">
+      <section id="routes" class="section hidden" data-role="owner,admin">
+        <h2>Rutas</h2>
+        <p>Asigná pedidos preparados a repartidores y generá una ruta sugerida.</p>
+        <div class="routes-controls">
+          <div class="field">
+            <label for="routesDriverSelect">Repartidor</label>
+            <select id="routesDriverSelect"></select>
+          </div>
+          <div class="routes-buttons">
+            <button id="routesRefreshBtn" class="btn">Cargar pedidos</button>
+            <button id="routesOptimizeBtn" class="btn">Optimizar ruta</button>
+            <button id="routesAutoAssignBtn" class="btn">Auto-optimizar zonas</button>
+          </div>
+        </div>
+        <div class="routes-columns">
+          <div class="routes-col">
+            <div class="routes-col-head">Sin asignar (preparado)</div>
+            <div id="routesUnassigned" class="routes-list"></div>
+          </div>
+          <div class="routes-col">
+            <div class="routes-col-head">Asignados (ruta)</div>
+            <div id="routesAssigned" class="routes-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="deliveries" class="section hidden" data-role="owner,admin">
+        <h2>Entregas</h2>
+        <p>Historial de entregas por repartidor.</p>
+        <div class="controls center">
+          <select id="deliveriesDriverSelect"></select>
+          <input id="deliveriesDateFrom" type="date" title="Desde" />
+          <input id="deliveriesDateTo" type="date" title="Hasta" />
+          <button id="deliveriesRefreshBtn" class="btn">Actualizar</button>
+        </div>
+        <div class="table-wrap">
+          <table id="deliveriesTable">
+            <thead>
+              <tr>
+                <th>Pedido</th>
+                <th>Repartidor</th>
+                <th>Zona</th>
+                <th>Entrega</th>
+                <th>Cliente</th>
+                <th>Dirección</th>
+                <th>Total</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="users" class="section hidden" data-role="owner,admin">
         <h2>Usuarios</h2>
-        <p>Creá usuarios con rol admin o repartidor.</p>
+        <p>Creá usuarios con rol admin o repartidor. Admins y owners pueden asignar la zona de los repartidores.</p>
         <form id="userForm" class="user-form">
           <div class="row">
             <div class="field">
@@ -425,6 +480,30 @@
                 <option value="repartidor">Repartidor</option>
               </select>
             </div>
+            <div class="field">
+              <label for="userZone">Zona</label>
+              <select id="userZone" name="userZone">
+                <option value="">Sin zona</option>
+                <option value="Capital">Capital</option>
+                <option value="Godoy Cruz">Godoy Cruz</option>
+                <option value="Guaymallen">Guaymallen</option>
+                <option value="Las Heras">Las Heras</option>
+                <option value="Lavalle">Lavalle</option>
+                <option value="Lujan de Cuyo">Lujan de Cuyo</option>
+                <option value="Maipu">Maipu</option>
+                <option value="Junin">Junin</option>
+                <option value="La Paz">La Paz</option>
+                <option value="Rivadavia">Rivadavia</option>
+                <option value="San Martin">San Martin</option>
+                <option value="Santa Rosa">Santa Rosa</option>
+                <option value="San Carlos">San Carlos</option>
+                <option value="Tunuyan">Tunuyan</option>
+                <option value="Tupungato">Tupungato</option>
+                <option value="San Rafael">San Rafael</option>
+                <option value="General Alvear">General Alvear</option>
+                <option value="Malargue">Malargue</option>
+              </select>
+            </div>
           </div>
           <div class="form-actions">
             <button class="btn primary" type="submit">Crear usuario</button>
@@ -437,6 +516,7 @@
               <tr>
                 <th>Usuario</th>
                 <th>Rol</th>
+                <th>Zona</th>
                 <th>Creado</th>
                 <th>Acciones</th>
               </tr>

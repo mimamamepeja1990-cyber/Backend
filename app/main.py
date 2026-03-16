@@ -21,6 +21,7 @@ import json
 import re
 import time
 import datetime
+import math
 import unicodedata
 from io import StringIO, BytesIO
 from html import escape as html_escape
@@ -202,6 +203,33 @@ def _is_truthy(value: Optional[str]) -> bool:
         return False
 
 
+# --- Geocoding (optional, for delivery route optimization) ---
+GEOCODE_PROVIDER = str(os.environ.get('GEOCODE_PROVIDER') or '').strip().lower() or 'nominatim'
+GEOCODE_GOOGLE_API_KEY = str(os.environ.get('GEOCODE_GOOGLE_API_KEY') or '').strip() or None
+GEOCODE_ENABLED = _is_truthy(os.environ.get('GEOCODE_ENABLED')) or bool(GEOCODE_GOOGLE_API_KEY)
+GEOCODE_NOMINATIM_URL = str(os.environ.get('GEOCODE_NOMINATIM_URL') or 'https://nominatim.openstreetmap.org/search').strip()
+GEOCODE_NOMINATIM_EMAIL = str(os.environ.get('GEOCODE_NOMINATIM_EMAIL') or '').strip() or None
+GEOCODE_USER_AGENT = str(os.environ.get('GEOCODE_USER_AGENT') or 'catalog-admin').strip()
+GEOCODE_RATE_LIMIT_MS = int(float(os.environ.get('GEOCODE_RATE_LIMIT_MS') or 1100))
+GEOCODE_TIMEOUT_SEC = float(os.environ.get('GEOCODE_TIMEOUT_SEC') or 6)
+GEOCODE_CACHE_TTL_SEC = int(float(os.environ.get('GEOCODE_CACHE_TTL_SEC') or (60 * 60 * 24 * 30)))
+GEOCODE_CACHE_MAX = int(float(os.environ.get('GEOCODE_CACHE_MAX') or 2500))
+GEOCODE_MAX_PER_RUN = int(float(os.environ.get('GEOCODE_MAX_PER_RUN') or 60))
+GEOCODE_RUN_WINDOW_SEC = int(float(os.environ.get('GEOCODE_RUN_WINDOW_SEC') or 60))
+GEOCODE_PERSIST_CACHE = _is_truthy(os.environ.get('GEOCODE_PERSIST_CACHE'))
+ROUTE_START_LAT_RAW = os.environ.get('ROUTE_START_LAT') or '-32.819094'
+ROUTE_START_LON_RAW = os.environ.get('ROUTE_START_LON') or '-68.804286'
+ROUTE_START_ADDRESS = str(os.environ.get('ROUTE_START_ADDRESS') or '').strip()
+
+_GEOCODE_CACHE: Dict[str, Dict[str, Any]] = {}
+_GEOCODE_CACHE_LOCK = threading.Lock()
+_GEOCODE_CACHE_LOADED = False
+_GEOCODE_LAST_CALL_TS = 0.0
+_GEOCODE_RUN_STATS = {'window_start': 0.0, 'count': 0}
+_GEOCODE_CACHE_DIRTY = False
+_ROUTE_START_CACHE: Dict[str, Any] = {}
+
+
 def _running_on_render() -> bool:
     return bool(
         os.environ.get('RENDER')
@@ -220,10 +248,83 @@ def _startup_background_enabled() -> bool:
     return _running_on_render()
 
 
+def _ensure_default_admin_owner() -> None:
+    """Create a default admin owner user if none exists (DB-backed admin auth)."""
+    username = str(os.environ.get('ADMIN_OWNER_USERNAME') or 'emiliano').strip()
+    password = str(os.environ.get('ADMIN_OWNER_PASSWORD') or 'badbunni33').strip()
+    if not username or not password:
+        return
+    db = SessionLocal()
+    try:
+        try:
+            existing_owner = db.query(models.AdminUser).filter(models.AdminUser.role == 'owner').first()
+        except Exception:
+            existing_owner = None
+        if existing_owner:
+            return
+        existing_user = crud.get_admin_user_by_username(db, username)
+        if existing_user:
+            try:
+                existing_user.role = 'owner'
+                db.add(existing_user)
+                db.commit()
+                return
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+        payload = schemas.AdminUserCreate(
+            username=username,
+            password=password,
+            role='owner',
+            full_name='Owner',
+        )
+        hashed = utils.hash_password(password)
+        crud.create_admin_user(db, payload, hashed_password=hashed, created_by='system', force_role='owner')
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+def _ensure_admin_user_columns() -> None:
+    try:
+        insp = inspect(engine)
+        if 'admin_users' not in insp.get_table_names():
+            return
+        existing = {c['name'] for c in insp.get_columns('admin_users')}
+    except Exception:
+        existing = set()
+    if 'zone' in existing:
+        return
+    try:
+        dialect_local = getattr(engine, 'dialect', None)
+        dialect_name = getattr(dialect_local, 'name', '') if dialect_local else ''
+        with engine.begin() as conn:
+            if 'postgres' in dialect_name:
+                try:
+                    conn.execute(text("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS zone VARCHAR(120)"))
+                except Exception:
+                    conn.execute(text("ALTER TABLE admin_users ADD COLUMN zone VARCHAR(120)"))
+            else:
+                conn.execute(text("ALTER TABLE admin_users ADD COLUMN zone VARCHAR(120)"))
+    except Exception:
+        logger.exception('ensure_admin_user_columns failed')
+
+
 def _startup_bootstrap_sync() -> None:
     """Run blocking startup tasks in a background thread when desired."""
     # Startup
     Base.metadata.create_all(bind=engine)
+
+    # Ensure admin owner user exists (so panel users persist in DB).
+    try:
+        _ensure_admin_user_columns()
+        _ensure_default_admin_owner()
+    except Exception:
+        logger.exception('ensure_default_admin_owner failed')
 
     # Ensure legacy DBs get required columns on the `orders` table.
     # Use SQLAlchemy inspector (cross-dialect) to detect missing columns and
@@ -254,6 +355,19 @@ def _startup_bootstrap_sync() -> None:
                 'delivery_cutoff_applied': 'BOOLEAN',
                 'delivery_timezone': 'VARCHAR(80)',
                 'delivery_cutoff_hour': 'INTEGER',
+                'assigned_driver_id': 'INTEGER',
+                'assigned_driver_username': 'VARCHAR(80)',
+                'assigned_driver_name': 'VARCHAR(200)',
+                'assigned_driver_zone': 'VARCHAR(120)',
+                'assigned_at': 'TIMESTAMP',
+                'delivery_lat': 'FLOAT',
+                'delivery_lon': 'FLOAT',
+                'route_id': 'VARCHAR(120)',
+                'route_order': 'INTEGER',
+                'route_generated_at': 'TIMESTAMP',
+                'delivered_at': 'TIMESTAMP',
+                'delivered_by_id': 'INTEGER',
+                'delivered_by_username': 'VARCHAR(80)',
             }
 
             try:
@@ -1498,6 +1612,262 @@ def _compose_order_maps_query(snapshot: Dict[str, Any]) -> str:
     return ', '.join(parts)
 
 
+def _normalize_geocode_query(query: Any) -> str:
+    try:
+        return ' '.join(str(query or '').strip().split())
+    except Exception:
+        return ''
+
+
+def _geocode_cache_key(provider: str, query: str) -> str:
+    return f"{provider}:{_normalize_geocode_query(query).lower()}"
+
+
+def _load_geocode_cache(db: Optional[Session]) -> None:
+    global _GEOCODE_CACHE_LOADED, _GEOCODE_CACHE
+    if not GEOCODE_PERSIST_CACHE or _GEOCODE_CACHE_LOADED or db is None:
+        return
+    try:
+        cached = crud.get_setting(db, 'geocode_cache_v1')
+        cleaned: Dict[str, Dict[str, Any]] = {}
+        if isinstance(cached, dict):
+            for key, val in cached.items():
+                if not isinstance(val, dict):
+                    continue
+                lat = _coerce_coord(val.get('lat'))
+                lon = _coerce_coord(val.get('lon'))
+                try:
+                    ts = float(val.get('ts') or 0.0)
+                except Exception:
+                    ts = 0.0
+                ok = bool(val.get('ok')) if 'ok' in val else _is_mendoza_point(lat, lon)
+                cleaned[str(key)] = {'lat': lat, 'lon': lon, 'ts': ts, 'ok': ok}
+        with _GEOCODE_CACHE_LOCK:
+            _GEOCODE_CACHE.update(cleaned)
+    except Exception:
+        logger.exception('load geocode cache failed')
+    finally:
+        _GEOCODE_CACHE_LOADED = True
+
+
+def _prune_geocode_cache_unlocked() -> None:
+    if GEOCODE_CACHE_MAX <= 0:
+        _GEOCODE_CACHE.clear()
+        return
+    if len(_GEOCODE_CACHE) <= GEOCODE_CACHE_MAX:
+        return
+    items = sorted(_GEOCODE_CACHE.items(), key=lambda kv: float(kv[1].get('ts') or 0.0))
+    for key, _ in items[: max(0, len(items) - GEOCODE_CACHE_MAX)]:
+        _GEOCODE_CACHE.pop(key, None)
+
+
+def _geocode_cache_get(key: str, db: Optional[Session] = None) -> Optional[Dict[str, Any]]:
+    global _GEOCODE_CACHE_DIRTY
+    if GEOCODE_CACHE_MAX <= 0:
+        return None
+    if GEOCODE_PERSIST_CACHE:
+        _load_geocode_cache(db)
+    now = time.time()
+    with _GEOCODE_CACHE_LOCK:
+        entry = _GEOCODE_CACHE.get(key)
+        if not entry:
+            return None
+        ts = float(entry.get('ts') or 0.0)
+        if GEOCODE_CACHE_TTL_SEC > 0 and ts and (now - ts) > GEOCODE_CACHE_TTL_SEC:
+            _GEOCODE_CACHE.pop(key, None)
+            _GEOCODE_CACHE_DIRTY = True
+            return None
+        return dict(entry)
+
+
+def _persist_geocode_cache(db: Optional[Session]) -> None:
+    global _GEOCODE_CACHE_DIRTY
+    if not GEOCODE_PERSIST_CACHE or not _GEOCODE_CACHE_DIRTY or db is None:
+        return
+    try:
+        with _GEOCODE_CACHE_LOCK:
+            snapshot = dict(_GEOCODE_CACHE)
+            _GEOCODE_CACHE_DIRTY = False
+        crud.set_setting(db, 'geocode_cache_v1', snapshot)
+    except Exception:
+        logger.exception('persist geocode cache failed')
+
+
+def _geocode_cache_set(key: str, lat: Optional[float], lon: Optional[float], ok: bool, db: Optional[Session] = None) -> None:
+    global _GEOCODE_CACHE_DIRTY
+    if GEOCODE_CACHE_MAX <= 0:
+        return
+    with _GEOCODE_CACHE_LOCK:
+        _GEOCODE_CACHE[key] = {
+            'lat': _coerce_coord(lat),
+            'lon': _coerce_coord(lon),
+            'ts': time.time(),
+            'ok': bool(ok),
+        }
+        _prune_geocode_cache_unlocked()
+        _GEOCODE_CACHE_DIRTY = True
+    _persist_geocode_cache(db)
+
+
+def _geocode_budget_ok() -> bool:
+    if GEOCODE_MAX_PER_RUN <= 0:
+        return False
+    now = time.time()
+    with _GEOCODE_CACHE_LOCK:
+        window_start = float(_GEOCODE_RUN_STATS.get('window_start') or 0.0)
+        if (now - window_start) > GEOCODE_RUN_WINDOW_SEC:
+            _GEOCODE_RUN_STATS['window_start'] = now
+            _GEOCODE_RUN_STATS['count'] = 0
+        count = int(_GEOCODE_RUN_STATS.get('count') or 0)
+        if count >= GEOCODE_MAX_PER_RUN:
+            return False
+        _GEOCODE_RUN_STATS['count'] = count + 1
+    return True
+
+
+def _geocode_rate_limit() -> None:
+    global _GEOCODE_LAST_CALL_TS
+    if GEOCODE_RATE_LIMIT_MS <= 0:
+        return
+    now = time.time()
+    wait_for = (GEOCODE_RATE_LIMIT_MS / 1000.0) - (now - _GEOCODE_LAST_CALL_TS)
+    if wait_for > 0:
+        time.sleep(wait_for)
+    _GEOCODE_LAST_CALL_TS = time.time()
+
+
+def _geocode_fetch_nominatim(query: str) -> Tuple[Optional[float], Optional[float], bool]:
+    params = {
+        'q': query,
+        'format': 'json',
+        'limit': 1,
+        'addressdetails': 0,
+        'countrycodes': 'ar',
+    }
+    try:
+        params['viewbox'] = f"{MENDOZA_GEO_BOUNDS['min_lon']},{MENDOZA_GEO_BOUNDS['max_lat']},{MENDOZA_GEO_BOUNDS['max_lon']},{MENDOZA_GEO_BOUNDS['min_lat']}"
+        params['bounded'] = 1
+    except Exception:
+        pass
+    if GEOCODE_NOMINATIM_EMAIL:
+        params['email'] = GEOCODE_NOMINATIM_EMAIL
+    headers = {'User-Agent': GEOCODE_USER_AGENT}
+    try:
+        resp = httpx.get(GEOCODE_NOMINATIM_URL, params=params, headers=headers, timeout=GEOCODE_TIMEOUT_SEC)
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, list) and data:
+            lat = _coerce_coord(data[0].get('lat'))
+            lon = _coerce_coord(data[0].get('lon'))
+            return lat, lon, True
+        return None, None, True
+    except Exception:
+        logger.warning('geocode nominatim failed')
+        return None, None, False
+
+
+def _geocode_fetch_google(query: str) -> Tuple[Optional[float], Optional[float], bool]:
+    if not GEOCODE_GOOGLE_API_KEY:
+        return None, None, False
+    params = {
+        'address': query,
+        'key': GEOCODE_GOOGLE_API_KEY,
+        'region': 'ar',
+    }
+    try:
+        params['bounds'] = f"{MENDOZA_GEO_BOUNDS['min_lat']},{MENDOZA_GEO_BOUNDS['min_lon']}|{MENDOZA_GEO_BOUNDS['max_lat']},{MENDOZA_GEO_BOUNDS['max_lon']}"
+    except Exception:
+        pass
+    try:
+        resp = httpx.get('https://maps.googleapis.com/maps/api/geocode/json', params=params, timeout=GEOCODE_TIMEOUT_SEC)
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            return None, None, True
+        status = str(data.get('status') or '').upper()
+        if status != 'OK':
+            return None, None, True
+        results = data.get('results') or []
+        if results:
+            loc = (results[0].get('geometry') or {}).get('location') or {}
+            lat = _coerce_coord(loc.get('lat'))
+            lon = _coerce_coord(loc.get('lng'))
+            return lat, lon, True
+        return None, None, True
+    except Exception:
+        logger.warning('geocode google failed')
+        return None, None, False
+
+
+def _geocode_lookup(query: str, db: Optional[Session] = None) -> Tuple[Optional[float], Optional[float]]:
+    if not GEOCODE_ENABLED:
+        return None, None
+    q = _normalize_geocode_query(query)
+    if not q:
+        return None, None
+    provider = GEOCODE_PROVIDER
+    if provider == 'google' and not GEOCODE_GOOGLE_API_KEY:
+        provider = 'nominatim'
+    key = _geocode_cache_key(provider, q)
+    cached = _geocode_cache_get(key, db=db)
+    if cached:
+        if cached.get('ok') and _is_mendoza_point(cached.get('lat'), cached.get('lon')):
+            return cached.get('lat'), cached.get('lon')
+        return None, None
+    if not _geocode_budget_ok():
+        return None, None
+    _geocode_rate_limit()
+    if provider == 'google':
+        lat, lon, ok_resp = _geocode_fetch_google(q)
+    else:
+        lat, lon, ok_resp = _geocode_fetch_nominatim(q)
+    if ok_resp:
+        ok = _is_mendoza_point(lat, lon)
+        _geocode_cache_set(key, lat, lon, ok, db=db)
+    if _is_mendoza_point(lat, lon):
+        return float(lat), float(lon)
+    return None, None
+
+
+def _geocode_order_snapshot(snapshot: Dict[str, Any], db: Optional[Session] = None) -> Tuple[Optional[float], Optional[float]]:
+    if not GEOCODE_ENABLED:
+        return None, None
+    query = _compose_order_maps_query(snapshot)
+    if not query:
+        return None, None
+    return _geocode_lookup(query, db=db)
+
+
+def _get_route_start_point(db: Optional[Session] = None) -> Tuple[Optional[float], Optional[float]]:
+    """Return fixed depot start point for routing, if configured."""
+    try:
+        cached = _ROUTE_START_CACHE.get('point')
+        if isinstance(cached, tuple) and len(cached) == 2:
+            lat_c, lon_c = cached
+            if _is_mendoza_point(lat_c, lon_c):
+                return float(lat_c), float(lon_c)
+    except Exception:
+        pass
+    lat = _coerce_coord(ROUTE_START_LAT_RAW)
+    lon = _coerce_coord(ROUTE_START_LON_RAW)
+    if _is_mendoza_point(lat, lon):
+        _ROUTE_START_CACHE['point'] = (float(lat), float(lon))
+        return float(lat), float(lon)
+    address = str(ROUTE_START_ADDRESS or '').strip()
+    if address:
+        query = address
+        if 'mendoza' not in query.lower():
+            query = f"{query}, Mendoza, Argentina"
+        try:
+            lat, lon = _geocode_lookup(query, db=db)
+        except Exception:
+            lat, lon = None, None
+        if _is_mendoza_point(lat, lon):
+            _ROUTE_START_CACHE['point'] = (float(lat), float(lon))
+            return float(lat), float(lon)
+    return None, None
+
+
 def _build_order_maps_url(order_data: Dict[str, Any]) -> str:
     snapshot = _extract_order_address_snapshot(order_data if isinstance(order_data, dict) else {})
     lat = snapshot.get('lat')
@@ -2658,6 +3028,7 @@ def _resend_status_snapshot() -> Dict[str, Any]:
     }
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/token")
+admin_oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/admin/auth/token")
 
 # -------------------------------------------------------------------
 # MIDDLEWARES
@@ -3270,6 +3641,19 @@ def _run_add_user_columns() -> dict:
         ('delivery_cutoff_applied', 'BOOLEAN'),
         ('delivery_timezone', 'VARCHAR(80)'),
         ('delivery_cutoff_hour', 'INTEGER'),
+        ('assigned_driver_id', 'INTEGER'),
+        ('assigned_driver_username', 'VARCHAR(80)'),
+        ('assigned_driver_name', 'VARCHAR(200)'),
+        ('assigned_driver_zone', 'VARCHAR(120)'),
+        ('assigned_at', 'TIMESTAMP'),
+        ('delivery_lat', 'FLOAT'),
+        ('delivery_lon', 'FLOAT'),
+        ('route_id', 'VARCHAR(120)'),
+        ('route_order', 'INTEGER'),
+        ('route_generated_at', 'TIMESTAMP'),
+        ('delivered_at', 'TIMESTAMP'),
+        ('delivered_by_id', 'INTEGER'),
+        ('delivered_by_username', 'VARCHAR(80)'),
     ]
     dialect = engine.dialect.name if engine and getattr(engine, 'dialect', None) else ''
     try:
@@ -4507,6 +4891,494 @@ def auth_replace_addresses(
     except Exception as e:
         logger.exception('auth_replace_addresses failed: %s', e)
         raise HTTPException(status_code=500, detail='Could not save addresses')
+
+# --- Admin users / staff auth ---
+def _normalize_admin_role(value: Optional[str]) -> str:
+    role = str(value or '').strip().lower()
+    if role not in ('owner', 'admin', 'repartidor'):
+        role = 'admin'
+    return role
+
+
+def _normalize_admin_zone(value: Optional[str]) -> Optional[str]:
+    try:
+        zone = str(value or '').strip()
+    except Exception:
+        zone = ''
+    if not zone:
+        return None
+    return zone
+
+
+def _parse_admin_zones(value: Optional[str]) -> List[str]:
+    if value is None:
+        return []
+    text = str(value or '').strip()
+    if not text:
+        return []
+    token = _normalize_region_token(text)
+    if token in ('todos', 'todas', 'all', '*'):
+        return []
+    parts = re.split(r'[;,/|]+', text)
+    zones = []
+    for part in parts:
+        t = _normalize_region_token(part)
+        if not t:
+            continue
+        if t in ('todos', 'todas', 'all', '*'):
+            return []
+        zones.append(t)
+    return zones
+
+
+def _canonicalize_zones(zone_tokens: List[str]) -> List[str]:
+    if not zone_tokens:
+        return []
+    canonical = []
+    seen = set()
+    for token in zone_tokens:
+        if not token or token in seen:
+            continue
+        seen.add(token)
+        match = None
+        for dep in _MENDOZA_DEPARTMENTS:
+            if _normalize_region_token(dep) == token:
+                match = dep
+                break
+        canonical.append(match or token)
+    return canonical
+
+
+def _order_matches_zone(order_data: Dict[str, Any], zone_tokens: List[str]) -> bool:
+    if not zone_tokens:
+        return True
+    try:
+        snapshot = _extract_order_address_snapshot(order_data if isinstance(order_data, dict) else {})
+    except Exception:
+        snapshot = {}
+    barrio = _normalize_region_token(snapshot.get('barrio'))
+    dept = _normalize_region_token(snapshot.get('department'))
+    raw_address = _normalize_region_token(snapshot.get('raw_address'))
+    postal = _normalize_postal_code(snapshot.get('postal_code'))
+    deps_for_postal = _departments_for_postal(postal)
+    deps_tokens = { _normalize_region_token(d) for d in deps_for_postal }
+    for z in zone_tokens:
+        if not z:
+            continue
+        if dept and dept == z:
+            return True
+        if z in deps_tokens:
+            return True
+        if barrio and z in barrio:
+            return True
+        if raw_address and z in raw_address:
+            return True
+    return False
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    try:
+        r = 6371.0
+        phi1 = math.radians(lat1)
+        phi2 = math.radians(lat2)
+        dphi = math.radians(lat2 - lat1)
+        dlambda = math.radians(lon2 - lon1)
+        a = math.sin(dphi / 2) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2) ** 2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        return r * c
+    except Exception:
+        return 0.0
+
+
+def _optimize_route_order(nodes: List[dict]) -> List[dict]:
+    """Nearest neighbor + 2-opt optimization. Nodes must include lat/lon."""
+    if len(nodes) <= 2:
+        return nodes
+    remaining = nodes[:]
+    start_idx = 0
+    try:
+        best_score = float('inf')
+        for idx, cand in enumerate(remaining):
+            score = 0.0
+            for other in remaining:
+                if other is cand:
+                    continue
+                score += _haversine_km(cand['lat'], cand['lon'], other['lat'], other['lon'])
+            if score < best_score:
+                best_score = score
+                start_idx = idx
+    except Exception:
+        start_idx = 0
+    path = [remaining.pop(start_idx)]
+    while remaining:
+        last = path[-1]
+        best_idx = 0
+        best_dist = float('inf')
+        for idx, cand in enumerate(remaining):
+            d = _haversine_km(last['lat'], last['lon'], cand['lat'], cand['lon'])
+            if d < best_dist:
+                best_dist = d
+                best_idx = idx
+        path.append(remaining.pop(best_idx))
+    # 2-opt improvement
+    def path_distance(p):
+        total = 0.0
+        for i in range(len(p) - 1):
+            total += _haversine_km(p[i]['lat'], p[i]['lon'], p[i+1]['lat'], p[i+1]['lon'])
+        return total
+    improved = True
+    iterations = 0
+    max_iter = min(600, max(120, len(path) * 6))
+    while improved and iterations < max_iter:
+        improved = False
+        iterations += 1
+        for i in range(1, len(path) - 2):
+            for j in range(i + 1, len(path) - 1):
+                a = path[i - 1]; b = path[i]
+                c = path[j]; d = path[j + 1]
+                dist_before = _haversine_km(a['lat'], a['lon'], b['lat'], b['lon']) + _haversine_km(c['lat'], c['lon'], d['lat'], d['lon'])
+                dist_after = _haversine_km(a['lat'], a['lon'], c['lat'], c['lon']) + _haversine_km(b['lat'], b['lon'], d['lat'], d['lon'])
+                if dist_after + 1e-6 < dist_before:
+                    path[i:j+1] = reversed(path[i:j+1])
+                    improved = True
+        if not improved:
+            break
+    return path
+
+
+def _optimize_route_order_with_start(nodes: List[dict], start_lat: float, start_lon: float) -> List[dict]:
+    """Optimize route order starting from a fixed depot point."""
+    if len(nodes) <= 1:
+        return nodes
+    remaining = nodes[:]
+    try:
+        first_idx = min(
+            range(len(remaining)),
+            key=lambda i: _haversine_km(start_lat, start_lon, remaining[i]['lat'], remaining[i]['lon'])
+        )
+    except Exception:
+        first_idx = 0
+    path = [remaining.pop(first_idx)]
+    while remaining:
+        last = path[-1]
+        best_idx = 0
+        best_dist = float('inf')
+        for idx, cand in enumerate(remaining):
+            d = _haversine_km(last['lat'], last['lon'], cand['lat'], cand['lon'])
+            if d < best_dist:
+                best_dist = d
+                best_idx = idx
+        path.append(remaining.pop(best_idx))
+
+    def path_distance(p):
+        if not p:
+            return 0.0
+        total = _haversine_km(start_lat, start_lon, p[0]['lat'], p[0]['lon'])
+        for i in range(len(p) - 1):
+            total += _haversine_km(p[i]['lat'], p[i]['lon'], p[i+1]['lat'], p[i+1]['lon'])
+        return total
+
+    improved = True
+    iterations = 0
+    max_iter = min(600, max(120, len(path) * 6))
+    while improved and iterations < max_iter:
+        improved = False
+        iterations += 1
+        n = len(path)
+        for i in range(0, n - 1):
+            for j in range(i + 1, n):
+                a_lat = start_lat if i == 0 else path[i - 1]['lat']
+                a_lon = start_lon if i == 0 else path[i - 1]['lon']
+                b = path[i]
+                c = path[j]
+                if j + 1 < n:
+                    d = path[j + 1]
+                    dist_before = _haversine_km(a_lat, a_lon, b['lat'], b['lon']) + _haversine_km(c['lat'], c['lon'], d['lat'], d['lon'])
+                    dist_after = _haversine_km(a_lat, a_lon, c['lat'], c['lon']) + _haversine_km(b['lat'], b['lon'], d['lat'], d['lon'])
+                else:
+                    dist_before = _haversine_km(a_lat, a_lon, b['lat'], b['lon'])
+                    dist_after = _haversine_km(a_lat, a_lon, c['lat'], c['lon'])
+                if dist_after + 1e-6 < dist_before:
+                    path[i:j + 1] = reversed(path[i:j + 1])
+                    improved = True
+        if not improved:
+            break
+    return path
+
+
+def _extract_admin_actor_from_request(request: Request) -> Tuple[Optional[int], Optional[str]]:
+    try:
+        auth = request.headers.get('authorization') or request.headers.get('Authorization')
+    except Exception:
+        auth = None
+    if not auth or not isinstance(auth, str) or not auth.lower().startswith('bearer '):
+        return None, None
+    token = auth.split(' ', 1)[1]
+    try:
+        payload = utils.decode_access_token(token)
+    except Exception:
+        return None, None
+    if not payload or payload.get('kind') != 'admin':
+        return None, None
+    try:
+        uid = payload.get('id')
+        uid = int(uid) if uid is not None else None
+    except Exception:
+        uid = None
+    uname = payload.get('sub') or payload.get('username')
+    return uid, (str(uname).strip() if uname else None)
+
+
+def _resolve_order_coords(order: Dict[str, Any], db: Optional[Session] = None) -> Tuple[Optional[float], Optional[float]]:
+    """Return (lat, lon) for the order, using stored coords or user address fallback."""
+    try:
+        snapshot = _extract_order_address_snapshot(order if isinstance(order, dict) else {})
+    except Exception:
+        snapshot = {}
+    lat = snapshot.get('lat')
+    lon = snapshot.get('lon')
+    if _is_mendoza_point(lat, lon):
+        return float(lat), float(lon)
+
+    # Try user default address
+    uid = None
+    try:
+        uid = order.get('user_id')
+    except Exception:
+        uid = None
+    if uid is not None and db is not None:
+        try:
+            addr = db.query(models.UserAddress).filter(models.UserAddress.user_id == int(uid)).order_by(
+                models.UserAddress.is_default.desc(),
+                models.UserAddress.updated_at.desc().nullslast(),
+                models.UserAddress.created_at.desc(),
+            ).first()
+            if addr and addr.lat is not None and addr.lon is not None:
+                lat = float(addr.lat)
+                lon = float(addr.lon)
+        except Exception:
+            lat = None
+            lon = None
+
+    if not _is_mendoza_point(lat, lon):
+        try:
+            lat, lon = _geocode_order_snapshot(snapshot, db=db)
+        except Exception:
+            lat = None
+            lon = None
+
+    if _is_mendoza_point(lat, lon):
+        # Persist to order for future routing
+        try:
+            oid = order.get('id')
+            if oid is not None and db is not None:
+                with engine.begin() as conn:
+                    if str(oid).isdigit():
+                        conn.execute(
+                            text("UPDATE orders SET delivery_lat = :lat, delivery_lon = :lon WHERE id = :id"),
+                            {'lat': lat, 'lon': lon, 'id': int(oid)},
+                        )
+                    else:
+                        conn.execute(
+                            text("UPDATE orders SET delivery_lat = :lat, delivery_lon = :lon WHERE CAST(id AS TEXT) = :id"),
+                            {'lat': lat, 'lon': lon, 'id': str(oid)},
+                        )
+                order['delivery_lat'] = lat
+                order['delivery_lon'] = lon
+        except Exception:
+            pass
+        return float(lat), float(lon)
+    return None, None
+
+
+def get_current_admin_user(token: str = Depends(admin_oauth2_scheme)):
+    try:
+        payload = utils.decode_access_token(token)
+    except Exception as e:
+        logger.exception('get_current_admin_user: decode_access_token failed: %s', e)
+        raise HTTPException(status_code=401, detail='Invalid token')
+    if not payload or payload.get('kind') != 'admin':
+        raise HTTPException(status_code=401, detail='Invalid token payload')
+    username = payload.get('sub') or payload.get('username')
+    user_id = payload.get('id')
+    if not username and not user_id:
+        raise HTTPException(status_code=401, detail='Invalid token payload')
+    db = SessionLocal()
+    try:
+        user = None
+        if user_id is not None:
+            try:
+                user = crud.get_admin_user_by_id(db, int(user_id))
+            except Exception:
+                user = None
+        if not user and username:
+            user = crud.get_admin_user_by_username(db, username)
+        if not user:
+            raise HTTPException(status_code=401, detail='Admin user not found')
+        if not getattr(user, 'is_active', True):
+            raise HTTPException(status_code=403, detail='Admin user disabled')
+        return user
+    finally:
+        db.close()
+
+
+def require_admin_owner(current_admin=Depends(get_current_admin_user)):
+    if not current_admin or getattr(current_admin, 'role', None) != 'owner':
+        raise HTTPException(status_code=403, detail='Owner access required')
+    return current_admin
+
+
+@app.post('/admin/auth/token', response_model=schemas.Token)
+async def admin_login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    def task():
+        db = SessionLocal()
+        try:
+            user = crud.authenticate_admin_user(db, form_data.username, form_data.password)
+            return user
+        finally:
+            db.close()
+
+    try:
+        user = await anyio.to_thread.run_sync(task)
+    except Exception as e:
+        logger.exception('Unexpected error in /admin/auth/token: %s', e)
+        raise HTTPException(status_code=500, detail='Server error')
+
+    if not user:
+        raise HTTPException(status_code=401, detail='Incorrect credentials')
+    access_token = utils.create_access_token({
+        "sub": user.username,
+        "id": user.id,
+        "role": user.role,
+        "zone": getattr(user, 'zone', None),
+        "kind": "admin",
+    })
+    logger.info('admin_login_for_access_token: issued token for admin id=%s user=%s', user.id, user.username)
+    return {"access_token": access_token, "token_type": "bearer"}
+
+
+@app.get('/admin/auth/me', response_model=schemas.AdminUserResponse)
+def admin_auth_me(current_admin=Depends(get_current_admin_user)):
+    return current_admin
+
+
+@app.get('/admin/users', response_model=List[schemas.AdminUserResponse])
+def admin_list_users(current_admin=Depends(get_current_admin_user), db: Session = Depends(get_db)):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    users = crud.list_admin_users(db)
+    if role == 'owner':
+        return users
+    # Admins can see only repartidores to assign zones.
+    return [u for u in (users or []) if str(getattr(u, 'role', '') or '').strip().lower() == 'repartidor']
+
+
+@app.post('/admin/users', response_model=schemas.AdminUserResponse)
+def admin_create_user(payload: schemas.AdminUserCreate, current_owner=Depends(require_admin_owner), db: Session = Depends(get_db)):
+    username = str(payload.username or '').strip()
+    if not username:
+        raise HTTPException(status_code=400, detail='Username requerido')
+    role = _normalize_admin_role(payload.role)
+    if role == 'owner':
+        raise HTTPException(status_code=400, detail='No se pueden crear owners adicionales')
+    zone = _normalize_admin_zone(getattr(payload, 'zone', None))
+    if role == 'repartidor':
+        zone_tokens = _parse_admin_zones(zone)
+        if not zone_tokens:
+            raise HTTPException(status_code=400, detail='Zona requerida para repartidor')
+        allowed_tokens = {_normalize_region_token(dep) for dep in _MENDOZA_DEPARTMENTS}
+        invalid = [z for z in zone_tokens if z not in allowed_tokens]
+        if invalid:
+            raise HTTPException(status_code=400, detail='Zona inválida')
+        canonical = _canonicalize_zones(zone_tokens)
+        zone = ', '.join(canonical)
+    try:
+        if crud.get_admin_user_by_username(db, username):
+            raise HTTPException(status_code=400, detail='Ese usuario ya existe')
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+    payload.zone = zone
+    hashed = utils.hash_password(payload.password)
+    try:
+        new_user = crud.create_admin_user(db, payload, hashed_password=hashed, created_by=current_owner.username)
+        return new_user
+    except IntegrityError:
+        raise HTTPException(status_code=400, detail='Ese usuario ya existe')
+    except Exception as e:
+        logger.exception('admin_create_user failed: %s', e)
+        raise HTTPException(status_code=500, detail='No se pudo crear el usuario')
+
+
+@app.delete('/admin/users/{user_key}')
+def admin_delete_user(user_key: str, current_owner=Depends(require_admin_owner), db: Session = Depends(get_db)):
+    user = None
+    try:
+        if str(user_key).isdigit():
+            user = crud.get_admin_user_by_id(db, int(user_key))
+    except Exception:
+        user = None
+    if not user:
+        user = crud.get_admin_user_by_username(db, user_key)
+    if not user:
+        raise HTTPException(status_code=404, detail='Usuario no encontrado')
+    if getattr(user, 'role', None) == 'owner':
+        raise HTTPException(status_code=400, detail='No se puede eliminar el owner')
+    try:
+        ok = crud.delete_admin_user(db, int(getattr(user, 'id')))
+        if not ok:
+            raise HTTPException(status_code=404, detail='Usuario no encontrado')
+        return {'ok': True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception('admin_delete_user failed: %s', e)
+        raise HTTPException(status_code=500, detail='No se pudo eliminar el usuario')
+
+
+@app.patch('/admin/users/{user_key}', response_model=schemas.AdminUserResponse)
+def admin_update_user(
+    user_key: str,
+    payload: schemas.AdminUserUpdate,
+    current_admin=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role not in ('owner', 'admin'):
+        raise HTTPException(status_code=403, detail='No autorizado')
+    user = None
+    try:
+        if str(user_key).isdigit():
+            user = crud.get_admin_user_by_id(db, int(user_key))
+    except Exception:
+        user = None
+    if not user:
+        user = crud.get_admin_user_by_username(db, user_key)
+    if not user:
+        raise HTTPException(status_code=404, detail='Usuario no encontrado')
+    target_role = str(getattr(user, 'role', '') or '').strip().lower()
+    if target_role != 'repartidor':
+        raise HTTPException(status_code=403, detail='Solo se puede asignar zona a repartidores')
+    zone = _normalize_admin_zone(getattr(payload, 'zone', None))
+    zone_tokens = _parse_admin_zones(zone)
+    if not zone_tokens:
+        raise HTTPException(status_code=400, detail='Zona requerida')
+    allowed_tokens = {_normalize_region_token(dep) for dep in _MENDOZA_DEPARTMENTS}
+    invalid = [z for z in zone_tokens if z not in allowed_tokens]
+    if invalid:
+        raise HTTPException(status_code=400, detail='Zona inválida')
+    canonical = _canonicalize_zones(zone_tokens)
+    zone = ', '.join(canonical)
+    try:
+        updated = crud.update_admin_user_zone(db, int(getattr(user, 'id')), zone)
+        if not updated:
+            raise HTTPException(status_code=404, detail='Usuario no encontrado')
+        return updated
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception('admin_update_user failed: %s', e)
+        raise HTTPException(status_code=500, detail='No se pudo actualizar el usuario')
 
 @app.post("/products")
 async def create_product(payload: schemas.ProductCreate, request: Request, background_tasks: BackgroundTasks):
@@ -7909,6 +8781,10 @@ def list_orders(
                     '_token_received', '_token_preview', 'source',
                     'payment_method', 'payment_status', 'payment_reference',
                     'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
+                    'assigned_driver_id', 'assigned_driver_username', 'assigned_driver_name', 'assigned_driver_zone', 'assigned_at',
+                    'delivery_lat', 'delivery_lon',
+                    'route_id', 'route_order', 'route_generated_at',
+                    'delivered_at', 'delivered_by_id', 'delivered_by_username',
                 ]
             }
             customer_type_value = _normalize_customer_type(od.get('customer_type'))
@@ -7957,6 +8833,10 @@ def list_orders(
                             'user_full_name','user_email','user_barrio','user_calle','user_numeracion','user_postal_code','user_department','user_id',
                             'source','payment_method','payment_status','payment_reference',
                             'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
+                            'assigned_driver_id', 'assigned_driver_username', 'assigned_driver_name', 'assigned_driver_zone', 'assigned_at',
+                            'delivery_lat', 'delivery_lon',
+                            'route_id', 'route_order', 'route_generated_at',
+                            'delivered_at', 'delivered_by_id', 'delivered_by_username',
                         ):
                             if not od.get(f) and p.get(f):
                                 od[f] = p.get(f)
@@ -8094,6 +8974,595 @@ def list_orders(
     return out
 
 
+@app.get('/admin/orders', response_model=List[schemas.OrderResponse])
+def admin_list_orders(
+    skip: int = 0,
+    limit: int = 200,
+    source: Optional[str] = None,
+    q: Optional[str] = None,
+    date: Optional[str] = None,
+    status: Optional[str] = None,
+    zone: Optional[str] = None,
+    driver_id: Optional[str] = None,
+    driver_username: Optional[str] = None,
+    auto: Optional[str] = None,
+    current_admin=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    # Reuse existing list_orders logic, then apply role-based filters.
+    orders = list_orders(skip=skip, limit=limit, source=source, q=q, date=date, db=db)
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    admin_id = getattr(current_admin, 'id', None)
+    admin_username = getattr(current_admin, 'username', None)
+
+    # Status filter
+    status_values: List[str] = []
+    if status:
+        for part in str(status).split(','):
+            st = _normalize_order_status_strict(part)
+            if st:
+                status_values.append(st)
+    if not status_values and role == 'repartidor':
+        # Default: show delivery-stage orders once prepared.
+        status_values = ['preparado', 'enviado']
+
+    if status_values:
+        orders = [o for o in (orders or []) if _normalize_order_status(o.get('status')) in status_values]
+
+    # Assignment filter
+    target_driver_id = None
+    target_driver_username = None
+    if role == 'repartidor':
+        target_driver_id = admin_id
+        target_driver_username = admin_username
+    else:
+        if driver_id:
+            try:
+                target_driver_id = int(driver_id)
+            except Exception:
+                target_driver_id = None
+        if driver_username:
+            target_driver_username = str(driver_username or '').strip()
+
+    auto_flag = True
+    if auto is not None:
+        auto_flag = str(auto).strip().lower() not in ('0', 'false', 'no', 'off')
+
+    if role == 'repartidor':
+        # Auto-assign prepared orders in zone when requested (default true).
+        if auto_flag:
+            try:
+                _auto_assign_routes_for_driver(current_admin, orders, include_assigned=True, db=db)
+                # refresh list after auto-assign
+                orders = list_orders(skip=skip, limit=limit, source=source, q=q, date=date, db=db)
+            except Exception:
+                logger.exception('auto-assign for repartidor failed')
+
+    if target_driver_id is not None or target_driver_username:
+        orders = [
+            o for o in (orders or [])
+            if (
+                (target_driver_id is not None and str(o.get('assigned_driver_id') or '') == str(target_driver_id)) or
+                (target_driver_username and str(o.get('assigned_driver_username') or '').strip() == str(target_driver_username))
+            )
+        ]
+    elif role == 'repartidor':
+        return []
+
+    # Zone filter (admins/owners only). Repartidores are filtered by assignment.
+    if role != 'repartidor':
+        zone_tokens: List[str] = _parse_admin_zones(zone) if zone else []
+        if zone_tokens:
+            orders = [o for o in (orders or []) if _order_matches_zone(o, zone_tokens)]
+
+    # Prefer route order when present
+    try:
+        if orders and any(o.get('route_order') is not None for o in orders):
+            orders = sorted(
+                orders,
+                key=lambda o: (o.get('route_order') is None, int(o.get('route_order') or 0), str(o.get('id') or '')),
+            )
+    except Exception:
+        pass
+
+    return orders
+
+
+@app.get('/admin/zones')
+def admin_zones(current_admin=Depends(get_current_admin_user)):
+    return {'zones': _MENDOZA_DEPARTMENTS}
+
+
+def _auto_assign_routes_for_driver(driver, orders: List[Dict[str, Any]], include_assigned: bool = True, db: Optional[Session] = None) -> Dict[str, Any]:
+    driver_id = getattr(driver, 'id', None)
+    driver_username = getattr(driver, 'username', None)
+    driver_zone = str(getattr(driver, 'zone', '') or '').strip()
+    if not driver_id or not driver_zone:
+        return {'driver_id': driver_id, 'assigned': 0, 'route_id': None, 'assigned_ids': []}
+    zone_tokens = _parse_admin_zones(driver_zone)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    candidates = []
+    for od in (orders or []):
+        try:
+            status_val = _normalize_order_status(od.get('status'))
+            if status_val not in ('preparado', 'enviado'):
+                continue
+            if status_val == 'entregado':
+                continue
+            # Skip if assigned to other driver
+            assigned_id = od.get('assigned_driver_id')
+            assigned_user = str(od.get('assigned_driver_username') or '').strip()
+            if assigned_id and str(assigned_id) != str(driver_id):
+                continue
+            if assigned_user and assigned_user != str(driver_username or ''):
+                continue
+            if not include_assigned and (assigned_id or assigned_user):
+                continue
+            if zone_tokens and not _order_matches_zone(od, zone_tokens):
+                continue
+            candidates.append(od)
+        except Exception:
+            continue
+
+    if not candidates:
+        return {'driver_id': driver_id, 'assigned': 0, 'route_id': None, 'assigned_ids': []}
+
+    # Build nodes with coords for optimization
+    nodes = []
+    no_coords = []
+    for od in candidates:
+        lat = None
+        lon = None
+        try:
+            snap = _extract_order_address_snapshot(od if isinstance(od, dict) else {})
+            lat = snap.get('lat')
+            lon = snap.get('lon')
+        except Exception:
+            lat = None
+            lon = None
+        if not _is_mendoza_point(lat, lon):
+            try:
+                lat, lon = _resolve_order_coords(od, db=db)
+            except Exception:
+                lat, lon = None, None
+        if not _is_mendoza_point(lat, lon):
+            no_coords.append(od)
+            continue
+        nodes.append({'order': od, 'lat': float(lat), 'lon': float(lon)})
+
+    if nodes:
+        start_lat, start_lon = _get_route_start_point(db=db)
+        if _is_mendoza_point(start_lat, start_lon):
+            optimized_nodes = _optimize_route_order_with_start(nodes, float(start_lat), float(start_lon))
+        else:
+            optimized_nodes = _optimize_route_order(nodes)
+        ordered_orders = [n['order'] for n in optimized_nodes] + no_coords
+    else:
+        ordered_orders = candidates
+
+    route_id = f"route-{driver_id}-{now.strftime('%Y%m%d')}-{int(time.time())}"
+    updated_ids = []
+    try:
+        with engine.begin() as conn:
+            for idx, od in enumerate(ordered_orders, start=1):
+                oid = od.get('id')
+                if oid is None:
+                    continue
+                params = {
+                    'assigned_driver_id': int(driver_id),
+                    'assigned_driver_username': str(driver_username or '').strip(),
+                    'assigned_driver_name': str(getattr(driver, 'full_name', '') or driver_username or '').strip() or None,
+                    'assigned_driver_zone': driver_zone,
+                    'assigned_at': now if not od.get('assigned_driver_id') else od.get('assigned_at') or now,
+                    'route_id': route_id,
+                    'route_order': int(idx),
+                    'route_generated_at': now,
+                    'id': oid,
+                }
+                if str(oid).isdigit():
+                    conn.execute(
+                        text(
+                            "UPDATE orders SET assigned_driver_id = :assigned_driver_id, "
+                            "assigned_driver_username = :assigned_driver_username, "
+                            "assigned_driver_name = :assigned_driver_name, "
+                            "assigned_driver_zone = :assigned_driver_zone, "
+                            "assigned_at = :assigned_at, "
+                            "route_id = :route_id, route_order = :route_order, route_generated_at = :route_generated_at "
+                            "WHERE id = :id"
+                        ),
+                        params,
+                    )
+                else:
+                    conn.execute(
+                        text(
+                            "UPDATE orders SET assigned_driver_id = :assigned_driver_id, "
+                            "assigned_driver_username = :assigned_driver_username, "
+                            "assigned_driver_name = :assigned_driver_name, "
+                            "assigned_driver_zone = :assigned_driver_zone, "
+                            "assigned_at = :assigned_at, "
+                            "route_id = :route_id, route_order = :route_order, route_generated_at = :route_generated_at "
+                            "WHERE CAST(id AS TEXT) = :id"
+                        ),
+                        params,
+                    )
+                updated_ids.append(oid)
+    except Exception:
+        logger.exception('auto-assign route update failed')
+    return {'driver_id': driver_id, 'assigned': len(updated_ids), 'route_id': route_id, 'assigned_ids': updated_ids}
+
+
+def _select_driver_for_order(order: Dict[str, Any], db: Session) -> Optional[Any]:
+    """Pick the best repartidor for an order based on zone and current load."""
+    try:
+        snapshot = _extract_order_address_snapshot(order if isinstance(order, dict) else {})
+    except Exception:
+        snapshot = {}
+    dept = _normalize_region_token(snapshot.get('department'))
+    barrio = _normalize_region_token(snapshot.get('barrio'))
+    raw_addr = _normalize_region_token(snapshot.get('raw_address'))
+    postal = _normalize_postal_code(snapshot.get('postal_code'))
+    if not (dept or barrio or raw_addr or postal):
+        return None
+
+    drivers = [u for u in (crud.list_admin_users(db) or []) if str(getattr(u, 'role', '') or '').strip().lower() == 'repartidor']
+    if not drivers:
+        return None
+
+    matching = []
+    for d in drivers:
+        zone_tokens = _parse_admin_zones(getattr(d, 'zone', None))
+        if not zone_tokens:
+            continue
+        # quick match by department or barrio
+        for z in zone_tokens:
+            if dept and z == _normalize_region_token(dept):
+                matching.append(d)
+                break
+            if barrio and z in barrio:
+                matching.append(d)
+                break
+            if raw_addr and z in raw_addr:
+                matching.append(d)
+                break
+            deps_for_postal = _departments_for_postal(postal)
+            if any(_normalize_region_token(dep) == z for dep in deps_for_postal):
+                matching.append(d)
+                break
+
+    if not matching:
+        return None
+    if len(matching) == 1:
+        return matching[0]
+
+    # Compute load per driver
+    orders = list_orders(skip=0, limit=2000, source=None, q=None, date=None, db=db)
+    loads: Dict[str, int] = {}
+    for o in (orders or []):
+        try:
+            st = _normalize_order_status(o.get('status'))
+            if st not in ('preparado', 'enviado'):
+                continue
+            did = o.get('assigned_driver_id')
+            if did is None:
+                continue
+            key = str(did)
+            loads[key] = loads.get(key, 0) + 1
+        except Exception:
+            continue
+    matching.sort(key=lambda d: loads.get(str(getattr(d, 'id', '')), 0))
+    return matching[0]
+
+
+@app.post('/admin/routes/auto-assign')
+async def admin_auto_assign_routes(request: Request, current_admin=Depends(get_current_admin_user), db: Session = Depends(get_db)):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role not in ('owner', 'admin'):
+        raise HTTPException(status_code=403, detail='No autorizado')
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    driver_id = body.get('driver_id')
+    driver_username = body.get('driver_username')
+    include_assigned = body.get('include_assigned', True)
+
+    drivers = []
+    if driver_id or driver_username:
+        driver = None
+        if driver_id is not None:
+            try:
+                driver = crud.get_admin_user_by_id(db, int(driver_id))
+            except Exception:
+                driver = None
+        if not driver and driver_username:
+            driver = crud.get_admin_user_by_username(db, str(driver_username))
+        if not driver:
+            raise HTTPException(status_code=404, detail='Repartidor no encontrado')
+        if str(getattr(driver, 'role', '') or '').strip().lower() != 'repartidor':
+            raise HTTPException(status_code=400, detail='Usuario no es repartidor')
+        drivers = [driver]
+    else:
+        drivers = [u for u in (crud.list_admin_users(db) or []) if str(getattr(u, 'role', '') or '').strip().lower() == 'repartidor']
+
+    orders = list_orders(skip=0, limit=2000, source=None, q=None, date=None, db=db)
+    results = []
+    for d in drivers:
+        try:
+            result = _auto_assign_routes_for_driver(d, orders, include_assigned=bool(include_assigned), db=db)
+            results.append(result)
+            try:
+                assigned_ids = result.get('assigned_ids') if isinstance(result, dict) else None
+                if assigned_ids:
+                    for od in orders:
+                        try:
+                            if od.get('id') in assigned_ids:
+                                od['assigned_driver_id'] = getattr(d, 'id', None)
+                                od['assigned_driver_username'] = getattr(d, 'username', None)
+                                od['assigned_driver_name'] = getattr(d, 'full_name', None) or getattr(d, 'username', None)
+                                od['assigned_driver_zone'] = getattr(d, 'zone', None)
+                        except Exception:
+                            continue
+            except Exception:
+                pass
+        except Exception:
+            logger.exception('auto-assign driver failed')
+            results.append({'driver_id': getattr(d, 'id', None), 'assigned': 0, 'route_id': None})
+    headers = _cors_headers_for_request(request)
+    return JSONResponse(status_code=200, content={'results': results}, headers=headers)
+
+
+@app.get('/admin/deliveries', response_model=List[schemas.OrderResponse])
+def admin_deliveries(
+    skip: int = 0,
+    limit: int = 200,
+    driver_id: Optional[str] = None,
+    driver_username: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    current_admin=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role not in ('owner', 'admin'):
+        raise HTTPException(status_code=403, detail='No autorizado')
+    orders = list_orders(skip=skip, limit=limit, source=None, q=None, date=None, db=db)
+    out = []
+    df = str(date_from or '').strip()
+    dt = str(date_to or '').strip()
+    for od in (orders or []):
+        status_val = _normalize_order_status(od.get('status'))
+        delivered_at = od.get('delivered_at')
+        if status_val != 'entregado' and not delivered_at:
+            continue
+        if driver_id or driver_username:
+            did = str(od.get('delivered_by_id') or od.get('assigned_driver_id') or '').strip()
+            duser = str(od.get('delivered_by_username') or od.get('assigned_driver_username') or '').strip()
+            if driver_id and did != str(driver_id):
+                continue
+            if driver_username and duser != str(driver_username):
+                continue
+        if df or dt:
+            try:
+                dt_val = delivered_at or od.get('created_at')
+                if isinstance(dt_val, str):
+                    dt_val = _coerce_datetime(dt_val)
+                if isinstance(dt_val, datetime.datetime):
+                    date_key = dt_val.date().isoformat()
+                else:
+                    date_key = ''
+            except Exception:
+                date_key = ''
+            if df and date_key and date_key < df:
+                continue
+            if dt and date_key and date_key > dt:
+                continue
+        out.append(od)
+    out.sort(key=lambda o: (o.get('delivered_at') is None, o.get('delivered_at') or o.get('created_at') or datetime.datetime.min), reverse=True)
+    return out
+
+
+@app.patch('/admin/orders/{order_id}/assign')
+async def admin_assign_order(order_id: str, request: Request, current_admin=Depends(get_current_admin_user)):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role not in ('owner', 'admin'):
+        raise HTTPException(status_code=403, detail='No autorizado')
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    driver_id = body.get('driver_id')
+    driver_username = body.get('driver_username')
+    if driver_id is None and not driver_username:
+        headers = _cors_headers_for_request(request)
+        return JSONResponse(status_code=400, content={'error': 'missing_driver'}, headers=headers)
+
+    # Resolve driver
+    db = SessionLocal()
+    try:
+        driver = None
+        if driver_id is not None:
+            try:
+                driver = crud.get_admin_user_by_id(db, int(driver_id))
+            except Exception:
+                driver = None
+        if not driver and driver_username:
+            driver = crud.get_admin_user_by_username(db, str(driver_username))
+        if not driver:
+            raise HTTPException(status_code=404, detail='Repartidor no encontrado')
+        driver_role = str(getattr(driver, 'role', '') or '').strip().lower()
+        if driver_role != 'repartidor':
+            raise HTTPException(status_code=400, detail='Usuario no es repartidor')
+        driver_zone = str(getattr(driver, 'zone', '') or '').strip()
+        if not driver_zone:
+            raise HTTPException(status_code=400, detail='Repartidor sin zona')
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+    # Ensure columns exist
+    try:
+        _run_add_user_columns()
+    except Exception:
+        pass
+
+    # Fetch order for validation (zone)
+    try:
+        insp = inspect(engine)
+        existing = {c['name'] for c in insp.get_columns('orders')}
+    except Exception:
+        existing = set()
+    cols = ['id']
+    for c in ('status', 'user_barrio', 'user_calle', 'user_numeracion', 'user_postal_code', 'user_department', '_token_preview', 'items', 'created_at'):
+        if c in existing:
+            cols.append(c)
+    cols_sql = ', '.join(cols)
+    row = None
+    try:
+        if str(order_id).isdigit():
+            row = _safe_engine_fetchone(f"SELECT {cols_sql} FROM orders WHERE id = :id LIMIT 1", {'id': int(order_id)})
+        else:
+            row = _safe_engine_fetchone(f"SELECT {cols_sql} FROM orders WHERE CAST(id AS TEXT) = :id LIMIT 1", {'id': str(order_id)})
+    except Exception:
+        row = None
+    if not row:
+        headers = _cors_headers_for_request(request)
+        return JSONResponse(status_code=404, content={'error': 'not_found'}, headers=headers)
+
+    order_data = {k: row[idx] for idx, k in enumerate(cols)}
+    try:
+        if isinstance(order_data.get('_token_preview'), str):
+            order_data['_token_preview'] = json.loads(order_data['_token_preview'])
+    except Exception:
+        pass
+
+    zone_tokens = _parse_admin_zones(driver_zone)
+    try:
+        snapshot = _extract_order_address_snapshot(order_data if isinstance(order_data, dict) else {})
+        has_hint = bool(
+            str(snapshot.get('department') or '').strip() or
+            str(snapshot.get('barrio') or '').strip() or
+            str(snapshot.get('raw_address') or '').strip() or
+            str(snapshot.get('postal_code') or '').strip()
+        )
+        if zone_tokens and has_hint and not _order_matches_zone(order_data, zone_tokens):
+            headers = _cors_headers_for_request(request)
+            return JSONResponse(status_code=409, content={'error': 'zona_no_coincide'}, headers=headers)
+    except Exception:
+        pass
+
+    # Persist assignment
+    try:
+        assigned_at = datetime.datetime.now(datetime.timezone.utc)
+        params = {
+            'assigned_driver_id': int(getattr(driver, 'id')),
+            'assigned_driver_username': str(getattr(driver, 'username') or '').strip(),
+            'assigned_driver_name': str(getattr(driver, 'full_name') or getattr(driver, 'username') or '').strip() or None,
+            'assigned_driver_zone': driver_zone,
+            'assigned_at': assigned_at,
+            'id': int(order_id) if str(order_id).isdigit() else str(order_id),
+        }
+        with engine.begin() as conn:
+            if str(order_id).isdigit():
+                conn.execute(
+                    text(
+                        "UPDATE orders SET assigned_driver_id = :assigned_driver_id, "
+                        "assigned_driver_username = :assigned_driver_username, "
+                        "assigned_driver_name = :assigned_driver_name, "
+                        "assigned_driver_zone = :assigned_driver_zone, "
+                        "assigned_at = :assigned_at "
+                        "WHERE id = :id"
+                    ),
+                    params,
+                )
+            else:
+                conn.execute(
+                    text(
+                        "UPDATE orders SET assigned_driver_id = :assigned_driver_id, "
+                        "assigned_driver_username = :assigned_driver_username, "
+                        "assigned_driver_name = :assigned_driver_name, "
+                        "assigned_driver_zone = :assigned_driver_zone, "
+                        "assigned_at = :assigned_at "
+                        "WHERE CAST(id AS TEXT) = :id"
+                    ),
+                    params,
+                )
+    except Exception as e:
+        logger.exception('admin_assign_order update failed: %s', e)
+        headers = _cors_headers_for_request(request)
+        return JSONResponse(status_code=500, content={'error': 'update_failed'}, headers=headers)
+
+    # Recompute optimized route order for this driver
+    try:
+        db_local = SessionLocal()
+        try:
+            all_orders = list_orders(skip=0, limit=2000, source=None, q=None, date=None, db=db_local)
+            _auto_assign_routes_for_driver(driver, all_orders, include_assigned=True, db=db_local)
+        finally:
+            db_local.close()
+    except Exception:
+        pass
+
+    # Return updated order (best effort)
+    try:
+        insp = inspect(engine)
+        existing = {c['name'] for c in insp.get_columns('orders')}
+    except Exception:
+        existing = set()
+    cols = ['id']
+    for c in ('items', 'total', 'created_at', 'status'):
+        if c in existing:
+            cols.append(c)
+    optional = [
+        'customer_type',
+        'user_id','user_full_name','user_email','user_barrio','user_calle','user_numeracion','user_postal_code','user_department',
+        '_token_received','_token_preview','source',
+        'payment_method','payment_status','payment_reference',
+        'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
+        'assigned_driver_id', 'assigned_driver_username', 'assigned_driver_name', 'assigned_driver_zone', 'assigned_at',
+        'delivery_lat', 'delivery_lon',
+        'route_id', 'route_order', 'route_generated_at',
+        'delivered_at', 'delivered_by_id', 'delivered_by_username',
+    ]
+    for c in optional:
+        if c in existing:
+            cols.append(c)
+    cols_sql = ', '.join(cols)
+    updated_row = None
+    try:
+        if str(order_id).isdigit():
+            updated_row = _safe_engine_fetchone(f"SELECT {cols_sql} FROM orders WHERE id = :id LIMIT 1", {'id': int(order_id)})
+        else:
+            updated_row = _safe_engine_fetchone(f"SELECT {cols_sql} FROM orders WHERE CAST(id AS TEXT) = :id LIMIT 1", {'id': str(order_id)})
+    except Exception:
+        updated_row = None
+    if not updated_row:
+        headers = _cors_headers_for_request(request)
+        return JSONResponse(status_code=200, content={'ok': True}, headers=headers)
+    od = {k: updated_row[idx] for idx, k in enumerate(cols)}
+    try:
+        if isinstance(od.get('items'), str):
+            od['items'] = json.loads(od['items'])
+    except Exception:
+        od['items'] = []
+    try:
+        if isinstance(od.get('_token_preview'), str):
+            od['_token_preview'] = json.loads(od['_token_preview'])
+    except Exception:
+        pass
+    try:
+        od = _attach_maps_url(od)
+    except Exception:
+        pass
+    try:
+        await push_event({"action": "order_updated", "order": od})
+    except Exception:
+        pass
+    headers = _cors_headers_for_request(request)
+    return JSONResponse(status_code=200, content=jsonable_encoder(od), headers=headers)
+
+
 @app.patch('/orders/{order_id}/status')
 async def update_order_status(order_id: str, request: Request):
     """Update the `status` field for an order and broadcast the change via WS.
@@ -8199,6 +9668,7 @@ async def update_order_status(order_id: str, request: Request):
     if not status_norm:
         headers = _cors_headers_for_request(request)
         return JSONResponse(status_code=400, content={'error': 'invalid_status'}, headers=headers)
+    delivered_actor_id, delivered_actor_username = _extract_admin_actor_from_request(request)
 
     # Decide whether we should treat order_id as int or text for SQL WHERE
     use_id_int = False
@@ -8358,6 +9828,7 @@ async def update_order_status(order_id: str, request: Request):
         '_token_received','_token_preview','source',
         'payment_method','payment_status','payment_reference',
         'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
+        'assigned_driver_id', 'assigned_driver_username', 'assigned_driver_name', 'assigned_driver_zone', 'assigned_at',
     ]
     for c in optional:
         if c in existing:
@@ -8413,9 +9884,112 @@ async def update_order_status(order_id: str, request: Request):
     except Exception:
         pass
 
+    # Auto-assign prepared orders to a repartidor based on zone (if not assigned yet)
+    try:
+        if status_norm == 'preparado' and not od.get('assigned_driver_id') and not od.get('assigned_driver_username'):
+            db_local = SessionLocal()
+            try:
+                driver = _select_driver_for_order(od, db_local)
+                if driver:
+                    all_orders = list_orders(skip=0, limit=2000, source=None, q=None, date=None, db=db_local)
+                    _auto_assign_routes_for_driver(driver, all_orders, include_assigned=True, db=db_local)
+                    # re-fetch updated order to include assignment + route fields
+                    try:
+                        insp = inspect(engine)
+                        existing = {c['name'] for c in insp.get_columns('orders')}
+                    except Exception:
+                        existing = set()
+                    cols = ['id']
+                    for c in ('items', 'total', 'created_at', 'status'):
+                        if c in existing:
+                            cols.append(c)
+                    optional = [
+                        'customer_type',
+                        'user_id','user_full_name','user_email','user_barrio','user_calle','user_numeracion','user_postal_code','user_department',
+                        '_token_received','_token_preview','source',
+                        'payment_method','payment_status','payment_reference',
+                        'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
+                        'assigned_driver_id', 'assigned_driver_username', 'assigned_driver_name', 'assigned_driver_zone', 'assigned_at',
+                        'delivery_lat', 'delivery_lon',
+                        'route_id', 'route_order', 'route_generated_at',
+                        'delivered_at', 'delivered_by_id', 'delivered_by_username',
+                    ]
+                    for c in optional:
+                        if c in existing:
+                            cols.append(c)
+                    cols_sql = ', '.join(cols)
+                    if use_id_int:
+                        row2 = _safe_engine_fetchone(f"SELECT {cols_sql} FROM orders WHERE id = :id LIMIT 1", {'id': id_param})
+                    else:
+                        row2 = _safe_engine_fetchone(f"SELECT {cols_sql} FROM orders WHERE CAST(id AS TEXT) = :id LIMIT 1", {'id': id_param})
+                    if row2:
+                        od = {k: row2[idx] for idx, k in enumerate(cols)}
+                        try:
+                            if isinstance(od.get('items'), str):
+                                od['items'] = json.loads(od['items'])
+                        except Exception:
+                            od['items'] = []
+                        try:
+                            if isinstance(od.get('_token_preview'), str):
+                                od['_token_preview'] = json.loads(od['_token_preview'])
+                        except Exception:
+                            pass
+                        try:
+                            od = _attach_maps_url(od)
+                        except Exception:
+                            pass
+            finally:
+                db_local.close()
+    except Exception:
+        pass
+
     # Broadcast the updated order to connected admin clients
     try:
         await push_event({"action": "order_updated", "order": od})
+    except Exception:
+        pass
+
+    # If delivered, persist delivery metadata
+    try:
+        if status_norm == 'entregado':
+            delivered_at = od.get('delivered_at')
+            if not delivered_at:
+                assign_id = od.get('assigned_driver_id')
+                assign_user = od.get('assigned_driver_username')
+                use_id = delivered_actor_id if delivered_actor_id is not None else (assign_id if assign_id is not None else None)
+                use_user = delivered_actor_username if delivered_actor_username else (assign_user if assign_user else None)
+                now_ts = datetime.datetime.now(datetime.timezone.utc)
+                try:
+                    with engine.begin() as conn:
+                        if use_id is not None or use_user:
+                            if use_id_int:
+                                conn.execute(
+                                    text("UPDATE orders SET delivered_at = :delivered_at, delivered_by_id = :delivered_by_id, delivered_by_username = :delivered_by_username WHERE id = :id"),
+                                    {'delivered_at': now_ts, 'delivered_by_id': use_id, 'delivered_by_username': use_user, 'id': id_param},
+                                )
+                            else:
+                                conn.execute(
+                                    text("UPDATE orders SET delivered_at = :delivered_at, delivered_by_id = :delivered_by_id, delivered_by_username = :delivered_by_username WHERE CAST(id AS TEXT) = :id"),
+                                    {'delivered_at': now_ts, 'delivered_by_id': use_id, 'delivered_by_username': use_user, 'id': id_param},
+                                )
+                        else:
+                            if use_id_int:
+                                conn.execute(
+                                    text("UPDATE orders SET delivered_at = :delivered_at WHERE id = :id"),
+                                    {'delivered_at': now_ts, 'id': id_param},
+                                )
+                            else:
+                                conn.execute(
+                                    text("UPDATE orders SET delivered_at = :delivered_at WHERE CAST(id AS TEXT) = :id"),
+                                    {'delivered_at': now_ts, 'id': id_param},
+                                )
+                    od['delivered_at'] = now_ts
+                    if use_id is not None:
+                        od['delivered_by_id'] = use_id
+                    if use_user:
+                        od['delivered_by_username'] = use_user
+                except Exception:
+                    pass
     except Exception:
         pass
 
