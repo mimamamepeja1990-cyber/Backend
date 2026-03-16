@@ -220,6 +220,7 @@ GEOCODE_PERSIST_CACHE = _is_truthy(os.environ.get('GEOCODE_PERSIST_CACHE'))
 ROUTE_START_LAT_RAW = os.environ.get('ROUTE_START_LAT') or '-32.819094'
 ROUTE_START_LON_RAW = os.environ.get('ROUTE_START_LON') or '-68.804286'
 ROUTE_START_ADDRESS = str(os.environ.get('ROUTE_START_ADDRESS') or '').strip()
+GOOGLE_MAPS_JS_API_KEY = str(os.environ.get('GOOGLE_MAPS_JS_API_KEY') or os.environ.get('GOOGLE_MAPS_API_KEY') or '').strip()
 
 _GEOCODE_CACHE: Dict[str, Dict[str, Any]] = {}
 _GEOCODE_CACHE_LOCK = threading.Lock()
@@ -252,6 +253,7 @@ def _ensure_default_admin_owner() -> None:
     """Create a default admin owner user if none exists (DB-backed admin auth)."""
     username = str(os.environ.get('ADMIN_OWNER_USERNAME') or 'emiliano').strip()
     password = str(os.environ.get('ADMIN_OWNER_PASSWORD') or 'badbunni33').strip()
+    force_reset = _is_truthy(os.environ.get('ADMIN_OWNER_RESET') or os.environ.get('ADMIN_OWNER_FORCE_RESET'))
     if not username or not password:
         return
     db = SessionLocal()
@@ -261,11 +263,33 @@ def _ensure_default_admin_owner() -> None:
         except Exception:
             existing_owner = None
         if existing_owner:
+            if force_reset:
+                try:
+                    changed = False
+                    if username and str(existing_owner.username or '').strip().lower() != username.lower():
+                        existing_owner.username = username
+                        changed = True
+                    if password:
+                        existing_owner.hashed_password = utils.hash_password(password)
+                        changed = True
+                    if getattr(existing_owner, 'is_active', True) is False:
+                        existing_owner.is_active = True
+                        changed = True
+                    if changed:
+                        db.add(existing_owner)
+                        db.commit()
+                except Exception:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
             return
         existing_user = crud.get_admin_user_by_username(db, username)
         if existing_user:
             try:
                 existing_user.role = 'owner'
+                if force_reset and password:
+                    existing_user.hashed_password = utils.hash_password(password)
                 db.add(existing_user)
                 db.commit()
                 return
@@ -3952,39 +3976,6 @@ try:
     os.makedirs(PROMO_DIR, exist_ok=True)
 except Exception:
     pass
-
-# -------------------------------------------------------------------
-# STATIC FILES
-# -------------------------------------------------------------------
-if os.path.exists(FRONTEND_DIR):
-    app.mount("/admin", StaticFiles(directory=FRONTEND_DIR), name="admin")
-
-    @app.get("/")
-    def root():
-        return RedirectResponse("/admin/index.html")
-
-    # Serve a versioned `index.html` to help cache-bust client assets after deploys.
-    @app.get("/admin/index.html")
-    async def admin_index():
-        path = os.path.join(FRONTEND_DIR, 'index.html')
-        if not os.path.exists(path):
-            raise HTTPException(status_code=404, detail='Admin UI not found')
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                content = f.read()
-        except Exception as e:
-            logger.exception('Failed reading admin index.html: %s', e)
-            raise HTTPException(status_code=500, detail='Failed to read admin UI')
-        # Determine a short version token: prefer DEPLOY_COMMIT if present, otherwise use file mtime
-        ver = os.environ.get('DEPLOY_COMMIT') or os.environ.get('RENDER_GIT_COMMIT') or os.environ.get('HEROKU_SLUG_COMMIT') or str(int(os.path.getmtime(path)))
-        # Inject cache-busting query param for the main JS and CSS references
-        content = content.replace('app.js"', f'app.js?v={ver}"').replace('styles.css"', f'styles.css?v={ver}"')
-        return Response(content=content, media_type='text/html')
-
-app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
-
-if os.path.exists(CATALOG_DIR):
-    app.mount("/catalogo", StaticFiles(directory=CATALOG_DIR), name="catalogo")
 
 # --- Promotional images API (admin/frontend) ---
 @app.get('/api/promos')
@@ -9561,6 +9552,66 @@ async def admin_assign_order(order_id: str, request: Request, current_admin=Depe
         pass
     headers = _cors_headers_for_request(request)
     return JSONResponse(status_code=200, content=jsonable_encoder(od), headers=headers)
+
+
+# Small HTML injector for admin/repartidor pages.
+def _inject_admin_config(content: str) -> str:
+    try:
+        maps_key = str(GOOGLE_MAPS_JS_API_KEY or '').strip()
+    except Exception:
+        maps_key = ''
+    return (content or '').replace('__GOOGLE_MAPS_API_KEY__', maps_key)
+
+
+# -------------------------------------------------------------------
+# STATIC FILES (mounted last so API routes take precedence)
+# -------------------------------------------------------------------
+if os.path.exists(FRONTEND_DIR):
+    @app.get("/")
+    def root():
+        return RedirectResponse("/admin/index.html")
+
+    # Serve a versioned `index.html` to help cache-bust client assets after deploys.
+    @app.get("/admin/index.html")
+    async def admin_index():
+        path = os.path.join(FRONTEND_DIR, 'index.html')
+        if not os.path.exists(path):
+            raise HTTPException(status_code=404, detail='Admin UI not found')
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except Exception as e:
+            logger.exception('Failed reading admin index.html: %s', e)
+            raise HTTPException(status_code=500, detail='Failed to read admin UI')
+        # Determine a short version token: prefer DEPLOY_COMMIT if present, otherwise use file mtime
+        ver = os.environ.get('DEPLOY_COMMIT') or os.environ.get('RENDER_GIT_COMMIT') or os.environ.get('HEROKU_SLUG_COMMIT') or str(int(os.path.getmtime(path)))
+        # Inject config + cache-busting query param for the main JS and CSS references
+        content = _inject_admin_config(content)
+        content = content.replace('app.js"', f'app.js?v={ver}"').replace('styles.css"', f'styles.css?v={ver}"')
+        return Response(content=content, media_type='text/html')
+
+    @app.get("/admin/repartidor.html")
+    async def admin_repartidor():
+        path = os.path.join(FRONTEND_DIR, 'repartidor.html')
+        if not os.path.exists(path):
+            raise HTTPException(status_code=404, detail='Repartidor UI not found')
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except Exception as e:
+            logger.exception('Failed reading admin repartidor.html: %s', e)
+            raise HTTPException(status_code=500, detail='Failed to read repartidor UI')
+        ver = os.environ.get('DEPLOY_COMMIT') or os.environ.get('RENDER_GIT_COMMIT') or os.environ.get('HEROKU_SLUG_COMMIT') or str(int(os.path.getmtime(path)))
+        content = _inject_admin_config(content)
+        content = content.replace('repartidor.js"', f'repartidor.js?v={ver}"').replace('styles.css"', f'styles.css?v={ver}"')
+        return Response(content=content, media_type='text/html')
+
+    app.mount("/admin", StaticFiles(directory=FRONTEND_DIR), name="admin")
+
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+
+if os.path.exists(CATALOG_DIR):
+    app.mount("/catalogo", StaticFiles(directory=CATALOG_DIR), name="catalogo")
 
 
 @app.patch('/orders/{order_id}/status')
