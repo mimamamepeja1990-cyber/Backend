@@ -59,6 +59,21 @@ class AdminUser(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
+class AdminDriverLocation(Base):
+    __tablename__ = "admin_driver_locations"
+    id = Column(Integer, primary_key=True, index=True)
+    admin_user_id = Column(Integer, nullable=True, index=True)
+    username = Column(String(80), nullable=True, index=True)
+    full_name = Column(String(200), nullable=True)
+    lat = Column(Float, nullable=False)
+    lon = Column(Float, nullable=False)
+    accuracy = Column(Float, nullable=True)
+    speed = Column(Float, nullable=True)
+    heading = Column(Float, nullable=True)
+    battery = Column(Float, nullable=True)
+    recorded_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
 class Order(Base):
     __tablename__ = "orders"
     id = Column(Integer, primary_key=True, index=True)

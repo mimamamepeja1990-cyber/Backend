@@ -221,6 +221,8 @@ ROUTE_START_LAT_RAW = os.environ.get('ROUTE_START_LAT') or '-32.819094'
 ROUTE_START_LON_RAW = os.environ.get('ROUTE_START_LON') or '-68.804286'
 ROUTE_START_ADDRESS = str(os.environ.get('ROUTE_START_ADDRESS') or '').strip()
 GOOGLE_MAPS_JS_API_KEY = str(os.environ.get('GOOGLE_MAPS_JS_API_KEY') or os.environ.get('GOOGLE_MAPS_API_KEY') or '').strip()
+DRIVER_LOCATION_MAX_AGE_SEC = int(float(os.environ.get('DRIVER_LOCATION_MAX_AGE_SEC') or 60 * 60))
+DRIVER_LOCATION_STORE_HISTORY = _is_truthy(os.environ.get('DRIVER_LOCATION_STORE_HISTORY') or os.environ.get('DRIVER_LOCATION_HISTORY'))
 
 _GEOCODE_CACHE: Dict[str, Dict[str, Any]] = {}
 _GEOCODE_CACHE_LOCK = threading.Lock()
@@ -229,6 +231,8 @@ _GEOCODE_LAST_CALL_TS = 0.0
 _GEOCODE_RUN_STATS = {'window_start': 0.0, 'count': 0}
 _GEOCODE_CACHE_DIRTY = False
 _ROUTE_START_CACHE: Dict[str, Any] = {}
+DRIVER_LOCATIONS: Dict[str, Dict[str, Any]] = {}
+DRIVER_LOCATIONS_LOCK = threading.Lock()
 
 
 def _running_on_render() -> bool:
@@ -5041,25 +5045,21 @@ def _optimize_route_order_with_start(nodes: List[dict], start_lat: float, start_
     """Optimize route order starting from a fixed depot point."""
     if len(nodes) <= 1:
         return nodes
-    remaining = nodes[:]
-    try:
-        first_idx = min(
-            range(len(remaining)),
-            key=lambda i: _haversine_km(start_lat, start_lon, remaining[i]['lat'], remaining[i]['lon'])
-        )
-    except Exception:
-        first_idx = 0
-    path = [remaining.pop(first_idx)]
-    while remaining:
-        last = path[-1]
-        best_idx = 0
-        best_dist = float('inf')
-        for idx, cand in enumerate(remaining):
-            d = _haversine_km(last['lat'], last['lon'], cand['lat'], cand['lon'])
-            if d < best_dist:
-                best_dist = d
-                best_idx = idx
-        path.append(remaining.pop(best_idx))
+    def build_path(start_idx: int) -> List[dict]:
+        remaining = nodes[:]
+        start_idx = max(0, min(start_idx, len(remaining) - 1))
+        path_local = [remaining.pop(start_idx)]
+        while remaining:
+            last = path_local[-1]
+            best_idx = 0
+            best_dist = float('inf')
+            for idx, cand in enumerate(remaining):
+                d = _haversine_km(last['lat'], last['lon'], cand['lat'], cand['lon'])
+                if d < best_dist:
+                    best_dist = d
+                    best_idx = idx
+            path_local.append(remaining.pop(best_idx))
+        return path_local
 
     def path_distance(p):
         if not p:
@@ -5069,32 +5069,69 @@ def _optimize_route_order_with_start(nodes: List[dict], start_lat: float, start_
             total += _haversine_km(p[i]['lat'], p[i]['lon'], p[i+1]['lat'], p[i+1]['lon'])
         return total
 
-    improved = True
-    iterations = 0
-    max_iter = min(600, max(120, len(path) * 6))
-    while improved and iterations < max_iter:
-        improved = False
-        iterations += 1
-        n = len(path)
-        for i in range(0, n - 1):
-            for j in range(i + 1, n):
-                a_lat = start_lat if i == 0 else path[i - 1]['lat']
-                a_lon = start_lon if i == 0 else path[i - 1]['lon']
-                b = path[i]
-                c = path[j]
-                if j + 1 < n:
-                    d = path[j + 1]
-                    dist_before = _haversine_km(a_lat, a_lon, b['lat'], b['lon']) + _haversine_km(c['lat'], c['lon'], d['lat'], d['lon'])
-                    dist_after = _haversine_km(a_lat, a_lon, c['lat'], c['lon']) + _haversine_km(b['lat'], b['lon'], d['lat'], d['lon'])
-                else:
-                    dist_before = _haversine_km(a_lat, a_lon, b['lat'], b['lon'])
-                    dist_after = _haversine_km(a_lat, a_lon, c['lat'], c['lon'])
-                if dist_after + 1e-6 < dist_before:
-                    path[i:j + 1] = reversed(path[i:j + 1])
-                    improved = True
-        if not improved:
-            break
-    return path
+    def improve_path(path_local: List[dict]) -> List[dict]:
+        improved = True
+        iterations = 0
+        max_iter = min(800, max(160, len(path_local) * 8))
+        while improved and iterations < max_iter:
+            improved = False
+            iterations += 1
+            n = len(path_local)
+            for i in range(0, n - 1):
+                for j in range(i + 1, n):
+                    a_lat = start_lat if i == 0 else path_local[i - 1]['lat']
+                    a_lon = start_lon if i == 0 else path_local[i - 1]['lon']
+                    b = path_local[i]
+                    c = path_local[j]
+                    if j + 1 < n:
+                        d = path_local[j + 1]
+                        dist_before = _haversine_km(a_lat, a_lon, b['lat'], b['lon']) + _haversine_km(c['lat'], c['lon'], d['lat'], d['lon'])
+                        dist_after = _haversine_km(a_lat, a_lon, c['lat'], c['lon']) + _haversine_km(b['lat'], b['lon'], d['lat'], d['lon'])
+                    else:
+                        dist_before = _haversine_km(a_lat, a_lon, b['lat'], b['lon'])
+                        dist_after = _haversine_km(a_lat, a_lon, c['lat'], c['lon'])
+                    if dist_after + 1e-6 < dist_before:
+                        path_local[i:j + 1] = reversed(path_local[i:j + 1])
+                        improved = True
+            if not improved:
+                break
+        return path_local
+
+    # Candidate starts: nearest, farthest, and bearing-sorted
+    try:
+        nearest_idx = min(
+            range(len(nodes)),
+            key=lambda i: _haversine_km(start_lat, start_lon, nodes[i]['lat'], nodes[i]['lon'])
+        )
+    except Exception:
+        nearest_idx = 0
+    try:
+        farthest_idx = max(
+            range(len(nodes)),
+            key=lambda i: _haversine_km(start_lat, start_lon, nodes[i]['lat'], nodes[i]['lon'])
+        )
+    except Exception:
+        farthest_idx = 0
+
+    candidates: List[List[dict]] = []
+    for idx in {nearest_idx, farthest_idx}:
+        try:
+            candidates.append(improve_path(build_path(idx)))
+        except Exception:
+            continue
+
+    try:
+        bearing_sorted = sorted(
+            nodes,
+            key=lambda n: math.atan2(n['lon'] - start_lon, n['lat'] - start_lat)
+        )
+        candidates.append(improve_path(bearing_sorted))
+    except Exception:
+        pass
+
+    if not candidates:
+        return build_path(nearest_idx)
+    return min(candidates, key=path_distance)
 
 
 def _extract_admin_actor_from_request(request: Request) -> Tuple[Optional[int], Optional[str]]:
@@ -5118,6 +5155,23 @@ def _extract_admin_actor_from_request(request: Request) -> Tuple[Optional[int], 
         uid = None
     uname = payload.get('sub') or payload.get('username')
     return uid, (str(uname).strip() if uname else None)
+
+
+def _parse_epoch_to_datetime(value: Any) -> Optional[datetime.datetime]:
+    try:
+        if value is None:
+            return None
+        ts = float(value)
+    except Exception:
+        return None
+    if ts > 1e12:
+        ts = ts / 1000.0
+    if ts <= 0:
+        return None
+    try:
+        return datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc)
+    except Exception:
+        return None
 
 
 def _resolve_order_coords(order: Dict[str, Any], db: Optional[Session] = None) -> Tuple[Optional[float], Optional[float]]:
@@ -9349,6 +9403,108 @@ def admin_deliveries(
                 continue
         out.append(od)
     out.sort(key=lambda o: (o.get('delivered_at') is None, o.get('delivered_at') or o.get('created_at') or datetime.datetime.min), reverse=True)
+    return out
+
+
+@app.post('/admin/driver-location', response_model=schemas.DriverLocationOut)
+def admin_driver_location(
+    payload: schemas.DriverLocationIn,
+    current_admin=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role not in ('owner', 'admin', 'repartidor'):
+        raise HTTPException(status_code=403, detail='No autorizado')
+    lat = _coerce_coord(getattr(payload, 'lat', None))
+    lon = _coerce_coord(getattr(payload, 'lon', None))
+    if lat is None or lon is None:
+        raise HTTPException(status_code=400, detail='Coordenadas inválidas')
+
+    accuracy = getattr(payload, 'accuracy', None)
+    speed = getattr(payload, 'speed', None)
+    heading = getattr(payload, 'heading', None)
+    battery = getattr(payload, 'battery', None)
+    recorded_at = _parse_epoch_to_datetime(getattr(payload, 'timestamp', None)) or datetime.datetime.now(datetime.timezone.utc)
+
+    driver_id = getattr(current_admin, 'id', None)
+    driver_username = getattr(current_admin, 'username', None)
+    driver_name = getattr(current_admin, 'full_name', None) or driver_username
+
+    payload_out = {
+        'driver_id': driver_id,
+        'driver_username': str(driver_username or '').strip() or None,
+        'driver_name': str(driver_name or '').strip() or None,
+        'lat': float(lat),
+        'lon': float(lon),
+        'accuracy': float(accuracy) if accuracy is not None else None,
+        'speed': float(speed) if speed is not None else None,
+        'heading': float(heading) if heading is not None else None,
+        'battery': float(battery) if battery is not None else None,
+        'recorded_at': recorded_at,
+    }
+
+    try:
+        key = str(driver_id if driver_id is not None else driver_username or 'unknown')
+        with DRIVER_LOCATIONS_LOCK:
+            DRIVER_LOCATIONS[key] = dict(payload_out, updated_at=time.time())
+    except Exception:
+        pass
+
+    if DRIVER_LOCATION_STORE_HISTORY:
+        try:
+            row = models.AdminDriverLocation(
+                admin_user_id=int(driver_id) if driver_id is not None else None,
+                username=str(driver_username or '').strip() or None,
+                full_name=str(driver_name or '').strip() or None,
+                lat=float(lat),
+                lon=float(lon),
+                accuracy=float(accuracy) if accuracy is not None else None,
+                speed=float(speed) if speed is not None else None,
+                heading=float(heading) if heading is not None else None,
+                battery=float(battery) if battery is not None else None,
+                recorded_at=recorded_at,
+            )
+            db.add(row)
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+    try:
+        asyncio.create_task(push_event({"action": "driver_location", "driver": payload_out}))
+    except Exception:
+        pass
+
+    return payload_out
+
+
+@app.get('/admin/driver-locations', response_model=List[schemas.DriverLocationOut])
+def admin_driver_locations(current_admin=Depends(get_current_admin_user)):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role not in ('owner', 'admin'):
+        raise HTTPException(status_code=403, detail='No autorizado')
+    now = time.time()
+    out = []
+    try:
+        with DRIVER_LOCATIONS_LOCK:
+            for entry in DRIVER_LOCATIONS.values():
+                try:
+                    age = None
+                    ts = entry.get('updated_at')
+                    if ts:
+                        age = max(0.0, now - float(ts))
+                    if age is not None and DRIVER_LOCATION_MAX_AGE_SEC > 0 and age > DRIVER_LOCATION_MAX_AGE_SEC:
+                        continue
+                    payload = dict(entry)
+                    payload.pop('updated_at', None)
+                    payload['age_sec'] = age
+                    out.append(payload)
+                except Exception:
+                    continue
+    except Exception:
+        pass
     return out
 
 

@@ -17,6 +17,121 @@ const SECTION_TITLES = {
   'admin-console': 'Consola Admin',
 };
 let currentAdminUser = null;
+let currentSectionId = 'dashboard';
+
+let driverMap = null;
+let driverMapReady = false;
+let driverMapInit = false;
+let driverMapPoll = null;
+const driverMapMarkers = new Map();
+
+function getDriverMapElements(){
+  return {
+    container: document.getElementById('driverMap'),
+    empty: document.getElementById('driverMapEmpty'),
+  };
+}
+
+async function loadGoogleMapsApi(){
+  if (window.google && window.google.maps) return true;
+  const key = (window.GOOGLE_MAPS_API_KEY || '').trim();
+  if (!key) return false;
+  if (window.__googleMapsLoading) return window.__googleMapsLoading;
+  window.__googleMapsLoading = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}`;
+    script.async = true;
+    script.defer = true;
+    script.onload = () => resolve(true);
+    script.onerror = () => reject(new Error('maps-load-failed'));
+    document.head.appendChild(script);
+  });
+  try{
+    await window.__googleMapsLoading;
+    return true;
+  }catch(e){
+    return false;
+  }
+}
+
+function setDriverMapEmpty(message){
+  const { empty } = getDriverMapElements();
+  if (!empty) return;
+  empty.textContent = message || '';
+  empty.style.display = message ? 'block' : 'none';
+}
+
+async function initDriverMap(){
+  if (driverMapInit) return;
+  driverMapInit = true;
+  const { container } = getDriverMapElements();
+  if (!container) return;
+  const ok = await loadGoogleMapsApi();
+  if (!ok){
+    setDriverMapEmpty('Configura GOOGLE_MAPS_JS_API_KEY para ver el mapa.');
+    return;
+  }
+  const center = { lat: -32.883, lng: -68.84 };
+  driverMap = new google.maps.Map(container, {
+    center,
+    zoom: 10,
+    mapTypeControl: false,
+    streetViewControl: false,
+    fullscreenControl: true,
+  });
+  driverMapReady = true;
+  setDriverMapEmpty('');
+  try{ await refreshDriverLocations(true); }catch(_){ }
+}
+
+function updateDriverMarker(driver){
+  if (!driver || !driverMapReady) return;
+  const lat = Number(driver.lat);
+  const lon = Number(driver.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+  const id = String(driver.driver_id || driver.driver_username || driver.driver_name || '');
+  if (!id) return;
+  const labelText = String(driver.driver_name || driver.driver_username || '').trim();
+  let marker = driverMapMarkers.get(id);
+  if (!marker){
+    marker = new google.maps.Marker({
+      map: driverMap,
+      position: { lat, lng: lon },
+      label: labelText ? { text: labelText, fontSize: '12px', fontWeight: '600', color: '#1f2937' } : undefined,
+      title: labelText || 'Repartidor',
+    });
+    driverMapMarkers.set(id, marker);
+  } else {
+    marker.setPosition({ lat, lng: lon });
+    if (labelText) marker.setLabel({ text: labelText, fontSize: '12px', fontWeight: '600', color: '#1f2937' });
+  }
+}
+
+async function refreshDriverLocations(force){
+  if (!driverMapReady) return;
+  const list = await safeFetch(API_BASE + '/admin/driver-locations').catch(() => []);
+  if (!Array.isArray(list) || list.length === 0){
+    setDriverMapEmpty('Sin ubicaciones recientes de repartidores.');
+    return;
+  }
+  setDriverMapEmpty('');
+  list.forEach(updateDriverMarker);
+}
+
+function startDriverMapPolling(){
+  if (driverMapPoll) return;
+  driverMapPoll = setInterval(() => {
+    if (currentSectionId !== 'dashboard') return;
+    refreshDriverLocations(false);
+  }, 10000);
+}
+
+function stopDriverMapPolling(){
+  if (driverMapPoll){
+    clearInterval(driverMapPoll);
+    driverMapPoll = null;
+  }
+}
 
 function canAccessSection(sectionId){
   if (!currentAdminUser || !sectionId) return false;
@@ -27,6 +142,7 @@ function canAccessSection(sectionId){
 
 function activateSection(sectionId){
   if (!sectionId) return false;
+  currentSectionId = sectionId;
   if (!canAccessSection(sectionId)){
     try{ showToast('No tenés acceso a esa sección', 'error'); }catch(_){ }
     return false;
@@ -41,7 +157,12 @@ function activateSection(sectionId){
   if (titleEl) titleEl.textContent = SECTION_TITLES[sectionId] || 'Administración';
 
   if (sectionId === 'promo-images') fetchPromoImages();
-  if (sectionId === 'dashboard') { try{ refreshSalesStats({ force: false, quiet: true }); }catch(_){ } }
+  if (sectionId === 'dashboard') {
+    try{ refreshSalesStats({ force: false, quiet: true }); }catch(_){ }
+    try{ initDriverMap(); startDriverMapPolling(); }catch(_){ }
+  } else {
+    stopDriverMapPolling();
+  }
   if (sectionId === 'customers') { try{ refreshCustomers(false); }catch(_){ } }
   if (sectionId === 'retail-prices') { try{ refreshRetailPrices(); }catch(_){ } }
   if (sectionId === 'preparations') { try{ refreshPreparations(false); }catch(_){ } }
@@ -6182,6 +6303,10 @@ function setupSocket(attempt = 0){
   socket.onmessage = async (ev) => {
     try{
       const data = JSON.parse(ev.data);
+      if (data && data.action === 'driver_location' && data.driver){
+        try{ updateDriverMarker(data.driver); }catch(_){ }
+        return;
+      }
       if(['created','updated','deleted'].includes(data.action)){
         refresh(); showToast(`Evento: ${data.action}`);
       }

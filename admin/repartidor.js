@@ -35,6 +35,9 @@ let currentUser = null;
 let routeOrders = [];
 let currentIndex = 0;
 let refreshTimer = null;
+let locationWatchId = null;
+let lastLocationSentAt = 0;
+const LOCATION_SEND_INTERVAL_MS = 8000;
 
 function setAuthError(msg){
   if (!authError) return;
@@ -119,6 +122,49 @@ async function safeFetch(url, opts){
     throw err;
   }
   return payload;
+}
+
+async function sendDriverLocation(position){
+  if (!position || !position.coords) return;
+  const now = Date.now();
+  if (now - lastLocationSentAt < LOCATION_SEND_INTERVAL_MS) return;
+  lastLocationSentAt = now;
+  const coords = position.coords;
+  const payload = {
+    lat: coords.latitude,
+    lon: coords.longitude,
+    accuracy: coords.accuracy,
+    speed: coords.speed,
+    heading: coords.heading,
+    timestamp: position.timestamp,
+  };
+  try{
+    await safeFetch(API_BASE + '/admin/driver-location', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  }catch(_){ }
+}
+
+function startLocationTracking(){
+  if (!navigator.geolocation || locationWatchId !== null) return;
+  try{
+    locationWatchId = navigator.geolocation.watchPosition(
+      (pos) => { sendDriverLocation(pos); },
+      () => { /* ignore errors */ },
+      { enableHighAccuracy: true, maximumAge: 3000, timeout: 8000 }
+    );
+  }catch(_){ }
+}
+
+function stopLocationTracking(){
+  try{
+    if (locationWatchId !== null && navigator.geolocation){
+      navigator.geolocation.clearWatch(locationWatchId);
+    }
+  }catch(_){ }
+  locationWatchId = null;
 }
 
 function normalizeStatus(value){
@@ -430,6 +476,7 @@ async function bootstrap(){
         driverNameEl.textContent = me.username || '—';
         driverZoneEl.textContent = me.zone || '—';
         initMap();
+        startLocationTracking();
         await refreshRoute(true);
         if (refreshTimer) clearInterval(refreshTimer);
         refreshTimer = setInterval(() => refreshRoute(false), 60000);
@@ -452,6 +499,7 @@ async function bootstrap(){
         driverNameEl.textContent = me.username || '—';
         driverZoneEl.textContent = me.zone || '—';
         initMap();
+        startLocationTracking();
         await refreshRoute(true);
         if (refreshTimer) clearInterval(refreshTimer);
         refreshTimer = setInterval(() => refreshRoute(false), 60000);
@@ -475,6 +523,7 @@ if (logoutBtn){
   logoutBtn.addEventListener('click', () => {
     clearToken();
     clearSession();
+    stopLocationTracking();
     setAuthLocked(true);
     location.reload();
   });

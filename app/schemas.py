@@ -268,6 +268,30 @@ class OrderResponse(BaseModel):
     delivered_by_id: Optional[int] = None
     delivered_by_username: Optional[str] = None
 
+
+class DriverLocationIn(BaseModel):
+    lat: float
+    lon: float
+    accuracy: Optional[float] = None
+    speed: Optional[float] = None
+    heading: Optional[float] = None
+    battery: Optional[float] = None
+    timestamp: Optional[float] = None  # epoch seconds or ms
+
+
+class DriverLocationOut(BaseModel):
+    driver_id: Optional[int] = None
+    driver_username: Optional[str] = None
+    driver_name: Optional[str] = None
+    lat: float
+    lon: float
+    accuracy: Optional[float] = None
+    speed: Optional[float] = None
+    heading: Optional[float] = None
+    battery: Optional[float] = None
+    recorded_at: Optional[datetime] = None
+    age_sec: Optional[float] = None
+
     model_config = { 'from_attributes': True }
 
 
