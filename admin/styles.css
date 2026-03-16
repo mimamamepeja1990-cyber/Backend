@@ -879,3 +879,84 @@ tr.pending-sync td{ background:linear-gradient(90deg, rgba(255,249,230,0.5), rgb
   #addConsumosList{max-height:50vh}
 }
 
+/* Auth overlay */
+.auth-overlay{
+  position:fixed;
+  inset:0;
+  background:radial-gradient(circle at 20% 20%, rgba(255,255,255,0.18), transparent 45%), linear-gradient(180deg, rgba(15,23,42,0.96), rgba(17,24,39,0.98));
+  display:none;
+  align-items:center;
+  justify-content:center;
+  z-index:15000;
+  padding:24px;
+}
+.auth-card{
+  background:var(--card);
+  border-radius:18px;
+  padding:28px 26px;
+  width:100%;
+  max-width:420px;
+  box-shadow:0 30px 70px rgba(2,6,23,0.35);
+}
+.auth-brand{display:flex;align-items:center;gap:10px;font-weight:800;color:#111827;margin-bottom:10px}
+.auth-sub{color:var(--muted);margin-top:-6px;margin-bottom:16px}
+.auth-form .field{margin-bottom:14px}
+.auth-show{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--muted);margin-bottom:12px}
+.auth-error{min-height:18px;color:#b91c1c;font-weight:700;margin-bottom:12px}
+body.auth-locked .app{display:none}
+body.auth-locked .auth-overlay{display:flex}
+
+/* Role-based hiding */
+.role-hidden{display:none !important}
+
+/* User panel */
+.user-panel{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  margin-top:16px;
+  padding:10px 12px;
+  border-radius:12px;
+  background:rgba(255,255,255,0.12);
+  color:#fff;
+}
+.user-meta{display:flex;flex-direction:column;gap:4px}
+.user-name{font-weight:700}
+.user-role{font-size:11px;text-transform:uppercase;letter-spacing:0.08em;opacity:0.8}
+
+/* Users section */
+.user-form{
+  background:var(--card);
+  border:1px solid rgba(10,34,64,0.08);
+  border-radius:14px;
+  padding:18px;
+  margin:16px 0;
+  box-shadow:0 10px 24px rgba(2,6,23,0.06);
+}
+.user-form-msg{margin-top:10px;color:var(--muted);font-size:13px}
+.user-form-msg.error{color:#b91c1c;font-weight:700}
+.user-form-msg.success{color:#0f766e;font-weight:700}
+
+/* Admin console inline */
+.admin-console-inline{margin-top:12px}
+.admin-console-log{
+  min-height:220px;
+  max-height:360px;
+  overflow:auto;
+  background:#0b1220;
+  color:#e2e8f0;
+  padding:12px;
+  border-radius:12px;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+  font-size:13px;
+}
+.admin-console-line.note{color:#a5b4fc}
+.admin-console-line.ok{color:#86efac}
+.admin-console-line.err{color:#fca5a5}
+.admin-console-line.cmd{color:#f9a8d4}
+
+@media (max-width:900px){
+  .user-panel{flex-direction:column;align-items:stretch}
+}
+

@@ -19,7 +19,33 @@
   <link rel="icon" type="image/png" href="icon.png">
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
-<body>  
+<body class="auth-locked">  
+  <div id="authOverlay" class="auth-overlay" aria-hidden="true">
+    <div class="auth-card">
+      <div class="auth-brand">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M12 2l3 7h7l-6 5 3 8-7-4-7 4 3-8-6-5h7z" fill="#111827"/></svg>
+        <span>Panel Admin</span>
+      </div>
+      <h1>Ingresar</h1>
+      <p class="auth-sub">Acceso para administración</p>
+      <form id="authLoginForm" class="auth-form" autocomplete="on">
+        <div class="field">
+          <label for="authUser">Usuario</label>
+          <input id="authUser" name="username" autocomplete="username" placeholder="Usuario" required />
+        </div>
+        <div class="field">
+          <label for="authPass">Contraseña</label>
+          <input id="authPass" name="password" type="password" autocomplete="current-password" placeholder="Contraseña" required />
+        </div>
+        <label class="auth-show">
+          <input id="authShowPass" type="checkbox" />
+          Mostrar contraseña
+        </label>
+        <div id="authError" class="auth-error" role="alert" aria-live="polite"></div>
+        <button class="btn primary" type="submit">Ingresar</button>
+      </form>
+    </div>
+  </div>
   <div class="app">
     <aside class="sidebar">
       <div class="brand">
@@ -37,8 +63,17 @@
         <a data-section="orders">Pedidos</a>
         <a data-section="customers">Clientes</a>
         <a data-section="preparations">Preparaciones</a>
+        <a data-section="users" data-role="owner">Usuarios</a>
+        <a data-section="admin-console" data-role="owner">Consola</a>
       </nav>
       <div class="footer-controls">
+        <div class="user-panel" id="userPanel">
+          <div class="user-meta">
+            <div class="user-name" id="currentUserLabel">—</div>
+            <div class="user-role" id="currentRoleLabel">—</div>
+          </div>
+          <button id="logoutBtn" class="btn" type="button">Salir</button>
+        </div>
       </div>
     </aside>
     <main> 
@@ -368,6 +403,61 @@
           <button id="refreshPreparationsBtn" class="btn">Actualizar preparaciones</button>
         </div>
         <div id="preparationsList" class="preparations-list"></div>
+      </section>
+
+      <section id="users" class="section hidden" data-role="owner">
+        <h2>Usuarios</h2>
+        <p>Creá usuarios con rol admin o repartidor.</p>
+        <form id="userForm" class="user-form">
+          <div class="row">
+            <div class="field">
+              <label for="userUsername">Usuario</label>
+              <input id="userUsername" name="userUsername" placeholder="usuario" required />
+            </div>
+            <div class="field">
+              <label for="userPassword">Contraseña</label>
+              <input id="userPassword" name="userPassword" type="password" placeholder="contraseña" required />
+            </div>
+            <div class="field">
+              <label for="userRole">Rol</label>
+              <select id="userRole" name="userRole">
+                <option value="admin">Admin</option>
+                <option value="repartidor">Repartidor</option>
+              </select>
+            </div>
+          </div>
+          <div class="form-actions">
+            <button class="btn primary" type="submit">Crear usuario</button>
+          </div>
+          <div id="userFormMsg" class="user-form-msg" role="status" aria-live="polite"></div>
+        </form>
+        <div class="table-wrap">
+          <table id="usersTable">
+            <thead>
+              <tr>
+                <th>Usuario</th>
+                <th>Rol</th>
+                <th>Creado</th>
+                <th>Acciones</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="admin-console" class="section hidden" data-role="owner">
+        <h2>Consola Admin</h2>
+        <div class="admin-console-card admin-console-inline">
+          <div id="adminConsoleLog" class="admin-console-log" role="log" aria-live="polite"></div>
+          <form id="adminConsoleForm" class="admin-console-form" autocomplete="off">
+            <input id="adminConsoleInput" class="admin-console-input" placeholder="Ej: /clear @1" />
+            <button class="btn" type="submit">Ejecutar</button>
+          </form>
+          <div class="admin-console-help">
+            Comandos: <code>/clear @1</code> Catálogo, <code>/clear @2</code> Filtros, <code>/clear @3</code> Pedidos, <code>/clear @4</code> Clientes, <code>/clear @5</code> Preparaciones. <code>/help</code> para ayuda.
+          </div>
+        </div>
       </section>
 
       <!-- Order Detail Modal -->

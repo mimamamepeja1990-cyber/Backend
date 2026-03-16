@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Panel Repartidor</title>
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css?v=8">
+  <style>
+    body.repartidor-page{
+      min-height:100vh;
+      background:radial-gradient(circle at 20% 20%, rgba(255,255,255,0.18), transparent 45%), linear-gradient(180deg, #0f172a, #111827);
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      padding:24px;
+    }
+    .repartidor-card{
+      background:#fff;
+      border-radius:18px;
+      padding:28px 26px;
+      max-width:520px;
+      width:100%;
+      box-shadow:0 30px 70px rgba(2,6,23,0.35);
+      text-align:left;
+    }
+    .repartidor-card h1{margin:0 0 8px;font-size:28px}
+    .repartidor-card p{color:#4b5563;line-height:1.5;margin-bottom:18px}
+    .repartidor-actions{display:flex;gap:10px;flex-wrap:wrap}
+  </style>
+</head>
+<body class="repartidor-page">
+  <div class="repartidor-card">
+    <h1>Panel de Repartidor</h1>
+    <p>Este panel está en diseño. Acá vamos a sumar rutas, estados y entregas.</p>
+    <div class="repartidor-actions">
+      <button id="logoutBtn" class="btn" type="button">Salir</button>
+    </div>
+  </div>
+
+  <script>
+    (function(){
+      const AUTH_SESSION_KEY = 'admin:session:v1';
+      const AUTH_USERS_KEY = 'admin:users:v1';
+      function readJson(key){
+        try{ const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : null; }catch(_){ return null; }
+      }
+      function normalize(value){ return String(value || '').trim().toLowerCase(); }
+      const session = readJson(AUTH_SESSION_KEY);
+      const users = readJson(AUTH_USERS_KEY) || [];
+      const user = session && session.usernameLower ? users.find(u => normalize(u.username || u.usernameLower) === session.usernameLower) : null;
+      if (!user || user.role !== 'repartidor'){
+        try{ window.location.href = 'index.html'; }catch(_){ }
+        return;
+      }
+      const logoutBtn = document.getElementById('logoutBtn');
+      if (logoutBtn){
+        logoutBtn.addEventListener('click', () => {
+          try{ localStorage.removeItem(AUTH_SESSION_KEY); localStorage.removeItem('admin:actor'); }catch(_){ }
+          try{ window.location.href = 'index.html'; }catch(_){ }
+        });
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -1,20 +1,67 @@
 /* promo-image initial block removed to avoid early API_BASE usage; code reinserted after API_BASE definition */
 
+const SECTION_TITLES = {
+  'dashboard': 'Dashboard',
+  'catalog': 'Catálogo',
+  'retail-prices': 'Precios minorista',
+  'consumos': 'Consumición inmediata',
+  'promotions': 'Promociones',
+  'promo-images': 'Imágenes Promocionales',
+  'filters': 'Filtros',
+  'orders': 'Pedidos',
+  'customers': 'Clientes',
+  'preparations': 'Preparaciones',
+  'users': 'Usuarios',
+  'admin-console': 'Consola Admin',
+};
+let currentAdminUser = null;
+
+function canAccessSection(sectionId){
+  if (!currentAdminUser || !sectionId) return false;
+  if (currentAdminUser.role === 'owner') return true;
+  if (currentAdminUser.role === 'admin') return sectionId !== 'admin-console' && sectionId !== 'users';
+  return false;
+}
+
+function activateSection(sectionId){
+  if (!sectionId) return false;
+  if (!canAccessSection(sectionId)){
+    try{ showToast('No tenés acceso a esa sección', 'error'); }catch(_){ }
+    return false;
+  }
+  document.querySelectorAll('main > section.section').forEach(sec => sec.classList.add('hidden'));
+  const sec = document.getElementById(sectionId);
+  if (sec) sec.classList.remove('hidden');
+  document.querySelectorAll('.sidebar nav a').forEach(a => a.classList.remove('active'));
+  const link = document.querySelector(`.sidebar nav a[data-section="${sectionId}"]`);
+  if (link) link.classList.add('active');
+  const titleEl = document.getElementById('title');
+  if (titleEl) titleEl.textContent = SECTION_TITLES[sectionId] || 'Administración';
+
+  if (sectionId === 'promo-images') fetchPromoImages();
+  if (sectionId === 'dashboard') { try{ refreshSalesStats({ force: false, quiet: true }); }catch(_){ } }
+  if (sectionId === 'customers') { try{ refreshCustomers(false); }catch(_){ } }
+  if (sectionId === 'retail-prices') { try{ refreshRetailPrices(); }catch(_){ } }
+  if (sectionId === 'preparations') { try{ refreshPreparations(false); }catch(_){ } }
+  if (sectionId === 'admin-console') {
+    try{
+      ensureAdminConsole();
+      if (!adminConsoleState.openedOnce){
+        adminConsoleState.openedOnce = true;
+        logAdminConsole('Consola lista. Usa /help para ver comandos.', 'note');
+      }
+      adminConsoleState.input && adminConsoleState.input.focus();
+    }catch(_){ }
+  }
+  if (sectionId === 'users') { try{ renderUsers(); }catch(_){ } }
+  return true;
+}
+
 // Mostrar sección al hacer click en el menú
 document.querySelectorAll('.sidebar nav a[data-section]').forEach(link => {
   link.addEventListener('click', function() {
-    document.querySelectorAll('main > section').forEach(sec => sec.classList.add('hidden'));
-    const sec = document.getElementById(this.getAttribute('data-section'));
-    if (sec) sec.classList.remove('hidden');
-    document.querySelectorAll('.sidebar nav a').forEach(a => a.classList.remove('active'));
-    this.classList.add('active');
-    if (this.getAttribute('data-section') === 'promo-images') fetchPromoImages();
-    if (this.getAttribute('data-section') === 'dashboard') {
-      try{ refreshSalesStats({ force: false, quiet: true }); }catch(_){ }
-    }
-    if (this.getAttribute('data-section') === 'customers') {
-      try{ refreshCustomers(false); }catch(_){ }
-    }
+    const ok = activateSection(this.getAttribute('data-section'));
+    if (!ok) return;
     // On mobile, close the sidebar after navigation
     try{
       const sidebar = document.querySelector('.sidebar');
@@ -36,8 +83,216 @@ function getActor(){
     const v = localStorage.getItem('admin:actor');
     if (v && String(v).trim()) return String(v).trim();
   }catch(_){ }
+  if (currentAdminUser && currentAdminUser.username) return currentAdminUser.username;
   return 'admin-panel';
 }
+
+const AUTH_USERS_KEY = 'admin:users:v1';
+const AUTH_SESSION_KEY = 'admin:session:v1';
+const DEFAULT_OWNER = {
+  username: 'emiliano',
+  password: 'badbunni33',
+  role: 'owner',
+  fullName: 'Emiliano',
+};
+
+function readLocalJson(key, fallback){
+  try{
+    const raw = localStorage.getItem(key);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw);
+    return parsed == null ? fallback : parsed;
+  }catch(_){ return fallback; }
+}
+
+function writeLocalJson(key, value){
+  try{ localStorage.setItem(key, JSON.stringify(value)); }catch(_){ }
+}
+
+function normalizeUsername(value){
+  return String(value || '').trim().toLowerCase();
+}
+
+function ensureDefaultUsers(){
+  let users = readLocalJson(AUTH_USERS_KEY, []);
+  if (!Array.isArray(users)) users = [];
+  let changed = false;
+  users = users.map((u) => {
+    const next = Object.assign({}, u || {});
+    if (!next.username && next.usernameLower) next.username = next.usernameLower;
+    const normalized = normalizeUsername(next.username || next.usernameLower);
+    if (!next.usernameLower) { next.usernameLower = normalized; changed = true; }
+    if (!next.role) { next.role = 'admin'; changed = true; }
+    return next;
+  });
+  const hasOwner = users.some(u => u.role === 'owner' || normalizeUsername(u.username) === normalizeUsername(DEFAULT_OWNER.username));
+  if (!hasOwner){
+    users.push({
+      id: 'owner-1',
+      username: DEFAULT_OWNER.username,
+      usernameLower: normalizeUsername(DEFAULT_OWNER.username),
+      password: DEFAULT_OWNER.password,
+      role: 'owner',
+      fullName: DEFAULT_OWNER.fullName,
+      createdAt: Date.now(),
+    });
+    changed = true;
+  }
+  if (changed) writeLocalJson(AUTH_USERS_KEY, users);
+  return users;
+}
+
+function saveUsers(users){
+  writeLocalJson(AUTH_USERS_KEY, Array.isArray(users) ? users : []);
+}
+
+function findUser(username, users){
+  const normalized = normalizeUsername(username);
+  const list = Array.isArray(users) ? users : ensureDefaultUsers();
+  return list.find(u => normalizeUsername(u.username || u.usernameLower) === normalized);
+}
+
+function getSessionUser(){
+  const session = readLocalJson(AUTH_SESSION_KEY, null);
+  if (!session || !session.usernameLower) return null;
+  const users = ensureDefaultUsers();
+  const user = users.find(u => normalizeUsername(u.username || u.usernameLower) === session.usernameLower);
+  if (!user) return null;
+  if (session.role && user.role !== session.role) return null;
+  return user;
+}
+
+function setSessionUser(user){
+  if (!user) return;
+  const session = {
+    username: user.username,
+    usernameLower: normalizeUsername(user.username),
+    role: user.role,
+    loginAt: Date.now(),
+  };
+  writeLocalJson(AUTH_SESSION_KEY, session);
+  try{ localStorage.setItem('admin:actor', user.username); }catch(_){ }
+}
+
+function clearSessionUser(){
+  try{
+    localStorage.removeItem(AUTH_SESSION_KEY);
+    localStorage.removeItem('admin:actor');
+  }catch(_){ }
+}
+
+function setAuthLocked(locked){
+  try{ document.body.classList.toggle('auth-locked', locked); }catch(_){ }
+  try{
+    const overlay = document.getElementById('authOverlay');
+    if (overlay) overlay.setAttribute('aria-hidden', locked ? 'false' : 'true');
+  }catch(_){ }
+}
+
+function formatRoleLabel(role){
+  if (role === 'owner') return 'Owner';
+  if (role === 'admin') return 'Admin';
+  if (role === 'repartidor') return 'Repartidor';
+  return role || '—';
+}
+
+function updateUserUI(user){
+  const userLabel = document.getElementById('currentUserLabel');
+  const roleLabel = document.getElementById('currentRoleLabel');
+  if (userLabel) userLabel.textContent = user ? user.username : '—';
+  if (roleLabel) roleLabel.textContent = user ? formatRoleLabel(user.role) : '—';
+}
+
+function applyRoleAccess(user){
+  currentAdminUser = user || null;
+  updateUserUI(user);
+  const role = user ? user.role : null;
+
+  if (role === 'repartidor'){
+    try{ window.location.href = 'repartidor.html'; }catch(_){ }
+    return;
+  }
+
+  document.querySelectorAll('[data-role]').forEach((el) => {
+    const roles = String(el.dataset.role || '').split(',').map(r => r.trim()).filter(Boolean);
+    const allowed = role && roles.includes(role);
+    el.classList.toggle('role-hidden', !allowed);
+  });
+
+  const activeLink = document.querySelector('.sidebar nav a.active[data-section]');
+  const activeSection = activeLink ? activeLink.getAttribute('data-section') : null;
+  if (activeSection && !canAccessSection(activeSection)){
+    activateSection('dashboard');
+  }
+}
+
+function initAuth(){
+  ensureDefaultUsers();
+  const loginForm = document.getElementById('authLoginForm');
+  const userInput = document.getElementById('authUser');
+  const passInput = document.getElementById('authPass');
+  const showPass = document.getElementById('authShowPass');
+  const errorEl = document.getElementById('authError');
+  const logoutBtn = document.getElementById('logoutBtn');
+
+  function setAuthError(msg){
+    if (!errorEl) return;
+    errorEl.textContent = msg || '';
+  }
+
+  if (showPass && passInput){
+    showPass.addEventListener('change', () => {
+      passInput.type = showPass.checked ? 'text' : 'password';
+    });
+  }
+  if (userInput) userInput.addEventListener('input', () => setAuthError(''));
+  if (passInput) passInput.addEventListener('input', () => setAuthError(''));
+  if (loginForm){
+    loginForm.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      const username = userInput ? String(userInput.value || '').trim() : '';
+      const password = passInput ? String(passInput.value || '') : '';
+      if (!username || !password){
+        setAuthError('Ingresá usuario y contraseña.');
+        return;
+      }
+      const users = ensureDefaultUsers();
+      const user = findUser(username, users);
+      if (!user){
+        setAuthError('Usuario no encontrado.');
+        return;
+      }
+      if (String(user.password || '') !== password){
+        setAuthError('Contraseña incorrecta.');
+        return;
+      }
+      setSessionUser(user);
+      setAuthLocked(false);
+      setAuthError('');
+      applyRoleAccess(user);
+      activateSection('dashboard');
+    });
+  }
+
+  if (logoutBtn){
+    logoutBtn.addEventListener('click', () => {
+      clearSessionUser();
+      setAuthLocked(true);
+      currentAdminUser = null;
+      try{ location.reload(); }catch(_){ }
+    });
+  }
+
+  const sessionUser = getSessionUser();
+  if (sessionUser){
+    setAuthLocked(false);
+    applyRoleAccess(sessionUser);
+  } else {
+    setAuthLocked(true);
+    try{ userInput && userInput.focus(); }catch(_){ }
+  }
+}
+initAuth();
 // Small helper to wrap fetch and provide consistent errors and JSON parsing
 async function safeFetch(url, opts) {
   const next = opts ? Object.assign({}, opts) : {};
@@ -233,7 +488,7 @@ const apiBaseIndicator = document.getElementById('apiBaseIndicator');
 const wsStatus = document.getElementById('wsStatus');
 if(apiBaseIndicator) apiBaseIndicator.textContent = API_BASE;
 
-// Hidden admin console (4 taps on WS indicator)
+// Admin console (tabbed section)
 const ADMIN_CLEAR_TARGETS = {
   '1': { key: 'catalog', label: 'Catalogo' },
   '2': { key: 'filters', label: 'Filtros' },
@@ -241,20 +496,18 @@ const ADMIN_CLEAR_TARGETS = {
   '4': { key: 'customers', label: 'Clientes' },
   '5': { key: 'preparations', label: 'Preparaciones' },
 };
-let wsTapCount = 0;
-let wsTapLastTs = 0;
-const wsTapWindowMs = 900;
 const adminConsoleState = {
-  modal: null,
+  section: null,
   log: null,
   input: null,
   form: null,
-  closeBtn: null,
   openedOnce: false,
+  ready: false,
 };
 
 function logAdminConsole(message, tone){
   try{
+    ensureAdminConsole();
     if (!adminConsoleState.log) return;
     const line = document.createElement('div');
     const cls = tone ? String(tone) : '';
@@ -265,52 +518,13 @@ function logAdminConsole(message, tone){
   }catch(_){ }
 }
 
-function closeAdminConsole(){
-  try{
-    if (!adminConsoleState.modal) return;
-    adminConsoleState.modal.classList.add('hidden');
-    adminConsoleState.modal.setAttribute('aria-hidden', 'true');
-  }catch(_){ }
-}
-
 function ensureAdminConsole(){
-  if (adminConsoleState.modal) return adminConsoleState;
-  const modal = document.createElement('div');
-  modal.id = 'adminConsoleModal';
-  modal.className = 'modal hidden';
-  modal.setAttribute('aria-hidden', 'true');
-  modal.setAttribute('role', 'dialog');
-  modal.setAttribute('aria-modal', 'true');
-  modal.innerHTML = `
-    <div class="modal-card admin-console-card">
-      <button id="adminConsoleClose" class="modal-close" aria-label="Cerrar">✕</button>
-      <h2>Consola Admin</h2>
-      <div class="admin-console-body">
-        <div id="adminConsoleLog" class="admin-console-log" role="log" aria-live="polite"></div>
-        <form id="adminConsoleForm" class="admin-console-form" autocomplete="off">
-          <input id="adminConsoleInput" class="admin-console-input" placeholder="Ej: /clear @1" />
-          <button class="btn" type="submit">Ejecutar</button>
-        </form>
-        <div class="admin-console-help">
-          Comandos: <code>/clear @1</code> Catalogo, <code>/clear @2</code> Filtros, <code>/clear @3</code> Pedidos, <code>/clear @4</code> Clientes, <code>/clear @5</code> Preparaciones. <code>/help</code> para ayuda.
-        </div>
-      </div>
-    </div>
-  `;
-  document.body.appendChild(modal);
-  adminConsoleState.modal = modal;
-  adminConsoleState.log = modal.querySelector('#adminConsoleLog');
-  adminConsoleState.input = modal.querySelector('#adminConsoleInput');
-  adminConsoleState.form = modal.querySelector('#adminConsoleForm');
-  adminConsoleState.closeBtn = modal.querySelector('#adminConsoleClose');
-
-  if (adminConsoleState.closeBtn) adminConsoleState.closeBtn.addEventListener('click', closeAdminConsole);
-  modal.addEventListener('click', (ev) => { if (ev.target === modal) closeAdminConsole(); });
-  document.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape' && adminConsoleState.modal && !adminConsoleState.modal.classList.contains('hidden')) {
-      closeAdminConsole();
-    }
-  });
+  if (adminConsoleState.ready) return adminConsoleState;
+  adminConsoleState.section = document.getElementById('admin-console');
+  adminConsoleState.log = document.getElementById('adminConsoleLog');
+  adminConsoleState.input = document.getElementById('adminConsoleInput');
+  adminConsoleState.form = document.getElementById('adminConsoleForm');
+  adminConsoleState.ready = true;
 
   if (adminConsoleState.form) {
     adminConsoleState.form.addEventListener('submit', async (ev) => {
@@ -323,18 +537,6 @@ function ensureAdminConsole(){
   }
 
   return adminConsoleState;
-}
-
-function openAdminConsole(){
-  ensureAdminConsole();
-  if (!adminConsoleState.modal) return;
-  adminConsoleState.modal.classList.remove('hidden');
-  adminConsoleState.modal.setAttribute('aria-hidden', 'false');
-  if (!adminConsoleState.openedOnce){
-    adminConsoleState.openedOnce = true;
-    logAdminConsole('Consola lista. Usa /help para ver comandos.', 'note');
-  }
-  try{ adminConsoleState.input && adminConsoleState.input.focus(); }catch(_){ }
 }
 
 function clearLocalOrderCache(){
@@ -396,6 +598,10 @@ async function runAdminClear(target){
 }
 
 async function handleAdminConsoleCommand(raw){
+  if (!canAccessSection('admin-console')){
+    logAdminConsole('Sin acceso a la consola.', 'err');
+    return;
+  }
   const cmd = String(raw || '').trim();
   if (!cmd) return;
   logAdminConsole('> ' + cmd, 'cmd');
@@ -427,21 +633,7 @@ async function handleAdminConsoleCommand(raw){
   await runAdminClear(target);
 }
 
-function handleWsTap(){
-  const now = Date.now();
-  if (now - wsTapLastTs > wsTapWindowMs) wsTapCount = 0;
-  wsTapLastTs = now;
-  wsTapCount += 1;
-  if (wsTapCount >= 4){
-    wsTapCount = 0;
-    openAdminConsole();
-  }
-}
-
-if (wsStatus){
-  wsStatus.style.cursor = 'pointer';
-  wsStatus.addEventListener('click', handleWsTap);
-}
+// WS indicator remains informational (no hidden console)
 
 const salesOrders30El = document.getElementById('salesOrders30');
 const salesRevenue30El = document.getElementById('salesRevenue30');
@@ -514,6 +706,12 @@ const retailPricesTableBody = document.querySelector('#retailPricesTable tbody')
 const retailPriceSearch = document.getElementById('retailPriceSearch');
 const retailRefreshBtn = document.getElementById('retailRefreshBtn');
 const retailSaveAllBtn = document.getElementById('retailSaveAllBtn');
+const userForm = document.getElementById('userForm');
+const userUsernameInput = document.getElementById('userUsername');
+const userPasswordInput = document.getElementById('userPassword');
+const userRoleSelect = document.getElementById('userRole');
+const userFormMsg = document.getElementById('userFormMsg');
+const usersTableBody = document.querySelector('#usersTable tbody');
 let currentEditId = null;
 let imageUrl = null;
 let selectedFile = null;
@@ -616,6 +814,129 @@ function showToast(msg, type = 'info'){
   const duration = type === 'error' ? 7000 : 3200;
   setTimeout(()=>{ toast.classList.add('hidden'); toast.classList.remove('toast-error'); toast.title = ''; }, duration);
 }
+
+function setUserFormMessage(msg, tone){
+  if (!userFormMsg) return;
+  userFormMsg.textContent = msg || '';
+  userFormMsg.classList.remove('error', 'success');
+  if (tone) userFormMsg.classList.add(tone);
+}
+
+function formatUserDate(ts){
+  try{
+    if (!ts) return '—';
+    const d = new Date(ts);
+    if (Number.isNaN(d.getTime())) return '—';
+    return d.toLocaleString('es-AR', { dateStyle: 'short', timeStyle: 'short' });
+  }catch(_){ return '—'; }
+}
+
+function renderUsers(){
+  if (!usersTableBody) return;
+  if (!currentAdminUser || currentAdminUser.role !== 'owner') return;
+  const users = ensureDefaultUsers().slice();
+  const roleOrder = { owner: 0, admin: 1, repartidor: 2 };
+  users.sort((a, b) => {
+    const ra = roleOrder[a.role] ?? 99;
+    const rb = roleOrder[b.role] ?? 99;
+    if (ra !== rb) return ra - rb;
+    return String(a.username || '').localeCompare(String(b.username || ''));
+  });
+  usersTableBody.innerHTML = '';
+  users.forEach((u) => {
+    const tr = document.createElement('tr');
+    const tdUser = document.createElement('td');
+    tdUser.textContent = u.username || '—';
+    const tdRole = document.createElement('td');
+    tdRole.textContent = formatRoleLabel(u.role);
+    const tdCreated = document.createElement('td');
+    tdCreated.textContent = formatUserDate(u.createdAt);
+    const tdActions = document.createElement('td');
+    if (u.role === 'owner'){
+      tdActions.textContent = '—';
+    } else {
+      const delBtn = document.createElement('button');
+      delBtn.className = 'btn danger user-delete-btn';
+      delBtn.type = 'button';
+      delBtn.dataset.user = normalizeUsername(u.username || u.usernameLower);
+      delBtn.textContent = 'Eliminar';
+      tdActions.appendChild(delBtn);
+    }
+    tr.appendChild(tdUser);
+    tr.appendChild(tdRole);
+    tr.appendChild(tdCreated);
+    tr.appendChild(tdActions);
+    usersTableBody.appendChild(tr);
+  });
+}
+
+function handleUserFormSubmit(ev){
+  ev.preventDefault();
+  if (!currentAdminUser || currentAdminUser.role !== 'owner'){
+    setUserFormMessage('Solo el owner puede crear usuarios.', 'error');
+    return;
+  }
+  const username = userUsernameInput ? String(userUsernameInput.value || '').trim() : '';
+  const password = userPasswordInput ? String(userPasswordInput.value || '') : '';
+  const role = userRoleSelect ? String(userRoleSelect.value || 'admin') : 'admin';
+  if (!username || !password){
+    setUserFormMessage('Completá usuario y contraseña.', 'error');
+    return;
+  }
+  if (role === 'owner'){
+    setUserFormMessage('No se pueden crear owners adicionales.', 'error');
+    return;
+  }
+  const users = ensureDefaultUsers();
+  if (findUser(username, users)){
+    setUserFormMessage('Ese usuario ya existe.', 'error');
+    return;
+  }
+  const newUser = {
+    id: 'u-' + Date.now(),
+    username,
+    usernameLower: normalizeUsername(username),
+    password,
+    role,
+    createdAt: Date.now(),
+    createdBy: currentAdminUser.username,
+  };
+  users.push(newUser);
+  saveUsers(users);
+  setUserFormMessage('Usuario creado correctamente.', 'success');
+  if (userForm) userForm.reset();
+  renderUsers();
+}
+
+function setupUserManagement(){
+  if (userForm){
+    userForm.addEventListener('submit', handleUserFormSubmit);
+    userForm.addEventListener('input', () => setUserFormMessage(''));
+  }
+  if (usersTableBody){
+    usersTableBody.addEventListener('click', (ev) => {
+      const btn = ev.target && ev.target.closest ? ev.target.closest('.user-delete-btn') : null;
+      if (!btn) return;
+      if (!currentAdminUser || currentAdminUser.role !== 'owner'){
+        setUserFormMessage('Solo el owner puede eliminar usuarios.', 'error');
+        return;
+      }
+      const usernameLower = String(btn.dataset.user || '');
+      const users = ensureDefaultUsers();
+      const user = users.find(u => normalizeUsername(u.username || u.usernameLower) === usernameLower);
+      if (!user) return;
+      if (user.role === 'owner') return;
+      const ok = confirm(`Eliminar usuario "${user.username}"?`);
+      if (!ok) return;
+      const nextUsers = users.filter(u => normalizeUsername(u.username || u.usernameLower) !== usernameLower);
+      saveUsers(nextUsers);
+      renderUsers();
+      setUserFormMessage('Usuario eliminado.', 'success');
+    });
+  }
+}
+
+setupUserManagement();
 
 const moneyFmt0 = new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', minimumFractionDigits: 0, maximumFractionDigits: 0 });
 const moneyFmt2 = new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -2345,32 +2666,6 @@ if (backupBtn) backupBtn.addEventListener('click', async () => {
     showToast('Backup creado correctamente');
   }catch(err){ console.error(err); showToast('Error creando backup (revisa logs)', 'error'); }
   finally{ backupBtn.disabled = false; backupBtn.textContent = 'Backup'; }
-});
-
-document.querySelectorAll('.sidebar nav a').forEach(a => a.onclick = () => {
-  document.querySelectorAll('.sidebar nav a').forEach(x=>x.classList.remove('active'));
-  a.classList.add('active');
-  const sectionTitles = {
-    'dashboard': 'Dashboard',
-    'catalog': 'Catálogo',
-    'retail-prices': 'Precios minorista',
-    'consumos': 'Consumición inmediata',
-    'promotions': 'Promociones',
-    'promo-images': 'Imágenes Promocionales',
-    'filters': 'Filtros',
-    'orders': 'Pedidos',
-    'customers': 'Clientes',
-    'preparations': 'Preparaciones',
-  };
-  document.getElementById('title').textContent = sectionTitles[a.dataset.section] || 'Administración';
-  document.querySelectorAll('.section').forEach(s=>s.classList.add('hidden'));
-  const target = document.getElementById(a.dataset.section);
-  if(target) target.classList.remove('hidden');
-  // If promo-images tab activated, ensure we load images
-  try{ if(a.dataset.section === 'promo-images') fetchPromoImages(); }catch(e){ console.warn('fetchPromoImages guard failed', e); }
-  try{ if(a.dataset.section === 'retail-prices') refreshRetailPrices(); }catch(e){ console.warn('refreshRetailPrices guard failed', e); }
-  try{ if(a.dataset.section === 'preparations') refreshPreparations(false); }catch(e){ console.warn('refreshPreparations guard failed', e); }
-  try{ if(a.dataset.section === 'customers') refreshCustomers(false); }catch(e){ console.warn('refreshCustomers guard failed', e); }
 });
 
 // Theme toggle
