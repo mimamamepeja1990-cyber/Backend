@@ -223,6 +223,8 @@ ROUTE_START_ADDRESS = str(os.environ.get('ROUTE_START_ADDRESS') or '').strip()
 GOOGLE_MAPS_JS_API_KEY = str(os.environ.get('GOOGLE_MAPS_JS_API_KEY') or os.environ.get('GOOGLE_MAPS_API_KEY') or '').strip()
 DRIVER_LOCATION_MAX_AGE_SEC = int(float(os.environ.get('DRIVER_LOCATION_MAX_AGE_SEC') or 60 * 60))
 DRIVER_LOCATION_STORE_HISTORY = _is_truthy(os.environ.get('DRIVER_LOCATION_STORE_HISTORY') or os.environ.get('DRIVER_LOCATION_HISTORY'))
+DRIVER_DEPOT_RADIUS_M = float(os.environ.get('DRIVER_DEPOT_RADIUS_M') or 30)
+ORDER_AUTO_MILESTONES = _is_truthy(os.environ.get('ORDER_AUTO_MILESTONES') or os.environ.get('ORDER_AUTO_STATUS_BY_TIME') or '0')
 
 _GEOCODE_CACHE: Dict[str, Dict[str, Any]] = {}
 _GEOCODE_CACHE_LOCK = threading.Lock()
@@ -393,6 +395,7 @@ def _startup_bootstrap_sync() -> None:
                 'route_id': 'VARCHAR(120)',
                 'route_order': 'INTEGER',
                 'route_generated_at': 'TIMESTAMP',
+                'sent_at': 'TIMESTAMP',
                 'delivered_at': 'TIMESTAMP',
                 'delivered_by_id': 'INTEGER',
                 'delivered_by_username': 'VARCHAR(80)',
@@ -1002,6 +1005,8 @@ def _compute_order_auto_status(
     at least `preparado`. This prevents time-based jumps from blocking the
     admin workflow (recibido -> visto -> preparado).
     """
+    if not ORDER_AUTO_MILESTONES:
+        return None
     base_status = _normalize_order_status(status_value)
     if base_status == 'cancelado':
         return None
@@ -1040,6 +1045,18 @@ def _compute_order_auto_status(
     if now_local >= enviado_at:
         return 'enviado'
     return None
+
+
+def _allow_time_auto_for_order(order: Optional[Dict[str, Any]]) -> bool:
+    if not ORDER_AUTO_MILESTONES:
+        return False
+    if not order:
+        return False
+    assigned_id = order.get('assigned_driver_id')
+    assigned_user = str(order.get('assigned_driver_username') or '').strip()
+    if assigned_id or assigned_user:
+        return False
+    return True
 
 
 def _merge_order_statuses(*values: Any) -> str:
@@ -8829,6 +8846,7 @@ def list_orders(
                     'assigned_driver_id', 'assigned_driver_username', 'assigned_driver_name', 'assigned_driver_zone', 'assigned_at',
                     'delivery_lat', 'delivery_lon',
                     'route_id', 'route_order', 'route_generated_at',
+                    'sent_at',
                     'delivered_at', 'delivered_by_id', 'delivered_by_username',
                 ]
             }
@@ -8960,13 +8978,15 @@ def list_orders(
                         override_raw = (ORDER_STATUS_CACHE.get(str(oid)) or {}).get('status')
 
                 base_status = _merge_order_statuses(db_status_raw, override_raw)
-                auto_status = _compute_order_auto_status(
-                    od.get('created_at'),
-                    scheduled_delivery_date_value=od.get('scheduled_delivery_date'),
-                    status_value=base_status,
-                    now_utc=now_utc,
-                    tz_name_hint=str(od.get('delivery_timezone') or '').strip() or None,
-                )
+                auto_status = None
+                if _allow_time_auto_for_order(od):
+                    auto_status = _compute_order_auto_status(
+                        od.get('created_at'),
+                        scheduled_delivery_date_value=od.get('scheduled_delivery_date'),
+                        status_value=base_status,
+                        now_utc=now_utc,
+                        tz_name_hint=str(od.get('delivery_timezone') or '').strip() or None,
+                    )
                 effective_status = _merge_order_statuses(base_status, auto_status)
                 od['status'] = effective_status
 
@@ -9406,6 +9426,69 @@ def admin_deliveries(
     return out
 
 
+def _maybe_mark_driver_departure_enviado(
+    driver_id: Optional[int],
+    driver_username: Optional[str],
+    lat: float,
+    lon: float,
+    recorded_at: Optional[datetime.datetime] = None,
+) -> int:
+    """If driver is outside the depot radius, mark prepared orders as enviado."""
+    if (driver_id is None and not driver_username) or DRIVER_DEPOT_RADIUS_M <= 0:
+        return 0
+    try:
+        start_lat, start_lon = _get_route_start_point()
+    except Exception:
+        start_lat, start_lon = None, None
+    if not _is_mendoza_point(start_lat, start_lon):
+        return 0
+    try:
+        dist_km = _haversine_km(float(lat), float(lon), float(start_lat), float(start_lon))
+    except Exception:
+        return 0
+    if dist_km * 1000.0 < DRIVER_DEPOT_RADIUS_M:
+        return 0
+
+    now_ts = recorded_at or datetime.datetime.now(datetime.timezone.utc)
+    clauses = []
+    params = {'now_ts': now_ts}
+    if driver_id is not None:
+        clauses.append("assigned_driver_id = :driver_id")
+        params['driver_id'] = int(driver_id)
+    if driver_username:
+        clauses.append("assigned_driver_username = :driver_username")
+        params['driver_username'] = str(driver_username)
+    if not clauses:
+        return 0
+    where_sql = " OR ".join(clauses)
+    updated = 0
+    try:
+        with engine.begin() as conn:
+            res = conn.execute(
+                text(
+                    "UPDATE orders SET status = 'enviado', sent_at = COALESCE(sent_at, :now_ts) "
+                    f"WHERE ({where_sql}) AND (status IS NULL OR LOWER(status) = 'preparado')"
+                ),
+                params,
+            )
+            updated = int(getattr(res, 'rowcount', 0) or 0)
+    except Exception:
+        # Fallback if sent_at column is missing
+        try:
+            with engine.begin() as conn:
+                res = conn.execute(
+                    text(
+                        "UPDATE orders SET status = 'enviado' "
+                        f"WHERE ({where_sql}) AND (status IS NULL OR LOWER(status) = 'preparado')"
+                    ),
+                    params,
+                )
+                updated = int(getattr(res, 'rowcount', 0) or 0)
+        except Exception:
+            updated = 0
+    return updated
+
+
 @app.post('/admin/driver-location', response_model=schemas.DriverLocationOut)
 def admin_driver_location(
     payload: schemas.DriverLocationIn,
@@ -9474,6 +9557,24 @@ def admin_driver_location(
 
     try:
         asyncio.create_task(push_event({"action": "driver_location", "driver": payload_out}))
+    except Exception:
+        pass
+
+    # If driver left depot radius, move prepared orders to enviado at real timestamp.
+    try:
+        if role == 'repartidor':
+            updated = _maybe_mark_driver_departure_enviado(
+                driver_id=driver_id,
+                driver_username=str(driver_username or '').strip() or None,
+                lat=float(lat),
+                lon=float(lon),
+                recorded_at=recorded_at,
+            )
+            if updated > 0:
+                try:
+                    asyncio.create_task(push_event({"action": "updated"}))
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -9899,9 +10000,11 @@ async def update_order_status(order_id: str, request: Request):
         current_created_at = None
         current_scheduled_delivery_date = None
         current_delivery_tz = None
+        current_assigned_id = None
+        current_assigned_user = None
         try:
             # created_at is always expected; include it so we can apply auto milestones.
-            pre_cols = ['status', 'created_at']
+            pre_cols = ['status', 'created_at', 'assigned_driver_id', 'assigned_driver_username']
             if 'scheduled_delivery_date' in (existing_cols or set()):
                 pre_cols.append('scheduled_delivery_date')
             if 'delivery_timezone' in (existing_cols or set()):
@@ -9928,6 +10031,14 @@ async def update_order_status(order_id: str, request: Request):
                     idx_sched = pre_cols.index('scheduled_delivery_date') if 'scheduled_delivery_date' in pre_cols else -1
                 except Exception:
                     idx_sched = -1
+                try:
+                    idx_assign_id = pre_cols.index('assigned_driver_id') if 'assigned_driver_id' in pre_cols else -1
+                except Exception:
+                    idx_assign_id = -1
+                try:
+                    idx_assign_user = pre_cols.index('assigned_driver_username') if 'assigned_driver_username' in pre_cols else -1
+                except Exception:
+                    idx_assign_user = -1
                 if idx_status >= 0:
                     current_status_raw = row_pre[idx_status]
                 if idx_created >= 0:
@@ -9936,17 +10047,27 @@ async def update_order_status(order_id: str, request: Request):
                     current_scheduled_delivery_date = row_pre[idx_sched]
                 if idx_tz >= 0:
                     current_delivery_tz = row_pre[idx_tz]
+                current_assigned_id = row_pre[idx_assign_id] if idx_assign_id >= 0 else None
+                current_assigned_user = row_pre[idx_assign_user] if idx_assign_user >= 0 else None
         except Exception:
             pass
 
         base_current = _merge_order_statuses(current_status_raw, current_override_raw)
-        auto_status = _compute_order_auto_status(
-            current_created_at,
-            scheduled_delivery_date_value=current_scheduled_delivery_date,
-            status_value=base_current,
-            now_utc=now_utc,
-            tz_name_hint=str(current_delivery_tz or '').strip() or None,
-        )
+        auto_status = None
+        allow_auto = ORDER_AUTO_MILESTONES
+        try:
+            if current_assigned_id or str(current_assigned_user or '').strip():
+                allow_auto = False
+        except Exception:
+            pass
+        if allow_auto:
+            auto_status = _compute_order_auto_status(
+                current_created_at,
+                scheduled_delivery_date_value=current_scheduled_delivery_date,
+                status_value=base_current,
+                now_utc=now_utc,
+                tz_name_hint=str(current_delivery_tz or '').strip() or None,
+            )
         effective_current = _merge_order_statuses(base_current, auto_status)
         if effective_current == 'cancelado' and status_norm != 'cancelado':
             headers = _cors_headers_for_request(request)
@@ -10036,6 +10157,7 @@ async def update_order_status(order_id: str, request: Request):
         'payment_method','payment_status','payment_reference',
         'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
         'assigned_driver_id', 'assigned_driver_username', 'assigned_driver_name', 'assigned_driver_zone', 'assigned_at',
+        'sent_at',
     ]
     for c in optional:
         if c in existing:
@@ -10119,6 +10241,7 @@ async def update_order_status(order_id: str, request: Request):
                         'assigned_driver_id', 'assigned_driver_username', 'assigned_driver_name', 'assigned_driver_zone', 'assigned_at',
                         'delivery_lat', 'delivery_lon',
                         'route_id', 'route_order', 'route_generated_at',
+                        'sent_at',
                         'delivered_at', 'delivered_by_id', 'delivered_by_username',
                     ]
                     for c in optional:
@@ -10153,6 +10276,30 @@ async def update_order_status(order_id: str, request: Request):
     # Broadcast the updated order to connected admin clients
     try:
         await push_event({"action": "order_updated", "order": od})
+    except Exception:
+        pass
+
+    # If sent, persist sent_at timestamp
+    try:
+        if status_norm == 'enviado':
+            sent_at = od.get('sent_at')
+            if not sent_at:
+                now_ts = datetime.datetime.now(datetime.timezone.utc)
+                try:
+                    with engine.begin() as conn:
+                        if use_id_int:
+                            conn.execute(
+                                text("UPDATE orders SET sent_at = :sent_at WHERE id = :id"),
+                                {'sent_at': now_ts, 'id': id_param},
+                            )
+                        else:
+                            conn.execute(
+                                text("UPDATE orders SET sent_at = :sent_at WHERE CAST(id AS TEXT) = :id"),
+                                {'sent_at': now_ts, 'id': id_param},
+                            )
+                    od['sent_at'] = now_ts
+                except Exception:
+                    pass
     except Exception:
         pass
 

@@ -119,6 +119,7 @@ class Order(Base):
     route_id = Column(String(120), nullable=True)
     route_order = Column(Integer, nullable=True)
     route_generated_at = Column(DateTime(timezone=True), nullable=True)
+    sent_at = Column(DateTime(timezone=True), nullable=True)
     delivered_at = Column(DateTime(timezone=True), nullable=True)
     delivered_by_id = Column(Integer, nullable=True)
     delivered_by_username = Column(String(80), nullable=True)

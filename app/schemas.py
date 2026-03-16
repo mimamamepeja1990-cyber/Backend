@@ -264,6 +264,7 @@ class OrderResponse(BaseModel):
     route_id: Optional[str] = None
     route_order: Optional[int] = None
     route_generated_at: Optional[datetime] = None
+    sent_at: Optional[datetime] = None
     delivered_at: Optional[datetime] = None
     delivered_by_id: Optional[int] = None
     delivered_by_username: Optional[str] = None

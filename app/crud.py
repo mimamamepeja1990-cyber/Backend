@@ -2744,6 +2744,7 @@ def get_orders(
         'assigned_driver_id', 'assigned_driver_username', 'assigned_driver_name', 'assigned_driver_zone', 'assigned_at',
         'delivery_lat', 'delivery_lon',
         'route_id', 'route_order', 'route_generated_at',
+        'sent_at',
         'delivered_at', 'delivered_by_id', 'delivered_by_username',
     ]
     for c in optional:
