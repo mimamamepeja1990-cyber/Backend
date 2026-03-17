@@ -393,7 +393,7 @@ th.col-select input, td.col-select input{width:16px; height:16px}
 .chart-card h4{margin:0 0 6px;font-size:15px;color:var(--muted);letter-spacing:.2px}
 .chart-card canvas{display:block;width:100%;max-width:520px;height:220px;max-height:260px}
 .driver-map-card{align-items:stretch}
-.driver-map{width:100%;height:320px;border-radius:12px;border:1px solid rgba(15,23,42,0.08);background:linear-gradient(180deg,#f8fafc,#eef2ff);position:relative;overflow:hidden}
+.driver-map{width:100%;height:320px;border-radius:14px;border:1px solid rgba(15,23,42,0.08);background:radial-gradient(120% 120% at 100% 0%, rgba(59,130,246,0.12) 0%, rgba(148,163,184,0.08) 32%, #f8fafc 60%);position:relative;overflow:hidden;box-shadow:0 14px 36px rgba(15,23,42,0.08)}
 .driver-map-empty{margin-top:10px;font-size:13px;color:#64748b;text-align:center}
 @media (max-width:700px){ .chart-card{max-width:260px;min-height:160px} .chart-card canvas{max-width:220px;height:160px;max-height:180px} .driver-map-card .driver-map{height:260px} }
 /* prevent chart from forcing very large layout; clip overflow if something goes wrong */

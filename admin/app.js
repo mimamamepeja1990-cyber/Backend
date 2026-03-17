@@ -24,12 +24,51 @@ let driverMapReady = false;
 let driverMapInit = false;
 let driverMapPoll = null;
 const driverMapMarkers = new Map();
+const DRIVER_LOCATION_STALE_SEC = 60;
+const DRIVER_MAP_STYLE = [
+  { elementType: 'geometry', stylers: [{ color: '#eef2f6' }] },
+  { elementType: 'labels.text.fill', stylers: [{ color: '#334155' }] },
+  { elementType: 'labels.text.stroke', stylers: [{ color: '#ffffff' }] },
+  { featureType: 'administrative', elementType: 'geometry', stylers: [{ color: '#e2e8f0' }] },
+  { featureType: 'poi', elementType: 'labels.text.fill', stylers: [{ color: '#64748b' }] },
+  { featureType: 'poi.park', elementType: 'geometry', stylers: [{ color: '#e8f5e9' }] },
+  { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#ffffff' }] },
+  { featureType: 'road', elementType: 'geometry.stroke', stylers: [{ color: '#e2e8f0' }] },
+  { featureType: 'road', elementType: 'labels.text.fill', stylers: [{ color: '#64748b' }] },
+  { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#dbeafe' }] },
+  { featureType: 'water', elementType: 'labels.text.fill', stylers: [{ color: '#3b82f6' }] },
+];
 
 function getDriverMapElements(){
   return {
     container: document.getElementById('driverMap'),
     empty: document.getElementById('driverMapEmpty'),
   };
+}
+
+function getDriverId(driver){
+  if (!driver) return '';
+  return String(driver.driver_id || driver.driver_username || driver.driver_name || '').trim();
+}
+
+function getDriverMarkerIcon(){
+  if (!(window.google && window.google.maps)) return null;
+  return {
+    path: google.maps.SymbolPath.CIRCLE,
+    scale: 7,
+    fillColor: '#0ea5e9',
+    fillOpacity: 0.95,
+    strokeColor: '#0f172a',
+    strokeOpacity: 0.7,
+    strokeWeight: 2,
+  };
+}
+
+function clearDriverMarkers(){
+  driverMapMarkers.forEach((marker) => {
+    try{ marker.setMap(null); }catch(_){ }
+  });
+  driverMapMarkers.clear();
 }
 
 async function loadGoogleMapsApi(){
@@ -78,6 +117,7 @@ async function initDriverMap(){
     mapTypeControl: false,
     streetViewControl: false,
     fullscreenControl: true,
+    styles: DRIVER_MAP_STYLE,
   });
   driverMapReady = true;
   setDriverMapEmpty('');
@@ -88,15 +128,17 @@ function updateDriverMarker(driver){
   if (!driver || !driverMapReady) return;
   const lat = Number(driver.lat);
   const lon = Number(driver.lon);
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
-  const id = String(driver.driver_id || driver.driver_username || driver.driver_name || '');
-  if (!id) return;
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+  const id = getDriverId(driver);
+  if (!id) return false;
   const labelText = String(driver.driver_name || driver.driver_username || '').trim();
+  const icon = getDriverMarkerIcon();
   let marker = driverMapMarkers.get(id);
   if (!marker){
     marker = new google.maps.Marker({
       map: driverMap,
       position: { lat, lng: lon },
+      icon: icon || undefined,
       label: labelText ? { text: labelText, fontSize: '12px', fontWeight: '600', color: '#1f2937' } : undefined,
       title: labelText || 'Repartidor',
     });
@@ -104,7 +146,9 @@ function updateDriverMarker(driver){
   } else {
     marker.setPosition({ lat, lng: lon });
     if (labelText) marker.setLabel({ text: labelText, fontSize: '12px', fontWeight: '600', color: '#1f2937' });
+    if (icon) marker.setIcon(icon);
   }
+  return true;
 }
 
 async function refreshDriverLocations(force){
@@ -112,10 +156,33 @@ async function refreshDriverLocations(force){
   const list = await safeFetch(API_BASE + '/admin/driver-locations').catch(() => []);
   if (!Array.isArray(list) || list.length === 0){
     setDriverMapEmpty('Sin ubicaciones recientes de repartidores.');
+    clearDriverMarkers();
     return;
   }
-  setDriverMapEmpty('');
-  list.forEach(updateDriverMarker);
+  const seen = new Set();
+  let visible = 0;
+  list.forEach((driver) => {
+    const id = getDriverId(driver);
+    if (!id) return;
+    const age = Number(driver.age_sec);
+    if (Number.isFinite(age) && age > DRIVER_LOCATION_STALE_SEC) return;
+    const ok = updateDriverMarker(driver);
+    if (ok){
+      seen.add(id);
+      visible += 1;
+    }
+  });
+  driverMapMarkers.forEach((marker, id) => {
+    if (!seen.has(id)){
+      try{ marker.setMap(null); }catch(_){ }
+      driverMapMarkers.delete(id);
+    }
+  });
+  if (visible === 0){
+    setDriverMapEmpty('Sin ubicaciones recientes de repartidores.');
+  } else {
+    setDriverMapEmpty('');
+  }
 }
 
 function startDriverMapPolling(){
