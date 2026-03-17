@@ -24,7 +24,7 @@ let driverMapReady = false;
 let driverMapInit = false;
 let driverMapPoll = null;
 const driverMapMarkers = new Map();
-const DRIVER_LOCATION_STALE_SEC = 60;
+const DRIVER_LOCATION_STALE_SEC = 300;
 const DRIVER_MAP_STYLE = [
   { elementType: 'geometry', stylers: [{ color: '#eef2f6' }] },
   { elementType: 'labels.text.fill', stylers: [{ color: '#334155' }] },
@@ -153,7 +153,19 @@ function updateDriverMarker(driver){
 
 async function refreshDriverLocations(force){
   if (!driverMapReady) return;
-  const list = await safeFetch(API_BASE + '/admin/driver-locations').catch(() => []);
+  let list = [];
+  try{
+    list = await safeFetch(API_BASE + '/admin/driver-locations');
+  }catch(e){
+    const status = Number(e && e.status);
+    if (status === 401 || status === 403){
+      setDriverMapEmpty('Sin acceso a ubicaciones. Volvé a iniciar sesión.');
+    } else {
+      setDriverMapEmpty('No se pudieron cargar ubicaciones.');
+    }
+    clearDriverMarkers();
+    return;
+  }
   if (!Array.isArray(list) || list.length === 0){
     setDriverMapEmpty('Sin ubicaciones recientes de repartidores.');
     clearDriverMarkers();
@@ -494,15 +506,23 @@ initAuth();
 // Small helper to wrap fetch and provide consistent errors and JSON parsing
 async function safeFetch(url, opts) {
   const next = opts ? Object.assign({}, opts) : {};
+  let shouldAttachAuthHeaders = true;
   try{
-    const headers = new Headers(next.headers || {});
-    headers.set('X-Actor', getActor());
-    const token = getAdminToken();
-    if (token && !headers.has('Authorization')) {
-      headers.set('Authorization', 'Bearer ' + token);
-    }
-    next.headers = headers;
+    const resolved = new URL(url, location.origin);
+    const apiOrigin = new URL(API_BASE, location.origin).origin;
+    shouldAttachAuthHeaders = resolved.origin === location.origin || resolved.origin === apiOrigin;
   }catch(_){ }
+  if (shouldAttachAuthHeaders){
+    try{
+      const headers = new Headers(next.headers || {});
+      headers.set('X-Actor', getActor());
+      const token = getAdminToken();
+      if (token && !headers.has('Authorization')) {
+        headers.set('Authorization', 'Bearer ' + token);
+      }
+      next.headers = headers;
+    }catch(_){ }
+  }
   const res = await fetch(url, next);
   if (!res) throw new Error('no-response');
   const ct = res.headers.get('content-type') || '';
