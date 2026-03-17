@@ -9674,6 +9674,39 @@ def admin_driver_locations(current_admin=Depends(get_current_admin_user)):
     return out
 
 
+@app.get('/admin/arcgis-geocode')
+def admin_arcgis_geocode(request: Request, q: str = '', current_admin=Depends(get_current_admin_user)):
+    """Proxy ArcGIS geocoding to avoid browser CORS issues."""
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role not in ('owner', 'admin'):
+        raise HTTPException(status_code=403, detail='No autorizado')
+    query = str(q or '').strip()
+    headers = _cors_headers_for_request(request)
+    if not query:
+        return JSONResponse(status_code=200, content={'candidates': []}, headers=headers)
+    params = {
+        'SingleLine': query,
+        'f': 'pjson',
+        'countryCode': 'ARG',
+        'maxLocations': '8',
+        'forStorage': 'false',
+        'outFields': '*',
+        'location': '-68.8458,-32.8895',
+        'searchExtent': '-70.7,-37.7,-66.2,-31.0',
+    }
+    try:
+        resp = httpx.get(
+            'https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates',
+            params=params,
+            timeout=GEOCODE_TIMEOUT_SEC,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return JSONResponse(status_code=200, content=data or {}, headers=headers)
+    except Exception:
+        return JSONResponse(status_code=200, content={'candidates': []}, headers=headers)
+
+
 @app.patch('/admin/orders/{order_id}/assign')
 async def admin_assign_order(order_id: str, request: Request, current_admin=Depends(get_current_admin_user)):
     role = str(getattr(current_admin, 'role', '') or '').strip().lower()

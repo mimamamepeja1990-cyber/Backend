@@ -2101,17 +2101,7 @@ async function resolveOrderCoordsWithArcGis(query, addr = null){
     const clean = String(query || '').trim();
     if (!clean) return null;
     const hints = buildOrderArcGisHints(addr || {});
-    const params = new URLSearchParams({
-      SingleLine: clean,
-      f: 'pjson',
-      countryCode: 'ARG',
-      maxLocations: '8',
-      forStorage: 'false',
-      outFields: '*',
-      location: '-68.8458,-32.8895',
-      searchExtent: '-70.7,-37.7,-66.2,-31.0',
-    });
-    const url = `https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?${params.toString()}`;
+    const url = `${API_BASE}/admin/arcgis-geocode?q=${encodeURIComponent(clean)}`;
     const data = await safeFetch(url, { cache: 'no-store' }).catch(() => null);
     const candidates = Array.isArray(data && data.candidates) ? data.candidates : [];
     let bestStrict = null;
