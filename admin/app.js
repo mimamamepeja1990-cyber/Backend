@@ -118,7 +118,11 @@ async function initDriverMap(){
   if (driverMapInit) return;
   driverMapInit = true;
   const { container } = getDriverMapElements();
-  if (!container) return;
+  if (!container){
+    driverMapInit = false;
+    driverMapReady = false;
+    return;
+  }
   const ok = await loadGoogleMapsApi();
   if (!ok){
     setDriverMapEmpty('Configura GOOGLE_MAPS_JS_API_KEY para ver el mapa.');
@@ -506,12 +510,17 @@ function initAuth(){
     const token = getAdminToken();
     if (token){
       const me = await safeFetch(API_BASE + '/admin/auth/me').catch(() => null);
-      if (me && me.username){
-        setSessionUser(me);
-        setAuthLocked(false);
-        applyRoleAccess(me);
-        return;
+    if (me && me.username){
+      setSessionUser(me);
+      setAuthLocked(false);
+      applyRoleAccess(me);
+      if (me.role !== 'repartidor'){
+        const activeLink = document.querySelector('.sidebar nav a.active[data-section]');
+        const activeSection = activeLink ? activeLink.getAttribute('data-section') : null;
+        activateSection(activeSection || 'dashboard');
       }
+      return;
+    }
     }
     clearAdminToken();
     clearSessionUser();
