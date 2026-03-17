@@ -5151,6 +5151,68 @@ def _optimize_route_order_with_start(nodes: List[dict], start_lat: float, start_
     return min(candidates, key=path_distance)
 
 
+def _optimize_route_order_greedy_from_start(nodes: List[dict], start_lat: float, start_lon: float) -> List[dict]:
+    """Greedy nearest-neighbor route starting from a fixed point (first stop closest to start)."""
+    if len(nodes) <= 1:
+        return nodes
+    remaining = nodes[:]
+    try:
+        first_idx = min(
+            range(len(remaining)),
+            key=lambda i: _haversine_km(start_lat, start_lon, remaining[i]['lat'], remaining[i]['lon'])
+        )
+    except Exception:
+        first_idx = 0
+    path = [remaining.pop(first_idx)]
+    while remaining:
+        last = path[-1]
+        best_idx = 0
+        best_dist = float('inf')
+        for idx, cand in enumerate(remaining):
+            d = _haversine_km(last['lat'], last['lon'], cand['lat'], cand['lon'])
+            if d < best_dist:
+                best_dist = d
+                best_idx = idx
+        path.append(remaining.pop(best_idx))
+    return path
+
+
+def _get_driver_last_delivered_point(driver_id: Optional[int], driver_username: Optional[str], db: Optional[Session] = None) -> Tuple[Optional[float], Optional[float]]:
+    """Return (lat, lon) for the most recent delivered order of this driver, if possible."""
+    if not driver_id and not driver_username:
+        return None, None
+    if db is None:
+        return None, None
+    try:
+        q = db.query(models.Order).filter(models.Order.status == 'entregado')
+        if driver_id:
+            q = q.filter(models.Order.assigned_driver_id == int(driver_id))
+        elif driver_username:
+            q = q.filter(models.Order.assigned_driver_username == str(driver_username))
+        q = q.order_by(models.Order.delivered_at.desc(), models.Order.created_at.desc(), models.Order.id.desc())
+        last = q.first()
+        if not last:
+            return None, None
+        od = {
+            'delivery_lat': getattr(last, 'delivery_lat', None),
+            'delivery_lon': getattr(last, 'delivery_lon', None),
+            'user_id': getattr(last, 'user_id', None),
+            'user_barrio': getattr(last, 'user_barrio', None),
+            'user_calle': getattr(last, 'user_calle', None),
+            'user_numeracion': getattr(last, 'user_numeracion', None),
+            'user_postal_code': getattr(last, 'user_postal_code', None),
+            'user_department': getattr(last, 'user_department', None),
+            '_token_preview': getattr(last, '_token_preview', None),
+            '_token_received': getattr(last, '_token_received', None),
+        }
+        lat, lon = _resolve_order_coords(od, db=db)
+        if _is_mendoza_point(lat, lon):
+            return float(lat), float(lon)
+    except Exception:
+        pass
+    return None, None
+
+
 def _extract_admin_actor_from_request(request: Request) -> Tuple[Optional[int], Optional[str]]:
     try:
         auth = request.headers.get('authorization') or request.headers.get('Authorization')
@@ -9196,9 +9258,12 @@ def _auto_assign_routes_for_driver(driver, orders: List[Dict[str, Any]], include
         nodes.append({'order': od, 'lat': float(lat), 'lon': float(lon)})
 
     if nodes:
-        start_lat, start_lon = _get_route_start_point(db=db)
+        # Start from last delivered order if available; otherwise from depot.
+        start_lat, start_lon = _get_driver_last_delivered_point(driver_id, driver_username, db=db)
+        if not _is_mendoza_point(start_lat, start_lon):
+            start_lat, start_lon = _get_route_start_point(db=db)
         if _is_mendoza_point(start_lat, start_lon):
-            optimized_nodes = _optimize_route_order_with_start(nodes, float(start_lat), float(start_lon))
+            optimized_nodes = _optimize_route_order_greedy_from_start(nodes, float(start_lat), float(start_lon))
         else:
             optimized_nodes = _optimize_route_order(nodes)
         ordered_orders = [n['order'] for n in optimized_nodes] + no_coords
@@ -10344,6 +10409,35 @@ async def update_order_status(order_id: str, request: Request):
                         od['delivered_by_username'] = use_user
                 except Exception:
                     pass
+    except Exception:
+        pass
+
+    # Recompute route order for the driver after a delivery
+    try:
+        if status_norm == 'entregado':
+            assign_id = od.get('assigned_driver_id')
+            assign_user = od.get('assigned_driver_username')
+            if assign_id or assign_user:
+                db_local = SessionLocal()
+                try:
+                    driver = None
+                    if assign_id is not None:
+                        try:
+                            driver = crud.get_admin_user_by_id(db_local, int(assign_id))
+                        except Exception:
+                            driver = None
+                    if not driver and assign_user:
+                        driver = crud.get_admin_user_by_username(db_local, str(assign_user))
+                    if driver:
+                        driver_role = str(getattr(driver, 'role', '') or '').strip().lower()
+                        if driver_role == 'repartidor':
+                            all_orders = list_orders(skip=0, limit=2000, source=None, q=None, date=None, db=db_local)
+                            _auto_assign_routes_for_driver(driver, all_orders, include_assigned=True, db=db_local)
+                finally:
+                    try:
+                        db_local.close()
+                    except Exception:
+                        pass
     except Exception:
         pass
 
