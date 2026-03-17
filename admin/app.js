@@ -26,10 +26,18 @@ let driverMapPoll = null;
 const driverMapMarkers = new Map();
 const driverMarkerAnim = new Map();
 let driverAnimFrame = null;
+const driverRouteState = new Map();
+let driverDirectionsService = null;
 // 0 disables age-based hiding; rely on explicit offline events instead.
 const DRIVER_LOCATION_STALE_SEC = 0;
 const DRIVER_ANIM_MIN_MS = 600;
 const DRIVER_ANIM_MAX_MS = 8000;
+const DRIVER_ROUTE_HISTORY_MS = 12000;
+const DRIVER_ROUTE_REFRESH_MS = 6000;
+const DRIVER_ROUTE_MIN_DISTANCE_M = 60;
+const DRIVER_ROUTE_SEGMENT_MIN_MS = 120;
+const DRIVER_ROUTE_SEGMENT_MAX_MS = 900;
+const DRIVER_USE_ROAD_SNAPPING = true;
 const DRIVER_MAP_STYLE = [
   { elementType: 'geometry', stylers: [{ color: '#eef2f6' }] },
   { elementType: 'labels.text.fill', stylers: [{ color: '#334155' }] },
@@ -75,6 +83,7 @@ function clearDriverMarkers(){
   });
   driverMapMarkers.clear();
   driverMarkerAnim.clear();
+  driverRouteState.clear();
   driverAnimFrame = null;
 }
 
@@ -86,6 +95,7 @@ function removeDriverMarkerById(id){
     driverMapMarkers.delete(id);
   }
   driverMarkerAnim.delete(id);
+  driverRouteState.delete(id);
 }
 
 function toLatLngLiteral(pos){
@@ -101,21 +111,25 @@ function toLatLngLiteral(pos){
   return null;
 }
 
-function animateDriverMarkerTo(id, marker, target){
+function animateDriverMarkerTo(id, marker, target, durationMs, onComplete){
   if (!id || !marker || !target) return;
   const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
   const state = driverMarkerAnim.get(id) || {};
   const current = toLatLngLiteral(marker.getPosition()) || target;
-  let duration = 1200;
-  if (state.lastUpdateAt){
-    const delta = Math.max(0, now - state.lastUpdateAt);
-    duration = Math.min(DRIVER_ANIM_MAX_MS, Math.max(DRIVER_ANIM_MIN_MS, delta));
+  let duration = Number(durationMs);
+  if (!Number.isFinite(duration)){
+    duration = 1200;
+    if (state.lastUpdateAt){
+      const delta = Math.max(0, now - state.lastUpdateAt);
+      duration = Math.min(DRIVER_ANIM_MAX_MS, Math.max(DRIVER_ANIM_MIN_MS, delta));
+    }
   }
   state.start = current;
   state.end = target;
   state.startTime = now;
   state.endTime = now + duration;
   state.lastUpdateAt = now;
+  state.onComplete = typeof onComplete === 'function' ? onComplete : null;
   driverMarkerAnim.set(id, state);
   if (!driverAnimFrame){
     driverAnimFrame = requestAnimationFrame(stepDriverAnimations);
@@ -141,9 +155,15 @@ function stepDriverAnimations(ts){
     if (t < 1){
       active = true;
     } else {
+      const done = state.onComplete;
+      state.onComplete = null;
       state.start = state.end;
       state.startTime = null;
       state.endTime = null;
+      if (done){
+        try{ done(); }catch(_){ }
+        active = true;
+      }
     }
   });
   if (active){
@@ -151,6 +171,97 @@ function stepDriverAnimations(ts){
   } else {
     driverAnimFrame = null;
   }
+}
+
+function getDriverRouteState(id){
+  if (!id) return null;
+  let state = driverRouteState.get(id);
+  if (!state){
+    state = { history: [], pending: false, lastRouteAt: 0, routeQueue: null };
+    driverRouteState.set(id, state);
+  }
+  return state;
+}
+
+function toRad(v){ return (v * Math.PI) / 180; }
+function distanceMeters(a, b){
+  if (!a || !b) return 0;
+  const R = 6371000;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const lat1 = toRad(a.lat);
+  const lat2 = toRad(b.lat);
+  const h = Math.sin(dLat/2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng/2) ** 2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+function bufferDriverHistory(id, point){
+  const state = getDriverRouteState(id);
+  if (!state) return;
+  const now = Date.now();
+  state.history.push({ lat: point.lat, lng: point.lng, ts: now });
+  const cutoff = now - DRIVER_ROUTE_HISTORY_MS;
+  while (state.history.length > 0 && state.history[0].ts < cutoff){
+    state.history.shift();
+  }
+}
+
+function getDirectionsService(){
+  if (!driverDirectionsService && window.google && window.google.maps && window.google.maps.DirectionsService){
+    driverDirectionsService = new google.maps.DirectionsService();
+  }
+  return driverDirectionsService;
+}
+
+function normalizePathPoints(points){
+  if (!Array.isArray(points)) return [];
+  const out = [];
+  points.forEach((p) => {
+    try{
+      if (p && typeof p.lat === 'function' && typeof p.lng === 'function'){
+        out.push({ lat: p.lat(), lng: p.lng() });
+        return;
+      }
+    }catch(_){ }
+    if (p && Number.isFinite(p.lat) && Number.isFinite(p.lng)){
+      out.push({ lat: p.lat, lng: p.lng });
+    }
+  });
+  return out;
+}
+
+function startDriverRouteAnimation(id, points, durationMs){
+  const marker = driverMapMarkers.get(id);
+  if (!marker) return;
+  const state = getDriverRouteState(id);
+  if (!state) return;
+  const path = normalizePathPoints(points);
+  if (path.length < 2) return;
+  const totalSegments = Math.max(1, path.length - 1);
+  const segMs = Math.min(
+    DRIVER_ROUTE_SEGMENT_MAX_MS,
+    Math.max(DRIVER_ROUTE_SEGMENT_MIN_MS, Number(durationMs) / totalSegments || DRIVER_ROUTE_SEGMENT_MIN_MS),
+  );
+  state.routeQueue = { points: path, index: 0, segMs: segMs };
+  advanceDriverRoute(id);
+}
+
+function advanceDriverRoute(id){
+  const state = driverRouteState.get(id);
+  if (!state || !state.routeQueue) return;
+  const marker = driverMapMarkers.get(id);
+  if (!marker){
+    state.routeQueue = null;
+    return;
+  }
+  const queue = state.routeQueue;
+  if (queue.index >= queue.points.length - 1){
+    state.routeQueue = null;
+    return;
+  }
+  queue.index += 1;
+  const target = queue.points[queue.index];
+  animateDriverMarkerTo(id, marker, target, queue.segMs, () => advanceDriverRoute(id));
 }
 
 async function loadGoogleMapsApi(){
@@ -226,6 +337,9 @@ function updateDriverMarker(driver){
   const labelText = String(driver.driver_name || driver.driver_username || '').trim();
   const icon = getDriverMarkerIcon();
   let marker = driverMapMarkers.get(id);
+  const state = getDriverRouteState(id);
+  const now = Date.now();
+  const point = { lat, lng: lon };
   if (!marker){
     marker = new google.maps.Marker({
       map: driverMap,
@@ -236,8 +350,48 @@ function updateDriverMarker(driver){
     });
     driverMapMarkers.set(id, marker);
     driverMarkerAnim.set(id, { lastUpdateAt: (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now() });
+    if (state) bufferDriverHistory(id, point);
   } else {
-    animateDriverMarkerTo(id, marker, { lat, lng: lon });
+    if (state) bufferDriverHistory(id, point);
+    let usedRoute = false;
+    if (DRIVER_USE_ROAD_SNAPPING && state){
+      const service = getDirectionsService();
+      if (service && !state.pending){
+        const elapsed = now - (state.lastRouteAt || 0);
+        if (elapsed >= DRIVER_ROUTE_REFRESH_MS && state.history.length >= 2){
+          const origin = state.history[0];
+          const dest = state.history[state.history.length - 1];
+          const dist = distanceMeters(origin, dest);
+          if (dist >= DRIVER_ROUTE_MIN_DISTANCE_M){
+            state.pending = true;
+            state.lastRouteAt = now;
+            service.route(
+              {
+                origin: origin,
+                destination: dest,
+                travelMode: google.maps.TravelMode.DRIVING,
+                provideRouteAlternatives: false,
+              },
+              (result, status) => {
+                state.pending = false;
+                if (status === 'OK' && result && result.routes && result.routes[0]){
+                  const routePath = result.routes[0].overview_path || [];
+                  startDriverRouteAnimation(id, routePath, Math.max(DRIVER_ROUTE_REFRESH_MS, elapsed));
+                  state.history = [dest];
+                }
+              },
+            );
+            usedRoute = true;
+          }
+        }
+      }
+      if (state.routeQueue){
+        usedRoute = true;
+      }
+    }
+    if (!usedRoute){
+      animateDriverMarkerTo(id, marker, { lat, lng: lon });
+    }
     if (labelText) marker.setLabel({ text: labelText, fontSize: '12px', fontWeight: '600', color: '#1f2937' });
     if (icon) marker.setIcon(icon);
   }
