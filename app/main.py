@@ -9598,27 +9598,38 @@ def admin_driver_location(
     except Exception:
         pass
 
-    if DRIVER_LOCATION_STORE_HISTORY:
-        try:
-            row = models.AdminDriverLocation(
-                admin_user_id=int(driver_id) if driver_id is not None else None,
-                username=str(driver_username or '').strip() or None,
-                full_name=str(driver_name or '').strip() or None,
-                lat=float(lat),
-                lon=float(lon),
-                accuracy=float(accuracy) if accuracy is not None else None,
-                speed=float(speed) if speed is not None else None,
-                heading=float(heading) if heading is not None else None,
-                battery=float(battery) if battery is not None else None,
-                recorded_at=recorded_at,
-            )
+    try:
+        row = models.AdminDriverLocation(
+            admin_user_id=int(driver_id) if driver_id is not None else None,
+            username=str(driver_username or '').strip() or None,
+            full_name=str(driver_name or '').strip() or None,
+            lat=float(lat),
+            lon=float(lon),
+            accuracy=float(accuracy) if accuracy is not None else None,
+            speed=float(speed) if speed is not None else None,
+            heading=float(heading) if heading is not None else None,
+            battery=float(battery) if battery is not None else None,
+            recorded_at=recorded_at,
+        )
+        if DRIVER_LOCATION_STORE_HISTORY:
             db.add(row)
-            db.commit()
-        except Exception:
+        else:
             try:
-                db.rollback()
+                q = db.query(models.AdminDriverLocation)
+                if driver_id is not None:
+                    q = q.filter(models.AdminDriverLocation.admin_user_id == int(driver_id))
+                elif driver_username:
+                    q = q.filter(models.AdminDriverLocation.username == str(driver_username or '').strip())
+                q.delete(synchronize_session=False)
             except Exception:
                 pass
+            db.add(row)
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
     try:
         asyncio.create_task(push_event({"action": "driver_location", "driver": payload_out}))
@@ -9647,12 +9658,25 @@ def admin_driver_location(
 
 
 @app.get('/admin/driver-locations', response_model=List[schemas.DriverLocationOut])
-def admin_driver_locations(current_admin=Depends(get_current_admin_user)):
+def admin_driver_locations(current_admin=Depends(get_current_admin_user), db: Session = Depends(get_db)):
     role = str(getattr(current_admin, 'role', '') or '').strip().lower()
     if role not in ('owner', 'admin'):
         raise HTTPException(status_code=403, detail='No autorizado')
     now = time.time()
     out = []
+    seen = set()
+
+    def push_payload(payload: Dict[str, Any], age: Optional[float]) -> None:
+        try:
+            key = str(payload.get('driver_id') or payload.get('driver_username') or payload.get('driver_name') or '')
+        except Exception:
+            key = ''
+        if not key or key in seen:
+            return
+        seen.add(key)
+        payload['age_sec'] = age
+        out.append(payload)
+
     try:
         with DRIVER_LOCATIONS_LOCK:
             for entry in DRIVER_LOCATIONS.values():
@@ -9665,10 +9689,40 @@ def admin_driver_locations(current_admin=Depends(get_current_admin_user)):
                         continue
                     payload = dict(entry)
                     payload.pop('updated_at', None)
-                    payload['age_sec'] = age
-                    out.append(payload)
+                    push_payload(payload, age)
                 except Exception:
                     continue
+    except Exception:
+        pass
+
+    try:
+        rows = db.query(models.AdminDriverLocation).order_by(models.AdminDriverLocation.recorded_at.desc()).limit(500).all()
+        for row in rows:
+            try:
+                rec = row.recorded_at
+                if rec is None:
+                    age = None
+                else:
+                    if rec.tzinfo is None:
+                        rec = rec.replace(tzinfo=datetime.timezone.utc)
+                    age = (datetime.datetime.now(datetime.timezone.utc) - rec).total_seconds()
+                    if age is not None and DRIVER_LOCATION_MAX_AGE_SEC > 0 and age > DRIVER_LOCATION_MAX_AGE_SEC:
+                        continue
+                payload = {
+                    'driver_id': row.admin_user_id,
+                    'driver_username': row.username,
+                    'driver_name': row.full_name or row.username,
+                    'lat': float(row.lat),
+                    'lon': float(row.lon),
+                    'accuracy': row.accuracy,
+                    'speed': row.speed,
+                    'heading': row.heading,
+                    'battery': row.battery,
+                    'recorded_at': row.recorded_at,
+                }
+                push_payload(payload, age)
+            except Exception:
+                continue
     except Exception:
         pass
     return out

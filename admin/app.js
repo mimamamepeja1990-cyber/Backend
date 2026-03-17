@@ -24,7 +24,8 @@ let driverMapReady = false;
 let driverMapInit = false;
 let driverMapPoll = null;
 const driverMapMarkers = new Map();
-const DRIVER_LOCATION_STALE_SEC = 1800;
+// 0 disables age-based hiding; rely on explicit offline events instead.
+const DRIVER_LOCATION_STALE_SEC = 0;
 const DRIVER_MAP_STYLE = [
   { elementType: 'geometry', stylers: [{ color: '#eef2f6' }] },
   { elementType: 'labels.text.fill', stylers: [{ color: '#334155' }] },
@@ -91,13 +92,17 @@ async function loadGoogleMapsApi(){
     script.async = true;
     script.defer = true;
     script.onload = () => resolve(true);
-    script.onerror = () => reject(new Error('maps-load-failed'));
+    script.onerror = () => {
+      try{ window.__googleMapsLoading = null; }catch(_){ }
+      reject(new Error('maps-load-failed'));
+    };
     document.head.appendChild(script);
   });
   try{
     await window.__googleMapsLoading;
     return true;
   }catch(e){
+    try{ window.__googleMapsLoading = null; }catch(_){ }
     return false;
   }
 }
@@ -117,6 +122,8 @@ async function initDriverMap(){
   const ok = await loadGoogleMapsApi();
   if (!ok){
     setDriverMapEmpty('Configura GOOGLE_MAPS_JS_API_KEY para ver el mapa.');
+    driverMapInit = false;
+    driverMapReady = false;
     return;
   }
   const center = { lat: -32.883, lng: -68.84 };
@@ -169,15 +176,16 @@ async function refreshDriverLocations(force){
     const status = Number(e && e.status);
     if (status === 401 || status === 403){
       setDriverMapEmpty('Sin acceso a ubicaciones. Volvé a iniciar sesión.');
+      clearDriverMarkers();
     } else {
       setDriverMapEmpty('No se pudieron cargar ubicaciones.');
     }
-    clearDriverMarkers();
     return;
   }
   if (!Array.isArray(list) || list.length === 0){
-    setDriverMapEmpty('Sin ubicaciones recientes de repartidores.');
-    clearDriverMarkers();
+    if (driverMapMarkers.size === 0){
+      setDriverMapEmpty('Sin ubicaciones recientes de repartidores.');
+    }
     return;
   }
   const seen = new Set();
@@ -186,7 +194,7 @@ async function refreshDriverLocations(force){
     const id = getDriverId(driver);
     if (!id) return;
     const age = Number(driver.age_sec);
-    if (Number.isFinite(age) && age > DRIVER_LOCATION_STALE_SEC) return;
+    if (DRIVER_LOCATION_STALE_SEC > 0 && Number.isFinite(age) && age > DRIVER_LOCATION_STALE_SEC) return;
     const ok = updateDriverMarker(driver);
     if (ok){
       seen.add(id);
