@@ -9674,6 +9674,46 @@ def admin_driver_locations(current_admin=Depends(get_current_admin_user)):
     return out
 
 
+@app.post('/admin/driver-location/offline')
+def admin_driver_location_offline(request: Request, current_admin=Depends(get_current_admin_user)):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role not in ('owner', 'admin', 'repartidor'):
+        raise HTTPException(status_code=403, detail='No autorizado')
+    driver_id = getattr(current_admin, 'id', None)
+    driver_username = getattr(current_admin, 'username', None)
+    driver_name = getattr(current_admin, 'full_name', None) or driver_username
+
+    removed = False
+    try:
+        key = str(driver_id if driver_id is not None else driver_username or 'unknown')
+        with DRIVER_LOCATIONS_LOCK:
+            if key in DRIVER_LOCATIONS:
+                DRIVER_LOCATIONS.pop(key, None)
+                removed = True
+            elif driver_username:
+                for k, v in list(DRIVER_LOCATIONS.items()):
+                    if str(v.get('driver_username') or '') == str(driver_username):
+                        DRIVER_LOCATIONS.pop(k, None)
+                        removed = True
+    except Exception:
+        pass
+
+    try:
+        asyncio.create_task(push_event({
+            "action": "driver_location_offline",
+            "driver": {
+                "driver_id": driver_id,
+                "driver_username": driver_username,
+                "driver_name": driver_name,
+            }
+        }))
+    except Exception:
+        pass
+
+    headers = _cors_headers_for_request(request)
+    return JSONResponse(status_code=200, content={'ok': True, 'removed': removed}, headers=headers)
+
+
 @app.get('/admin/arcgis-geocode')
 def admin_arcgis_geocode(request: Request, q: str = '', current_admin=Depends(get_current_admin_user)):
     """Proxy ArcGIS geocoding to avoid browser CORS issues."""

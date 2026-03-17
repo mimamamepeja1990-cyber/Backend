@@ -24,7 +24,7 @@ let driverMapReady = false;
 let driverMapInit = false;
 let driverMapPoll = null;
 const driverMapMarkers = new Map();
-const DRIVER_LOCATION_STALE_SEC = 300;
+const DRIVER_LOCATION_STALE_SEC = 1800;
 const DRIVER_MAP_STYLE = [
   { elementType: 'geometry', stylers: [{ color: '#eef2f6' }] },
   { elementType: 'labels.text.fill', stylers: [{ color: '#334155' }] },
@@ -69,6 +69,15 @@ function clearDriverMarkers(){
     try{ marker.setMap(null); }catch(_){ }
   });
   driverMapMarkers.clear();
+}
+
+function removeDriverMarkerById(id){
+  if (!id) return;
+  const marker = driverMapMarkers.get(id);
+  if (marker){
+    try{ marker.setMap(null); }catch(_){ }
+    driverMapMarkers.delete(id);
+  }
 }
 
 async function loadGoogleMapsApi(){
@@ -6380,6 +6389,15 @@ function setupSocket(attempt = 0){
   socket.onmessage = async (ev) => {
     try{
       const data = JSON.parse(ev.data);
+      if (data && data.action === 'driver_location_offline'){
+        const driver = data.driver || data;
+        const id = getDriverId(driver);
+        if (id) removeDriverMarkerById(id);
+        if (driverMapMarkers.size === 0){
+          setDriverMapEmpty('Sin ubicaciones recientes de repartidores.');
+        }
+        return;
+      }
       if (data && data.action === 'driver_location' && data.driver){
         try{ updateDriverMarker(data.driver); }catch(_){ }
         return;
