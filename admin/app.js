@@ -24,8 +24,12 @@ let driverMapReady = false;
 let driverMapInit = false;
 let driverMapPoll = null;
 const driverMapMarkers = new Map();
+const driverMarkerAnim = new Map();
+let driverAnimFrame = null;
 // 0 disables age-based hiding; rely on explicit offline events instead.
 const DRIVER_LOCATION_STALE_SEC = 0;
+const DRIVER_ANIM_MIN_MS = 600;
+const DRIVER_ANIM_MAX_MS = 8000;
 const DRIVER_MAP_STYLE = [
   { elementType: 'geometry', stylers: [{ color: '#eef2f6' }] },
   { elementType: 'labels.text.fill', stylers: [{ color: '#334155' }] },
@@ -70,6 +74,8 @@ function clearDriverMarkers(){
     try{ marker.setMap(null); }catch(_){ }
   });
   driverMapMarkers.clear();
+  driverMarkerAnim.clear();
+  driverAnimFrame = null;
 }
 
 function removeDriverMarkerById(id){
@@ -78,6 +84,72 @@ function removeDriverMarkerById(id){
   if (marker){
     try{ marker.setMap(null); }catch(_){ }
     driverMapMarkers.delete(id);
+  }
+  driverMarkerAnim.delete(id);
+}
+
+function toLatLngLiteral(pos){
+  if (!pos) return null;
+  try{
+    if (typeof pos.lat === 'function' && typeof pos.lng === 'function'){
+      return { lat: pos.lat(), lng: pos.lng() };
+    }
+  }catch(_){ }
+  if (typeof pos.lat === 'number' && typeof pos.lng === 'number'){
+    return { lat: pos.lat, lng: pos.lng };
+  }
+  return null;
+}
+
+function animateDriverMarkerTo(id, marker, target){
+  if (!id || !marker || !target) return;
+  const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+  const state = driverMarkerAnim.get(id) || {};
+  const current = toLatLngLiteral(marker.getPosition()) || target;
+  let duration = 1200;
+  if (state.lastUpdateAt){
+    const delta = Math.max(0, now - state.lastUpdateAt);
+    duration = Math.min(DRIVER_ANIM_MAX_MS, Math.max(DRIVER_ANIM_MIN_MS, delta));
+  }
+  state.start = current;
+  state.end = target;
+  state.startTime = now;
+  state.endTime = now + duration;
+  state.lastUpdateAt = now;
+  driverMarkerAnim.set(id, state);
+  if (!driverAnimFrame){
+    driverAnimFrame = requestAnimationFrame(stepDriverAnimations);
+  }
+}
+
+function stepDriverAnimations(ts){
+  let active = false;
+  driverMarkerAnim.forEach((state, id) => {
+    const marker = driverMapMarkers.get(id);
+    if (!marker){
+      driverMarkerAnim.delete(id);
+      return;
+    }
+    if (!state || !state.start || !state.end || !state.startTime || !state.endTime){
+      return;
+    }
+    const denom = state.endTime - state.startTime || 1;
+    const t = Math.min(1, Math.max(0, (ts - state.startTime) / denom));
+    const lat = state.start.lat + (state.end.lat - state.start.lat) * t;
+    const lng = state.start.lng + (state.end.lng - state.start.lng) * t;
+    try{ marker.setPosition({ lat, lng }); }catch(_){ }
+    if (t < 1){
+      active = true;
+    } else {
+      state.start = state.end;
+      state.startTime = null;
+      state.endTime = null;
+    }
+  });
+  if (active){
+    driverAnimFrame = requestAnimationFrame(stepDriverAnimations);
+  } else {
+    driverAnimFrame = null;
   }
 }
 
@@ -163,8 +235,9 @@ function updateDriverMarker(driver){
       title: labelText || 'Repartidor',
     });
     driverMapMarkers.set(id, marker);
+    driverMarkerAnim.set(id, { lastUpdateAt: (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now() });
   } else {
-    marker.setPosition({ lat, lng: lon });
+    animateDriverMarkerTo(id, marker, { lat, lng: lon });
     if (labelText) marker.setLabel({ text: labelText, fontSize: '12px', fontWeight: '600', color: '#1f2937' });
     if (icon) marker.setIcon(icon);
   }
@@ -209,6 +282,7 @@ async function refreshDriverLocations(force){
     if (!seen.has(id)){
       try{ marker.setMap(null); }catch(_){ }
       driverMapMarkers.delete(id);
+      driverMarkerAnim.delete(id);
     }
   });
   if (visible === 0){
