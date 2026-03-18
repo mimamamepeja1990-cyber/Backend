@@ -2718,7 +2718,7 @@ def create_order_minimal(db: Session, raw_payload: dict, current_user: Optional[
 def get_orders(
     db: Session,
     skip: int = 0,
-    limit: int = 200,
+    limit: Optional[int] = None,
     source: Optional[str] = None,
     q: Optional[str] = None,
     date: Optional[str] = None,
@@ -2760,7 +2760,15 @@ def get_orders(
     cols_sql = ', '.join(cols)
     try:
         where = []
-        params = {'skip': skip, 'limit': limit}
+        params = {'skip': max(0, int(skip or 0))}
+        limit_value = None
+        try:
+            if limit is not None:
+                limit_value = int(limit)
+        except Exception:
+            limit_value = None
+        if limit_value is not None and limit_value <= 0:
+            limit_value = None
         if source and 'source' in existing:
             where.append('source = :source')
             params['source'] = source
@@ -2804,9 +2812,13 @@ def get_orders(
                 where.append('(' + ' OR '.join(search_parts) + ')')
 
         where_clause = (' WHERE ' + ' AND '.join(where)) if where else ''
+        limit_clause = ''
+        if limit_value is not None:
+            params['limit'] = limit_value
+            limit_clause = ' LIMIT :limit'
         rows = _safe_execute_fetchall(
             db,
-            f"SELECT {cols_sql} FROM orders{where_clause} ORDER BY created_at DESC LIMIT :limit OFFSET :skip",
+            f"SELECT {cols_sql} FROM orders{where_clause} ORDER BY created_at DESC{limit_clause} OFFSET :skip",
             params,
         )
     except Exception:
@@ -2816,7 +2828,10 @@ def get_orders(
             query = db.query(models.Order)
             if source and hasattr(models.Order, 'source'):
                 query = query.filter(models.Order.source == source)
-            orm_rows = query.order_by(models.Order.created_at.desc()).offset(skip).limit(limit).all()
+            query = query.order_by(models.Order.created_at.desc()).offset(max(0, int(skip or 0)))
+            if limit_value is not None:
+                query = query.limit(limit_value)
+            orm_rows = query.all()
             q_raw = str(q or '').strip().lower()
             if q_raw:
                 q_no_hash = q_raw[1:].strip() if q_raw.startswith('#') else q_raw

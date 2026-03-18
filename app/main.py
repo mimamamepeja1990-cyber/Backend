@@ -4456,28 +4456,100 @@ _AUTO_CATEGORY_RULES_BY_VALUE = {rule['value']: rule for rule in _AUTO_CATEGORY_
 _AUTO_CATEGORY_ALIAS_MAP = {
     'lacteo': 'lacteos',
     'lacteos': 'lacteos',
+    'lacteos y quesos': 'lacteos',
     'queso': 'quesos',
     'quesos': 'quesos',
+    'queseria': 'quesos',
+    'muzzarella': 'quesos',
+    'mozzarella': 'quesos',
+    'ricota': 'quesos',
     'fiambre': 'fiambres',
     'fiambres': 'fiambres',
+    'fiambreria': 'fiambres',
     'embutido': 'embutidos',
     'embutidos': 'embutidos',
+    'chacinados': 'embutidos',
     'hamburguesa': 'hamburguesas',
     'hamburguesas': 'hamburguesas',
+    'medallon': 'hamburguesas',
+    'medallones': 'hamburguesas',
+    'burgers': 'hamburguesas',
     'milanesa': 'milanesas',
     'milanesas': 'milanesas',
+    'rebozado': 'milanesas',
+    'rebozados': 'milanesas',
+    'pollo': 'pollo',
+    'carne': 'carne vacuna',
+    'vacuno': 'carne vacuna',
+    'carne vacuna': 'carne vacuna',
+    'res': 'carne vacuna',
+    'cerdo': 'cerdo',
+    'porcino': 'cerdo',
     'pescados': 'pescados y mariscos',
+    'pescado': 'pescados y mariscos',
     'mariscos': 'pescados y mariscos',
     'pescados y mariscos': 'pescados y mariscos',
+    'pastas': 'pastas',
+    'panificados': 'panificados',
+    'panaderia': 'panificados',
     'aderezos': 'aderezos y salsas',
     'salsas': 'aderezos y salsas',
     'aderezos y salsas': 'aderezos y salsas',
+    'almacen': 'almacen',
+    'condimentos': 'almacen',
+    'congelados': 'congelados',
+    'freezados': 'congelados',
+    'bebida': 'bebidas',
+    'bebidas': 'bebidas',
+    'gaseosas': 'bebidas',
+    'snack': 'snacks',
+    'snacks': 'snacks',
     'helados': 'helados y postres',
     'postres': 'helados y postres',
     'helados y postres': 'helados y postres',
+    'limpieza': 'limpieza',
     'descartable': 'descartables',
     'descartables': 'descartables',
 }
+_AUTO_CATEGORY_EXTRA_TERMS = {
+    'quesos': ['port salut', 'quartirolo', 'dambo', 'mantecoso', 'gruyere', 'reggianito', 'queso crema'],
+    'fiambres': ['jamonada', 'feta', 'fetas', 'feteado', 'feteada', 'pechuga de pavo'],
+    'embutidos': ['salchicha', 'salchichas', 'viena', 'parrillero', 'parrillera'],
+    'hamburguesas': ['medallon de carne', 'medallon de pollo', 'hamburguesa de pollo'],
+    'milanesas': ['suprema rebozada', 'supremas rebozadas', 'bocaditos de pollo', 'formitas de pollo'],
+    'pollo': ['patamuslo', 'pata muslo', 'pechuguita'],
+    'carne vacuna': ['osobuco', 'carne molida', 'costeleta vacuna'],
+    'cerdo': ['pechito', 'costeleta de cerdo', 'costillita'],
+    'lacteos': ['crema de leche', 'yogurisimo', 'postrecito lacteo'],
+    'pastas': ['ñoqui', 'noquis', 'tapa de empanadas', 'tapas empanadas'],
+    'panificados': ['pan de hamburguesa', 'pan de pancho', 'prepizza'],
+    'aderezos y salsas': ['bbq', 'barbecue', 'provenzal', 'salsa inglesa'],
+    'bebidas': ['coca cola', 'pepsi', 'manaos', 'gatorade'],
+    'snacks': ['papas snack', 'palitos salados', 'mani salado'],
+    'helados y postres': ['postre helado', 'alfajor helado'],
+    'limpieza': ['jabon liquido', 'lavandina'],
+    'descartables': ['papel aluminio', 'film pvc', 'bandeja descartable'],
+    'almacen': ['pan rallado', 'rebozador', 'oregano', 'pimienta', 'aji molido', 'pure tomate'],
+    'congelados': ['papa frita congelada', 'papas congeladas', 'vegetales congelados'],
+}
+_AUTO_CATEGORY_BRAND_HINTS = {
+    'quesos': ['la quesera', 'sancor', 'tonadita'],
+    'lacteos': ['sancor', 'tonadita', 'cada dia'],
+    'fiambres': ['paladini', 'la casona'],
+    'embutidos': ['paladini', 'swift'],
+    'carne vacuna': ['swift'],
+    'cerdo': ['cerdo y compania'],
+}
+_AUTO_CATEGORY_EXCLUDE_TERMS = {
+    'panificados': ['pan rallado', 'rallado'],
+    'hamburguesas': ['pan de hamburguesa'],
+    'pollo': ['suprema rebozada', 'hamburguesa de pollo', 'medallon de pollo'],
+    'fiambres': ['chorizo', 'morcilla', 'salchicha parrillera'],
+    'embutidos': ['jamon cocido', 'jamon crudo', 'paleta'],
+    'lacteos': ['queso', 'quesos'],
+    'almacen': ['gaseosa', 'queso', 'jamon'],
+}
+_AUTO_BROAD_CATEGORIES = {'lacteos', 'almacen', 'congelados', 'bebidas', 'panificados', 'pastas'}
 _AUTO_GENERIC_CATEGORIES = {
     '',
     'general',
@@ -4532,28 +4604,74 @@ def _auto_category_display_name(value: Any) -> str:
     return ' '.join(word[:1].upper() + word[1:] for word in words)
 
 
+def _extract_auto_category_mentions(raw: Any) -> List[str]:
+    text = _normalize_auto_text(raw)
+    if not text:
+        return []
+    out: List[str] = []
+    seen = set()
+
+    def _push(value: Any) -> None:
+        normalized = _normalize_auto_category_value(value)
+        if not normalized or normalized in seen or normalized in _AUTO_GENERIC_CATEGORIES:
+            return
+        seen.add(normalized)
+        out.append(normalized)
+
+    parts = [text]
+    try:
+        parts.extend([chunk.strip() for chunk in re.split(r'\s*(?:,|/|;|\+|\by\b|\be\b)\s*', text) if str(chunk or '').strip()])
+    except Exception:
+        pass
+
+    for part in parts:
+        direct = _AUTO_CATEGORY_ALIAS_MAP.get(part)
+        if direct:
+            _push(direct)
+
+    alias_items = sorted(_AUTO_CATEGORY_ALIAS_MAP.items(), key=lambda item: (-len(item[0]), item[0]))
+    for alias, canonical in alias_items:
+        probe = _normalize_auto_text(alias)
+        if probe and _contains_auto_term(text, probe):
+            _push(canonical)
+
+    if not out:
+        normalized = _normalize_auto_category_value(text)
+        if normalized and normalized not in _AUTO_GENERIC_CATEGORIES:
+            _push(normalized)
+    return out
+
+
 def _normalize_backend_filters_list(items: Any) -> List[Dict[str, str]]:
     rows = items if isinstance(items, list) else []
     seen = set()
     out: List[Dict[str, str]] = []
     for idx, item in enumerate(rows):
         if isinstance(item, str):
-            value = _normalize_auto_category_value(item)
-            name = _auto_category_display_name(value)
+            values = _extract_auto_category_mentions(item)
+            if not values:
+                value = _normalize_auto_category_value(item)
+                values = [value] if value else []
+            pairs = [(value, _auto_category_display_name(value)) for value in values]
         elif isinstance(item, dict):
             raw_value = item.get('value') or item.get('name') or item.get('label') or item.get('id')
-            value = _normalize_auto_category_value(raw_value)
-            name = str(item.get('name') or item.get('label') or _auto_category_display_name(value)).strip()
+            values = _extract_auto_category_mentions(raw_value)
+            if not values:
+                value = _normalize_auto_category_value(raw_value)
+                values = [value] if value else []
+            base_name = str(item.get('name') or item.get('label') or '').strip()
+            pairs = [(value, base_name or _auto_category_display_name(value)) for value in values]
         else:
             continue
-        if not value or value in seen:
-            continue
-        seen.add(value)
-        out.append({
-            'id': f"auto_{re.sub(r'[^a-z0-9]+', '_', value).strip('_') or idx}",
-            'name': name or _auto_category_display_name(value),
-            'value': value,
-        })
+        for value, name in pairs:
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            out.append({
+                'id': f"auto_{re.sub(r'[^a-z0-9]+', '_', value).strip('_') or idx}",
+                'name': name or _auto_category_display_name(value),
+                'value': value,
+            })
     return out
 
 
@@ -4568,11 +4686,15 @@ def _extract_product_category_values(raw: Any) -> List[str]:
     out: List[str] = []
     seen = set()
     for item in items:
-        value = _normalize_auto_category_value(item)
-        if not value or value in seen:
-            continue
-        seen.add(value)
-        out.append(value)
+        mentioned = _extract_auto_category_mentions(item)
+        if not mentioned:
+            value = _normalize_auto_category_value(item)
+            mentioned = [value] if value else []
+        for value in mentioned:
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            out.append(value)
     return out
 
 
@@ -4598,10 +4720,92 @@ def _contains_auto_term(haystack: str, term: str) -> bool:
     return f" {probe} " in f" {text} "
 
 
+def _score_auto_term(haystack: str, term: str, exact_weight: int, partial_weight: int = 0) -> int:
+    text = _normalize_auto_text(haystack)
+    probe = _normalize_auto_text(term)
+    if not text or not probe:
+        return 0
+    if _contains_auto_term(text, probe):
+        score = int(exact_weight)
+        if text == probe or text.startswith(probe + ' '):
+            score += 3
+        return score
+    if partial_weight > 0 and len(probe) >= 7 and probe in text:
+        return int(partial_weight)
+    return 0
+
+
 def _append_unique_value(target: List[str], value: Any) -> None:
     normalized = _normalize_auto_category_value(value)
     if normalized and normalized not in target:
         target.append(normalized)
+
+
+def _score_auto_rule(
+    rule: Dict[str, Any],
+    name_text: str,
+    aux_text: str,
+    brand_text: str,
+    category_mentions: List[str],
+) -> Optional[Dict[str, Any]]:
+    value = _normalize_auto_category_value(rule.get('value'))
+    if not value:
+        return None
+
+    terms: List[str] = []
+    seen_terms = set()
+    for term in list(rule.get('terms') or []) + list(_AUTO_CATEGORY_EXTRA_TERMS.get(value) or []):
+        normalized = _normalize_auto_text(term)
+        if not normalized or normalized in seen_terms:
+            continue
+        seen_terms.add(normalized)
+        terms.append(normalized)
+
+    score = 0
+    name_hits = 0
+    total_hits = 0
+    for term in terms:
+        is_phrase = ' ' in term
+        name_gain = _score_auto_term(name_text, term, 18 if is_phrase else 12, 7 if is_phrase else 0)
+        aux_gain = 0 if name_gain else _score_auto_term(aux_text, term, 10 if is_phrase else 6, 4 if is_phrase else 0)
+        gain = max(name_gain, aux_gain)
+        if gain > 0:
+            score += gain
+            total_hits += 1
+            if name_gain > 0:
+                name_hits += 1
+
+    for term in (_AUTO_CATEGORY_BRAND_HINTS.get(value) or []):
+        gain = _score_auto_term(brand_text, term, 14, 6)
+        if gain > 0:
+            score += gain
+            total_hits += 1
+
+    if value in category_mentions:
+        score += 42
+        total_hits += 2
+
+    for term in (_AUTO_CATEGORY_EXCLUDE_TERMS.get(value) or []):
+        if _contains_auto_term(name_text, term) or _contains_auto_term(aux_text, term):
+            score -= 18
+
+    if score <= 0:
+        return None
+    if value in _AUTO_BROAD_CATEGORIES and value not in category_mentions:
+        if name_hits == 0 and total_hits < 2:
+            return None
+        if total_hits == 1 and score < 18:
+            return None
+
+    confidence = 'high' if score >= 42 or (name_hits >= 2 and score >= 28) else ('medium' if score >= 20 else 'low')
+    return {
+        'value': value,
+        'name': _auto_category_display_name(value),
+        'score': int(score + int(rule.get('priority') or 0)),
+        'raw_score': int(score),
+        'also': list(rule.get('also') or []),
+        'confidence': confidence,
+    }
 
 
 def _derive_product_categories(product_row: Dict[str, Any]) -> Dict[str, Any]:
@@ -4609,58 +4813,62 @@ def _derive_product_categories(product_row: Dict[str, Any]) -> Dict[str, Any]:
     desc_text = _normalize_auto_text(product_row.get('description'))
     brand_text = _normalize_auto_text(product_row.get('brand'))
     code_text = _normalize_auto_text(product_row.get('code'))
-    category_text = _normalize_auto_category_value(product_row.get('category'))
+    category_text = _normalize_auto_text(product_row.get('category'))
+    category_mentions = _extract_auto_category_mentions(product_row.get('category'))
+    manual_primary = category_mentions[0] if category_mentions else _normalize_auto_category_value(product_row.get('category'))
     aux_text = ' '.join(part for part in [desc_text, brand_text, code_text, category_text] if part)
-    full_text = ' '.join(part for part in [name_text, aux_text] if part)
 
     matches: List[Dict[str, Any]] = []
     for rule in _AUTO_CATEGORY_RULES:
-        score = 0
-        for term in rule.get('terms') or []:
-            if _contains_auto_term(name_text, term):
-                score += 10
-            elif _contains_auto_term(aux_text, term):
-                score += 6
-            elif _contains_auto_term(full_text, term):
-                score += 3
-        if category_text and category_text == rule.get('value'):
-            score += 40
-        if score <= 0:
-            continue
-        matches.append({
-            'value': rule.get('value'),
-            'name': rule.get('name'),
-            'score': int(score + int(rule.get('priority') or 0)),
-            'also': list(rule.get('also') or []),
-        })
+        scored = _score_auto_rule(rule, name_text, aux_text, brand_text, category_mentions)
+        if scored:
+            matches.append(scored)
 
-    matches.sort(key=lambda item: (-int(item.get('score') or 0), str(item.get('value') or '')))
+    matches.sort(key=lambda item: (-int(item.get('score') or 0), -int(item.get('raw_score') or 0), str(item.get('value') or '')))
 
     filters: List[str] = []
-    if category_text and not _looks_generic_auto_category(category_text):
-        _append_unique_value(filters, category_text)
+    for value in category_mentions:
+        if value and not _looks_generic_auto_category(value):
+            _append_unique_value(filters, value)
+
+    selected_matches: List[Dict[str, Any]] = []
+    top_raw = int(matches[0].get('raw_score') or 0) if matches else 0
     for match in matches:
+        raw_score = int(match.get('raw_score') or 0)
+        value = _normalize_auto_category_value(match.get('value'))
+        if not selected_matches or raw_score >= max(16, top_raw - 14) or value in category_mentions:
+            selected_matches.append(match)
+        if len(selected_matches) >= 4:
+            break
+
+    for match in selected_matches:
         _append_unique_value(filters, match.get('value'))
         for extra in match.get('also') or []:
             _append_unique_value(filters, extra)
 
     primary = ''
-    if category_text and not _looks_generic_auto_category(category_text):
-        primary = category_text
-    elif matches:
-        primary = _normalize_auto_category_value(matches[0].get('value'))
-    elif category_text:
-        primary = category_text
+    if manual_primary and not _looks_generic_auto_category(manual_primary):
+        primary = manual_primary
+    elif selected_matches:
+        primary = _normalize_auto_category_value(selected_matches[0].get('value'))
+    elif manual_primary:
+        primary = manual_primary
 
     if primary:
         filters = [value for value in filters if value != primary]
         filters.insert(0, primary)
 
+    confidence = 'none'
+    if selected_matches:
+        confidence = str(selected_matches[0].get('confidence') or 'medium')
+    elif primary:
+        confidence = 'manual'
+
     return {
         'primary': primary,
         'filters': filters[:8],
-        'matched': [str(item.get('value') or '') for item in matches[:8] if item.get('value')],
-        'confidence': 'high' if matches else ('manual' if primary else 'none'),
+        'matched': [str(item.get('value') or '') for item in selected_matches[:8] if item.get('value')],
+        'confidence': confidence,
     }
 
 
@@ -10519,7 +10727,7 @@ async def backup_orders(request: Request):
 @app.get('/orders', response_model=List[schemas.OrderResponse])
 def list_orders(
     skip: int = 0,
-    limit: int = 200,
+    limit: Optional[int] = None,
     source: Optional[str] = None,
     q: Optional[str] = None,
     date: Optional[str] = None,
@@ -10846,7 +11054,7 @@ def list_orders(
 @app.get('/admin/orders', response_model=List[schemas.OrderResponse])
 def admin_list_orders(
     skip: int = 0,
-    limit: int = 200,
+    limit: Optional[int] = None,
     source: Optional[str] = None,
     q: Optional[str] = None,
     date: Optional[str] = None,

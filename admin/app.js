@@ -4006,6 +4006,111 @@ function updateOrderAlertCounts(orders){
   return { unseen, unprepared };
 }
 
+const CATEGORY_OVERVIEW_PALETTE = [
+  ['#f26b38', '#fb923c'],
+  ['#0f172a', '#1d4ed8'],
+  ['#16a34a', '#4ade80'],
+  ['#0ea5a4', '#22d3ee'],
+  ['#7c3aed', '#a78bfa'],
+  ['#db2777', '#fb7185'],
+  ['#ca8a04', '#fbbf24'],
+  ['#2563eb', '#60a5fa'],
+];
+
+function normalizeCategoryValues(raw){
+  if (Array.isArray(raw)) return raw.map((item) => String(item || '').trim()).filter(Boolean);
+  if (typeof raw === 'string') return raw.split(',').map((item) => String(item || '').trim()).filter(Boolean);
+  if (raw && typeof raw === 'object') return Object.values(raw).flat().map((item) => String(item || '').trim()).filter(Boolean);
+  return [];
+}
+
+function getDashboardPrimaryCategory(product, productCatMap){
+  const pid = String(product && (product.id ?? product._id ?? '') || '').trim();
+  const pname = String(product && (product.name || product.nombre || '') || '').trim();
+  const assignedRaw = (productCatMap && ((pid && productCatMap[pid]) || (pname && productCatMap[pname]))) || [];
+  const assigned = normalizeCategoryValues(assignedRaw).map((item) => String(item || '').toLowerCase()).filter(Boolean);
+  if (assigned.length) return prettifyFilterName(assigned[0]);
+  const fallback = String((product && (product.category || product.categoria)) || '').trim();
+  return fallback ? prettifyFilterName(fallback) : 'Sin categoría';
+}
+
+function buildDashboardCategoryEntries(products){
+  const list = (Array.isArray(products) ? products : []).filter((product) => product && product.active !== false);
+  const productCatMap = loadProductCategories() || {};
+  const counts = {};
+  list.forEach((product) => {
+    const label = getDashboardPrimaryCategory(product, productCatMap) || 'Sin categoría';
+    counts[label] = (counts[label] || 0) + 1;
+  });
+  return Object.entries(counts)
+    .map(([label, count]) => ({ label, count: Number(count || 0) }))
+    .sort((a, b) => (b.count - a.count) || a.label.localeCompare(b.label, 'es', { sensitivity: 'base' }));
+}
+
+function renderCategoryOverview(products){
+  const container = document.getElementById('categoryChart');
+  if (!container) return;
+  const entries = buildDashboardCategoryEntries(products);
+  const total = entries.reduce((sum, entry) => sum + Number(entry.count || 0), 0);
+  if (!entries.length || total <= 0){
+    container.innerHTML = '<div class="category-overview-empty">Todavía no hay categorías suficientes para mostrar el resumen.</div>';
+    return;
+  }
+  const distinctCount = entries.length;
+  const uncategorized = entries.find((entry) => String(entry.label || '').toLowerCase() === 'sin categoría');
+  const topEntry = entries[0];
+  const topShare = total > 0 ? ((Number(topEntry.count || 0) / total) * 100) : 0;
+  const displayEntries = entries.slice(0, 7).map((entry) => ({ ...entry }));
+  const remaining = entries.slice(7).reduce((sum, entry) => sum + Number(entry.count || 0), 0);
+  if (remaining > 0) displayEntries.push({ label: 'Otras categorías', count: remaining });
+  container.innerHTML = `
+    <div class="category-overview-head">
+      <div class="category-hero">
+        <div class="category-hero-kicker">Categoría líder</div>
+        <div class="category-hero-name">${escapeHtml(topEntry.label)}</div>
+        <div class="category-hero-meta">${formatNumber(topEntry.count)} productos · ${formatNumber(topShare, { digits: 1 })}% del catálogo activo</div>
+      </div>
+      <div class="category-overview-meta">
+        <div class="category-mini-stat">
+          <span class="category-mini-stat-label">Categorías activas</span>
+          <span class="category-mini-stat-value">${formatNumber(distinctCount)}</span>
+          <span class="category-mini-stat-sub">Distribución actual del catálogo</span>
+        </div>
+        <div class="category-mini-stat">
+          <span class="category-mini-stat-label">Sin categoría</span>
+          <span class="category-mini-stat-value">${formatNumber(uncategorized ? uncategorized.count : 0)}</span>
+          <span class="category-mini-stat-sub">${uncategorized ? `${formatNumber(((uncategorized.count / total) * 100), { digits: 1 })}% pendiente de ajuste` : 'Cobertura categorizada completa'}</span>
+        </div>
+      </div>
+    </div>
+    <div class="category-rank-list">
+      ${displayEntries.map((entry, index) => {
+        const count = Number(entry.count || 0);
+        const share = total > 0 ? (count / total) * 100 : 0;
+        const colors = CATEGORY_OVERVIEW_PALETTE[index % CATEGORY_OVERVIEW_PALETTE.length];
+        return `
+          <div class="category-rank-row">
+            <div class="category-rank-badge" style="background:linear-gradient(135deg, ${colors[0]}, ${colors[1]});">${index + 1}</div>
+            <div class="category-rank-main">
+              <div class="category-rank-title">
+                <span class="category-rank-name">${escapeHtml(entry.label)}</span>
+                <span class="category-rank-share">${formatNumber(share, { digits: 1 })}%</span>
+              </div>
+              <div class="category-rank-bar">
+                <span class="category-rank-bar-fill" style="width:${Math.max(8, Math.min(100, share))}%;background:linear-gradient(90deg, ${colors[0]}, ${colors[1]});"></span>
+              </div>
+            </div>
+            <div class="category-rank-count-wrap">
+              <span class="category-rank-count">${formatNumber(count)}</span>
+              <span class="category-rank-count-label">productos</span>
+            </div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
 function updateStats(products){
   const list = Array.isArray(products) ? products : [];
   const totalActive = list.filter(p => p && p.active).length;
@@ -4015,7 +4120,6 @@ function updateStats(products){
   updateLowStockAlert(list);
   const byCat = {};
   list.forEach(p => { const k = (p && p.category) ? p.category : 'Sin categoría'; byCat[k] = (byCat[k] || 0) + 1 });
-  const ctx = document.getElementById('categoryChart');
   try{
     if (window.categoryChart && typeof window.categoryChart.destroy === 'function') {
       window.categoryChart.destroy();
@@ -4024,15 +4128,8 @@ function updateStats(products){
       try{ delete window.categoryChart; }catch(_){ window.categoryChart = null; }
     }
   }catch(e){ console.warn('Could not destroy previous categoryChart', e); }
-  try{
-    // Create responsive pie chart that respects CSS-specified canvas size
-    const ctx2 = (ctx && ctx.getContext) ? ctx.getContext('2d') : ctx;
-    window.categoryChart = new Chart(ctx2, {
-      type: 'pie',
-      data: { labels: Object.keys(byCat), datasets: [{ data: Object.values(byCat), backgroundColor: ['#f26b38','#ffb84d','#0ea5a4','#0a2240','#f97316','#fb7185','#22c55e'] }] },
-      options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'bottom' } } }
-    });
-  }catch(e){ console.error('Failed to create categoryChart', e); }
+  window.categoryChart = null;
+  try{ renderCategoryOverview(list); }catch(e){ console.error('Failed to render category overview', e); }
 }
 
 // Modal and form behaviors
@@ -4743,12 +4840,12 @@ const importFiltersBtn = document.getElementById('importFiltersBtn');
 const autoCategorizeCatalogBtn = document.getElementById('autoCategorizeCatalogBtn');
 const filtersTableBody = document.querySelector('#filtersTable tbody');
 
-async function fetchOrders(q = '', date = '', source = '', limit = ''){
+async function fetchOrders(q = '', date = '', source = '', limit = 0){
   const params = new URLSearchParams();
   if(q) params.append('q', q);
   if(date) params.append('date', date);
   if(source) params.append('source', source);
-  if(limit) params.append('limit', String(limit));
+  if(limit !== '' && limit !== null && typeof limit !== 'undefined') params.append('limit', String(limit));
   const url = `${API_BASE}/orders` + (params.toString() ? ('?'+params.toString()) : '');
   try{
     // Prevent browser caching (304) from returning stale snapshots for orders
