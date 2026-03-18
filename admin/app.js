@@ -28,6 +28,15 @@ const driverMarkerAnim = new Map();
 let driverAnimFrame = null;
 const driverRouteState = new Map();
 let driverDirectionsService = null;
+const driverMapData = new Map();
+let selectedDriverId = '';
+let selectedDriverData = null;
+let selectedDriverInsights = null;
+let driverInspectorView = 'orders';
+let driverLiveTracePolyline = null;
+let driverPlannedRoutePolyline = null;
+const driverRouteStopMarkers = [];
+let driverInsightsReqSeq = 0;
 // 0 disables age-based hiding; rely on explicit offline events instead.
 const DRIVER_LOCATION_STALE_SEC = 0;
 const DRIVER_ANIM_MIN_MS = 600;
@@ -59,22 +68,70 @@ function getDriverMapElements(){
   };
 }
 
-function getDriverId(driver){
-  if (!driver) return '';
-  return String(driver.driver_id || driver.driver_username || driver.driver_name || '').trim();
+function getDriverInspectorElements(){
+  return {
+    root: document.getElementById('driverInspector'),
+    title: document.getElementById('driverInspectorTitle'),
+    meta: document.getElementById('driverInspectorMeta'),
+    body: document.getElementById('driverInspectorBody'),
+    tabs: document.getElementById('driverInspectorTabs'),
+    metricKm: document.getElementById('driverMetricKm'),
+    metricKmMeta: document.getElementById('driverMetricKmMeta'),
+    metricTime: document.getElementById('driverMetricTime'),
+    metricTimeMeta: document.getElementById('driverMetricTimeMeta'),
+    metricCompleted: document.getElementById('driverMetricCompleted'),
+    metricCompletedMeta: document.getElementById('driverMetricCompletedMeta'),
+    metricEfficiency: document.getElementById('driverMetricEfficiency'),
+    metricEfficiencyMeta: document.getElementById('driverMetricEfficiencyMeta'),
+  };
 }
 
-function getDriverMarkerIcon(){
+function getDriverId(driver){
+  if (!driver) return '';
+  return String(driver.driver_id || driver.id || driver.driver_username || driver.username || driver.driver_name || driver.full_name || '').trim();
+}
+
+function getDriverMarkerIcon(isSelected){
   if (!(window.google && window.google.maps)) return null;
   return {
     path: google.maps.SymbolPath.CIRCLE,
-    scale: 7,
-    fillColor: '#0ea5e9',
+    scale: isSelected ? 9 : 7,
+    fillColor: isSelected ? '#f26b38' : '#0ea5e9',
     fillOpacity: 0.95,
     strokeColor: '#0f172a',
     strokeOpacity: 0.7,
-    strokeWeight: 2,
+    strokeWeight: isSelected ? 3 : 2,
   };
+}
+
+function syncDriverMarkerStyle(id){
+  const marker = driverMapMarkers.get(id);
+  if (!marker) return;
+  const icon = getDriverMarkerIcon(id === selectedDriverId);
+  if (icon){
+    try{ marker.setIcon(icon); }catch(_){ }
+  }
+}
+
+function syncAllDriverMarkerStyles(){
+  driverMapMarkers.forEach((marker, id) => {
+    try{ syncDriverMarkerStyle(id); }catch(_){ }
+  });
+}
+
+function clearDriverRouteOverlays(){
+  if (driverLiveTracePolyline){
+    try{ driverLiveTracePolyline.setMap(null); }catch(_){ }
+    driverLiveTracePolyline = null;
+  }
+  if (driverPlannedRoutePolyline){
+    try{ driverPlannedRoutePolyline.setMap(null); }catch(_){ }
+    driverPlannedRoutePolyline = null;
+  }
+  while (driverRouteStopMarkers.length){
+    const marker = driverRouteStopMarkers.pop();
+    try{ marker && marker.setMap(null); }catch(_){ }
+  }
 }
 
 function clearDriverMarkers(){
@@ -82,9 +139,15 @@ function clearDriverMarkers(){
     try{ marker.setMap(null); }catch(_){ }
   });
   driverMapMarkers.clear();
+  driverMapData.clear();
   driverMarkerAnim.clear();
   driverRouteState.clear();
   driverAnimFrame = null;
+  clearDriverRouteOverlays();
+  selectedDriverId = '';
+  selectedDriverData = null;
+  selectedDriverInsights = null;
+  renderDriverInspectorPlaceholder();
 }
 
 function removeDriverMarkerById(id){
@@ -94,8 +157,17 @@ function removeDriverMarkerById(id){
     try{ marker.setMap(null); }catch(_){ }
     driverMapMarkers.delete(id);
   }
+  driverMapData.delete(id);
   driverMarkerAnim.delete(id);
   driverRouteState.delete(id);
+  if (selectedDriverId && String(selectedDriverId) === String(id)){
+    selectedDriverId = '';
+    selectedDriverData = null;
+    selectedDriverInsights = null;
+    clearDriverRouteOverlays();
+    renderDriverInspectorPlaceholder('El repartidor seleccionado quedó offline o sin ubicación reciente.');
+    syncAllDriverMarkerStyles();
+  }
 }
 
 function toLatLngLiteral(pos){
@@ -322,8 +394,20 @@ async function initDriverMap(){
     fullscreenControl: true,
     styles: DRIVER_MAP_STYLE,
   });
+  try{
+    driverMap.addListener('click', () => {
+      if (!selectedDriverId) return;
+      clearDriverRouteOverlays();
+      selectedDriverId = '';
+      selectedDriverData = null;
+      selectedDriverInsights = null;
+      syncAllDriverMarkerStyles();
+      renderDriverInspectorPlaceholder();
+    });
+  }catch(_){ }
   driverMapReady = true;
   setDriverMapEmpty('');
+  renderDriverInspectorPlaceholder();
   try{ await refreshDriverLocations(true); }catch(_){ }
 }
 
@@ -335,7 +419,8 @@ function updateDriverMarker(driver){
   const id = getDriverId(driver);
   if (!id) return false;
   const labelText = String(driver.driver_name || driver.driver_username || '').trim();
-  const icon = getDriverMarkerIcon();
+  driverMapData.set(id, Object.assign({}, driver));
+  const icon = getDriverMarkerIcon(id === selectedDriverId);
   let marker = driverMapMarkers.get(id);
   const state = getDriverRouteState(id);
   const now = Date.now();
@@ -348,6 +433,11 @@ function updateDriverMarker(driver){
       label: labelText ? { text: labelText, fontSize: '12px', fontWeight: '600', color: '#1f2937' } : undefined,
       title: labelText || 'Repartidor',
     });
+    try{
+      marker.addListener('click', () => {
+        selectDriverOnMap(driverMapData.get(id) || driver, { focusMap: driverInspectorView === 'route' });
+      });
+    }catch(_){ }
     driverMapMarkers.set(id, marker);
     driverMarkerAnim.set(id, { lastUpdateAt: (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now() });
     if (state) bufferDriverHistory(id, point);
@@ -395,6 +485,9 @@ function updateDriverMarker(driver){
     if (labelText) marker.setLabel({ text: labelText, fontSize: '12px', fontWeight: '600', color: '#1f2937' });
     if (icon) marker.setIcon(icon);
   }
+  if (id === selectedDriverId){
+    selectedDriverData = Object.assign({}, selectedDriverData || {}, driver);
+  }
   return true;
 }
 
@@ -434,15 +527,16 @@ async function refreshDriverLocations(force){
   });
   driverMapMarkers.forEach((marker, id) => {
     if (!seen.has(id)){
-      try{ marker.setMap(null); }catch(_){ }
-      driverMapMarkers.delete(id);
-      driverMarkerAnim.delete(id);
+      removeDriverMarkerById(id);
     }
   });
   if (visible === 0){
     setDriverMapEmpty('Sin ubicaciones recientes de repartidores.');
   } else {
     setDriverMapEmpty('');
+  }
+  if (selectedDriverId){
+    try{ await refreshSelectedDriverInsights(false); }catch(_){ }
   }
 }
 
@@ -459,6 +553,406 @@ function stopDriverMapPolling(){
     clearInterval(driverMapPoll);
     driverMapPoll = null;
   }
+}
+
+function formatDriverRelativeAge(ageSec, recordedAt){
+  let age = Number(ageSec);
+  if (!Number.isFinite(age) && recordedAt){
+    const parsed = Date.parse(recordedAt);
+    if (Number.isFinite(parsed)){
+      age = Math.max(0, (Date.now() - parsed) / 1000);
+    }
+  }
+  if (!Number.isFinite(age)) return '';
+  if (age < 60) return `Actualizado hace ${Math.round(age)}s`;
+  if (age < 3600) return `Actualizado hace ${Math.round(age / 60)} min`;
+  return `Actualizado hace ${Math.round(age / 3600)} h`;
+}
+
+function formatDriverDistance(km){
+  const n = Number(km);
+  if (!Number.isFinite(n)) return '—';
+  return `${n >= 100 ? n.toFixed(0) : n.toFixed(1)} km`;
+}
+
+function formatDriverActiveTime(minutes){
+  const total = Math.max(0, Math.round(Number(minutes) || 0));
+  if (!total) return '0 min';
+  const hours = Math.floor(total / 60);
+  const mins = total % 60;
+  if (!hours) return `${mins} min`;
+  if (!mins) return `${hours} h`;
+  return `${hours} h ${mins} min`;
+}
+
+function formatDriverEfficiency(value){
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '—';
+  return `${n.toFixed(n >= 100 ? 0 : 1)}%`;
+}
+
+function setDriverInspectorView(view){
+  driverInspectorView = ['orders', 'route', 'history'].includes(view) ? view : 'orders';
+  const { tabs } = getDriverInspectorElements();
+  if (!tabs) return;
+  tabs.querySelectorAll('[data-driver-view]').forEach((btn) => {
+    btn.classList.toggle('active', String(btn.dataset.driverView || '') === driverInspectorView);
+  });
+}
+
+function resetDriverInspectorMetrics(){
+  const els = getDriverInspectorElements();
+  if (els.metricKm) els.metricKm.textContent = '—';
+  if (els.metricKmMeta) els.metricKmMeta.textContent = 'Seleccioná un repartidor';
+  if (els.metricTime) els.metricTime.textContent = '—';
+  if (els.metricTimeMeta) els.metricTimeMeta.textContent = 'Operativa de hoy';
+  if (els.metricCompleted) els.metricCompleted.textContent = '—';
+  if (els.metricCompletedMeta) els.metricCompletedMeta.textContent = 'Operativa de hoy';
+  if (els.metricEfficiency) els.metricEfficiency.textContent = '—';
+  if (els.metricEfficiencyMeta) els.metricEfficiencyMeta.textContent = 'Sobre pedidos gestionados';
+}
+
+function renderDriverInspectorPlaceholder(message){
+  const els = getDriverInspectorElements();
+  if (els.title) els.title.textContent = 'Seleccioná un repartidor';
+  if (els.meta) els.meta.textContent = message || 'Hacé click sobre un repartidor del mapa para ver pedidos activos, ruta e historial.';
+  if (els.body) els.body.innerHTML = `<div class="driver-empty-note">${escapeHtml(message || 'Seleccioná un repartidor para explorar su operación.')}</div>`;
+  resetDriverInspectorMetrics();
+  setDriverInspectorView(driverInspectorView);
+}
+
+function renderDriverInspectorLoading(driver){
+  const els = getDriverInspectorElements();
+  const name = String((driver && (driver.driver_name || driver.full_name || driver.driver_username || driver.username)) || 'Repartidor').trim();
+  if (els.title) els.title.textContent = name || 'Repartidor';
+  if (els.meta) els.meta.textContent = 'Cargando pedidos, ruta e historial...';
+  if (els.body) els.body.innerHTML = '<div class="driver-empty-note">Cargando detalle del repartidor...</div>';
+  resetDriverInspectorMetrics();
+  setDriverInspectorView(driverInspectorView);
+}
+
+function getSelectedDriverName(source){
+  if (!source) return 'Repartidor';
+  return String(source.driver_name || source.full_name || source.driver_username || source.username || 'Repartidor').trim() || 'Repartidor';
+}
+
+function getDriverInsightsOrderById(orderId){
+  const id = String(orderId || '').trim();
+  if (!id || !selectedDriverInsights) return null;
+  const collections = []
+    .concat(Array.isArray(selectedDriverInsights.active_orders) ? selectedDriverInsights.active_orders : [])
+    .concat(Array.isArray(selectedDriverInsights.history_orders) ? selectedDriverInsights.history_orders : []);
+  return collections.find(o => String(o && o.id) === id) || null;
+}
+
+function bindDriverInspectorBodyActions(){
+  const { body } = getDriverInspectorElements();
+  if (!body) return;
+  body.querySelectorAll('.viewDriverOrderBtn').forEach((btn) => {
+    btn.onclick = async () => {
+      const id = String((btn && btn.dataset && btn.dataset.orderId) || '').trim();
+      if (!id) return;
+      const existing = getDriverInsightsOrderById(id);
+      if (existing){
+        showOrderDetail(existing);
+        return;
+      }
+      const list = await fetchOrders(String(id));
+      const order = (list || []).find(x => String(x.id) === id) || (list && list[0]);
+      if (order) showOrderDetail(order);
+    };
+  });
+}
+
+function renderDriverRouteOverlay(insights, focusMap){
+  clearDriverRouteOverlays();
+  if (!(driverMapReady && window.google && window.google.maps) || !insights) return;
+  const locationPoints = (Array.isArray(insights.location_points) ? insights.location_points : []).map((point) => {
+    const lat = Number(point && point.lat);
+    const lon = Number(point && (point.lon ?? point.lng));
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+    return { lat, lng: lon };
+  }).filter(Boolean);
+  const routePoints = (Array.isArray(insights.route_points) ? insights.route_points : []).map((point) => {
+    const lat = Number(point && point.lat);
+    const lon = Number(point && (point.lon ?? point.lng));
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+    return Object.assign({}, point, { lat, lng: lon });
+  }).filter(Boolean);
+
+  if (locationPoints.length > 1){
+    driverLiveTracePolyline = new google.maps.Polyline({
+      map: driverMap,
+      path: locationPoints,
+      strokeColor: '#0ea5e9',
+      strokeOpacity: 0.95,
+      strokeWeight: 4,
+    });
+  }
+  if (routePoints.length > 1){
+    driverPlannedRoutePolyline = new google.maps.Polyline({
+      map: driverMap,
+      path: routePoints.map((point) => ({ lat: point.lat, lng: point.lng })),
+      strokeColor: locationPoints.length > 1 ? '#f59e0b' : '#f26b38',
+      strokeOpacity: locationPoints.length > 1 ? 0.42 : 0.92,
+      strokeWeight: locationPoints.length > 1 ? 3 : 4,
+    });
+  }
+  routePoints.forEach((point, idx) => {
+    if (String(point.kind || '') !== 'order') return;
+    const marker = new google.maps.Marker({
+      map: driverMap,
+      position: { lat: point.lat, lng: point.lng },
+      label: { text: String(point.route_order || (idx + 1)), color: '#0f172a', fontWeight: '700', fontSize: '11px' },
+      icon: {
+        path: google.maps.SymbolPath.CIRCLE,
+        scale: 11,
+        fillColor: '#ffffff',
+        fillOpacity: 0.98,
+        strokeColor: '#f26b38',
+        strokeWeight: 2,
+      },
+      title: point.label || `Parada ${idx + 1}`,
+    });
+    driverRouteStopMarkers.push(marker);
+  });
+
+  if (!focusMap) return;
+  const bounds = new google.maps.LatLngBounds();
+  let pointCount = 0;
+  locationPoints.forEach((point) => { bounds.extend(point); pointCount += 1; });
+  routePoints.forEach((point) => { bounds.extend({ lat: point.lat, lng: point.lng }); pointCount += 1; });
+  if (pointCount > 1){
+    try{ driverMap.fitBounds(bounds, 64); }catch(_){ }
+  } else if (pointCount === 1 && (routePoints[0] || locationPoints[0])){
+    const onlyPoint = routePoints[0] || locationPoints[0];
+    try{
+      driverMap.setCenter({ lat: onlyPoint.lat, lng: onlyPoint.lng });
+      driverMap.setZoom(13);
+    }catch(_){ }
+  }
+}
+
+function buildDriverInspectorMeta(insights){
+  if (!insights) return '';
+  const driver = insights.driver || {};
+  const live = insights.live_location || {};
+  const metrics = insights.metrics || {};
+  const parts = [];
+  if (driver.zone) parts.push(`Zona ${driver.zone}`);
+  const ageLabel = formatDriverRelativeAge(live.age_sec, live.recorded_at);
+  if (ageLabel) parts.push(ageLabel);
+  const activeOrders = Number(metrics.active_orders || 0);
+  parts.push(activeOrders === 1 ? '1 pedido activo' : `${activeOrders} pedidos activos`);
+  return parts.join(' · ');
+}
+
+function buildDriverOrderCard(order, extraHtml, extraChips){
+  const customer = getOrderPrimaryName(order) || `Pedido #${order && order.id}`;
+  const address = getOrderAddress(order) || 'Dirección pendiente';
+  const notes = getOrderDeliveryNotes(order);
+  const statusNorm = normalizeOrderStatus(order && order.status);
+  const statusLabel = formatOrderStatusLabel(statusNorm);
+  const mapsLinkHtml = getOrderGoogleMapsLinkHtml(order, 'Abrir en Maps', 'route-map-link');
+  const chips = [
+    `<span class="driver-detail-chip">#${escapeHtml(order && order.id)}</span>`,
+    `<span class="driver-detail-chip">${escapeHtml(statusLabel)}</span>`,
+    `<span class="driver-detail-chip">$${Number((order && order.total) || 0).toFixed(2)}</span>`,
+  ].concat(Array.isArray(extraChips) ? extraChips : []);
+  return `
+    <div class="driver-detail-card">
+      <div class="driver-detail-top">
+        <div>
+          <div class="driver-detail-title">${escapeHtml(customer)}</div>
+          <div class="driver-detail-subtitle">${escapeHtml(address)}</div>
+        </div>
+        <div class="driver-detail-meta">${chips.join('')}</div>
+      </div>
+      ${notes ? `<div class="driver-history-note"><strong>Notas:</strong> ${escapeHtml(notes)}</div>` : ''}
+      ${extraHtml || ''}
+      <div class="driver-detail-actions">
+        <button type="button" class="btn small viewDriverOrderBtn" data-order-id="${escapeHtml(order && order.id)}">Ver pedido</button>
+        ${mapsLinkHtml || ''}
+      </div>
+    </div>
+  `;
+}
+
+function renderDriverOrdersView(insights){
+  const activeOrders = Array.isArray(insights && insights.active_orders) ? insights.active_orders : [];
+  if (!activeOrders.length){
+    return '<div class="driver-empty-note">Este repartidor no tiene pedidos activos ahora mismo.</div>';
+  }
+  return `
+    <div class="driver-summary-line">
+      <span class="driver-summary-pill">${activeOrders.length} pedidos activos</span>
+      <span class="driver-summary-pill">Click en "Ver pedido" para abrir el detalle completo</span>
+    </div>
+    <div class="driver-detail-list">
+      ${activeOrders.map((order) => {
+        const routeOrder = Number(order && order.route_order);
+        const chip = Number.isFinite(routeOrder) ? [`<span class="driver-detail-chip">Parada ${routeOrder}</span>`] : [];
+        return buildDriverOrderCard(order, '', chip);
+      }).join('')}
+    </div>
+  `;
+}
+
+function renderDriverRouteView(insights){
+  const routePoints = Array.isArray(insights && insights.route_points) ? insights.route_points : [];
+  const locationPoints = Array.isArray(insights && insights.location_points) ? insights.location_points : [];
+  const mode = String((insights && insights.route_mode) || '');
+  const label = mode === 'live_trace' ? 'Trayecto real reciente dibujado en el mapa' : 'Ruta planificada dibujada en el mapa';
+  if (!routePoints.length){
+    if (locationPoints.length > 1){
+      return `
+        <div class="driver-summary-line">
+          <span class="driver-summary-pill">${escapeHtml(label)}</span>
+        </div>
+        <div class="driver-empty-note">No hay pedidos activos cargados ahora mismo, pero el mapa muestra el recorrido reciente del repartidor.</div>
+      `;
+    }
+    return '<div class="driver-empty-note">No hay puntos suficientes para dibujar la ruta de este repartidor.</div>';
+  }
+  return `
+    <div class="driver-summary-line">
+      <span class="driver-summary-pill">${escapeHtml(label)}</span>
+      <span class="driver-summary-pill">${routePoints.filter(point => String(point.kind || '') === 'order').length} paradas activas</span>
+    </div>
+    <div class="driver-route-stack">
+      ${routePoints.map((point, index) => {
+        const isLive = String(point && point.kind || '') === 'live';
+        const idxLabel = isLive ? '●' : String(point.route_order || (index + 1));
+        const title = isLive ? (point.label || getSelectedDriverName(selectedDriverData || selectedDriverInsights && selectedDriverInsights.driver)) : (point.label || `Pedido #${point.order_id || index}`);
+        const subtitle = isLive ? (formatDriverRelativeAge(null, point.recorded_at) || 'Ubicación actual') : (point.address || 'Dirección pendiente');
+        const actionHtml = isLive || !point.order_id
+          ? ''
+          : `<div class="driver-detail-actions"><button type="button" class="btn small viewDriverOrderBtn" data-order-id="${escapeHtml(point.order_id)}">Ver pedido</button></div>`;
+        return `
+          <div class="driver-route-row ${isLive ? 'live' : ''}">
+            <span class="driver-route-index">${escapeHtml(idxLabel)}</span>
+            <div class="driver-route-main">
+              <div class="driver-route-title">${escapeHtml(title)}</div>
+              <div class="driver-route-address">${escapeHtml(subtitle)}</div>
+              ${!isLive && point.status ? `<div class="driver-inline-note">${escapeHtml(formatOrderStatusLabel(point.status))}</div>` : ''}
+              ${actionHtml}
+            </div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
+function renderDriverHistoryView(insights){
+  const historyOrders = Array.isArray(insights && insights.history_orders) ? insights.history_orders : [];
+  if (!historyOrders.length){
+    return '<div class="driver-empty-note">No hay entregas ni incidencias recientes para este repartidor.</div>';
+  }
+  return `
+    <div class="driver-detail-list">
+      ${historyOrders.map((order) => {
+        const latestIssue = getLatestDeliveryIssue(order);
+        const eventLabel = formatDeliveryIncidentLabel(latestIssue, order);
+        const eventAt = order.delivered_at || (latestIssue && latestIssue.created_at) || order.last_delivery_issue_at || order.created_at || null;
+        const eventDate = eventAt ? new Date(eventAt).toLocaleString('es-AR', { dateStyle: 'short', timeStyle: 'short' }) : '—';
+        const photoHtml = buildDeliveryPhotoHtml((latestIssue && latestIssue.photo_url) || order.last_delivery_issue_photo_url || '');
+        const noteHtml = String((latestIssue && latestIssue.note) || order.cancel_reason || '').trim()
+          ? `<div class="driver-history-note">${escapeHtml(String((latestIssue && latestIssue.note) || order.cancel_reason || '').trim())}</div>`
+          : '';
+        const extraHtml = `
+          <div class="driver-history-event">
+            <div class="driver-history-meta">
+              <span class="driver-inline-note">${escapeHtml(eventLabel)}</span>
+              <span class="driver-history-date">${escapeHtml(eventDate)}</span>
+            </div>
+            ${noteHtml}
+            ${photoHtml.indexOf('<img') >= 0 ? `<div>${photoHtml}</div>` : ''}
+          </div>
+        `;
+        return buildDriverOrderCard(order, extraHtml, []);
+      }).join('')}
+    </div>
+  `;
+}
+
+function renderSelectedDriverInsights(insights, options){
+  if (!insights) return;
+  selectedDriverInsights = insights;
+  const driver = insights.driver || selectedDriverData || {};
+  const metrics = insights.metrics || {};
+  const els = getDriverInspectorElements();
+  if (els.title) els.title.textContent = getSelectedDriverName(driver);
+  if (els.meta) els.meta.textContent = buildDriverInspectorMeta(insights);
+  if (els.metricKm) els.metricKm.textContent = formatDriverDistance(metrics.km_travelled);
+  if (els.metricKmMeta) els.metricKmMeta.textContent = metrics.km_estimated ? 'Estimado de hoy' : 'Trazado real de hoy';
+  if (els.metricTime) els.metricTime.textContent = formatDriverActiveTime(metrics.active_minutes);
+  if (els.metricTimeMeta) els.metricTimeMeta.textContent = metrics.active_time_estimated ? 'Estimado por actividad' : 'Tomado desde ubicaciones';
+  if (els.metricCompleted) els.metricCompleted.textContent = String(Number(metrics.completed_deliveries || 0));
+  if (els.metricCompletedMeta) els.metricCompletedMeta.textContent = 'Entregas cerradas hoy';
+  if (els.metricEfficiency) els.metricEfficiency.textContent = formatDriverEfficiency(metrics.efficiency_pct);
+  if (els.metricEfficiencyMeta) els.metricEfficiencyMeta.textContent = `${Number(metrics.active_orders || 0)} activos · ${Number(metrics.issues || 0)} incidencias`;
+  setDriverInspectorView(driverInspectorView);
+  if (els.body){
+    if (driverInspectorView === 'route'){
+      els.body.innerHTML = renderDriverRouteView(insights);
+    } else if (driverInspectorView === 'history'){
+      els.body.innerHTML = renderDriverHistoryView(insights);
+    } else {
+      els.body.innerHTML = renderDriverOrdersView(insights);
+    }
+  }
+  bindDriverInspectorBodyActions();
+  renderDriverRouteOverlay(insights, !!(options && options.focusMap));
+}
+
+async function loadDriverInsights(driver){
+  const id = getDriverId(driver);
+  if (!id) return null;
+  await ensureApiBase();
+  const params = new URLSearchParams();
+  if (driver && (driver.driver_id || driver.id)) params.set('driver_id', String(driver.driver_id || driver.id));
+  else if (driver && (driver.driver_username || driver.username)) params.set('driver_username', String(driver.driver_username || driver.username));
+  const requestId = ++driverInsightsReqSeq;
+  const payload = await safeFetch(`${API_BASE}/admin/driver-insights?${params.toString()}`, { cache: 'no-store' });
+  if (requestId !== driverInsightsReqSeq) return null;
+  return payload;
+}
+
+async function selectDriverOnMap(driverOrId, options){
+  const base = typeof driverOrId === 'string'
+    ? (
+      driverMapData.get(String(driverOrId))
+      || ((selectedDriverData && getDriverId(selectedDriverData) === String(driverOrId)) ? selectedDriverData : null)
+    )
+    : driverOrId;
+  const id = getDriverId(base);
+  if (!id) return;
+  selectedDriverId = id;
+  selectedDriverData = Object.assign({}, driverMapData.get(id) || base || {});
+  if (options && options.view) setDriverInspectorView(options.view);
+  else setDriverInspectorView(driverInspectorView);
+  syncAllDriverMarkerStyles();
+  renderDriverInspectorLoading(selectedDriverData);
+  try{
+    const payload = await loadDriverInsights(selectedDriverData);
+    if (!payload || selectedDriverId !== id) return;
+    renderSelectedDriverInsights(payload, { focusMap: !!(options && options.focusMap) || driverInspectorView === 'route' });
+  }catch(e){
+    console.error('selectDriverOnMap failed', e);
+    renderDriverInspectorPlaceholder('No se pudo cargar el detalle del repartidor.');
+  }
+}
+
+async function refreshSelectedDriverInsights(forceMapFocus){
+  if (!selectedDriverId || currentSectionId !== 'dashboard') return;
+  const driver = driverMapData.get(selectedDriverId) || selectedDriverData;
+  if (!driver) return;
+  try{
+    const payload = await loadDriverInsights(driver);
+    if (!payload || selectedDriverId !== getDriverId(driver)) return;
+    renderSelectedDriverInsights(payload, { focusMap: !!forceMapFocus && driverInspectorView === 'route' });
+  }catch(_){ }
 }
 
 function canAccessSection(sectionId){
@@ -490,6 +984,7 @@ function activateSection(sectionId){
     try{ initDriverMap(); startDriverMapPolling(); }catch(_){ }
   } else {
     stopDriverMapPolling();
+    clearDriverRouteOverlays();
   }
   if (sectionId === 'customers') { try{ refreshCustomers(false); }catch(_){ } }
   if (sectionId === 'retail-prices') { try{ refreshRetailPrices(); }catch(_){ } }
@@ -527,6 +1022,22 @@ document.querySelectorAll('.sidebar nav a[data-section]').forEach(link => {
     }catch(e){}
   });
 });
+try{
+  const { tabs } = getDriverInspectorElements();
+  if (tabs){
+    tabs.querySelectorAll('[data-driver-view]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const nextView = String((btn && btn.dataset && btn.dataset.driverView) || '').trim();
+        setDriverInspectorView(nextView);
+        if (selectedDriverInsights){
+          renderSelectedDriverInsights(selectedDriverInsights, { focusMap: nextView === 'route' });
+        } else {
+          renderDriverInspectorPlaceholder();
+        }
+      });
+    });
+  }
+}catch(_){ }
 // Admin JS ? UI principal sin modo oscuro ni bot?n de tarjeta (card)
 console.log('[admin] app.js loaded');
 const REMOTE_API_BASE = 'https://backend-0lcs.onrender.com';

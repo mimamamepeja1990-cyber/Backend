@@ -10454,6 +10454,505 @@ async def admin_auto_assign_routes(request: Request, current_admin=Depends(get_c
     return JSONResponse(status_code=200, content={'results': results}, headers=headers)
 
 
+def _resolve_dashboard_tzinfo() -> Tuple[datetime.tzinfo, str]:
+    tz_name = str(
+        os.environ.get('ORDER_EMAIL_TIMEZONE')
+        or os.environ.get('ORDER_DELIVERY_TIMEZONE')
+        or 'America/Argentina/Buenos_Aires'
+    ).strip() or 'America/Argentina/Buenos_Aires'
+    try:
+        return ZoneInfo(tz_name), tz_name
+    except Exception:
+        return datetime.timezone.utc, 'UTC'
+
+
+def _driver_matches_assigned_order(
+    order_data: Optional[Dict[str, Any]],
+    driver_id: Optional[int] = None,
+    driver_username: Optional[str] = None,
+) -> bool:
+    if not isinstance(order_data, dict):
+        return False
+    did = str(order_data.get('assigned_driver_id') or '').strip()
+    duser = str(order_data.get('assigned_driver_username') or '').strip()
+    if driver_id is not None and did == str(driver_id):
+        return True
+    if driver_username and duser == str(driver_username).strip():
+        return True
+    return False
+
+
+def _driver_matches_delivery_event(
+    order_data: Optional[Dict[str, Any]],
+    driver_id: Optional[int] = None,
+    driver_username: Optional[str] = None,
+) -> bool:
+    if not isinstance(order_data, dict):
+        return False
+    did = str(order_data.get('delivered_by_id') or order_data.get('assigned_driver_id') or '').strip()
+    duser = str(order_data.get('delivered_by_username') or order_data.get('assigned_driver_username') or '').strip()
+    if driver_id is not None and did == str(driver_id):
+        return True
+    if driver_username and duser == str(driver_username).strip():
+        return True
+    return False
+
+
+def _extract_driver_order_point(order_data: Optional[Dict[str, Any]]) -> Optional[Dict[str, float]]:
+    if not isinstance(order_data, dict):
+        return None
+
+    def _coord_candidates(src: Any, keys: Tuple[str, ...]) -> List[Any]:
+        if not isinstance(src, dict):
+            return []
+        return [src.get(k) for k in keys]
+
+    token_preview = order_data.get('_token_preview')
+    nested_address = token_preview.get('address') if isinstance(token_preview, dict) else None
+    lat_candidates = [
+        order_data.get('delivery_lat'),
+        order_data.get('user_lat'),
+    ] + _coord_candidates(token_preview, ('user_lat', 'lat', 'latitude', 'delivery_lat')) + _coord_candidates(
+        nested_address,
+        ('lat', 'latitude'),
+    )
+    lon_candidates = [
+        order_data.get('delivery_lon'),
+        order_data.get('delivery_lng'),
+        order_data.get('user_lon'),
+        order_data.get('user_lng'),
+    ] + _coord_candidates(token_preview, ('user_lon', 'user_lng', 'lon', 'lng', 'longitude', 'delivery_lon', 'delivery_lng')) + _coord_candidates(
+        nested_address,
+        ('lon', 'lng', 'longitude'),
+    )
+
+    lat = next((_coerce_coord(v) for v in lat_candidates if _coerce_coord(v) is not None), None)
+    lon = next((_coerce_coord(v) for v in lon_candidates if _coerce_coord(v) is not None), None)
+    if lat is None or lon is None:
+        return None
+    return {'lat': float(lat), 'lon': float(lon)}
+
+
+def _driver_order_customer_label(order_data: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(order_data, dict):
+        return ''
+    token_preview = order_data.get('_token_preview') if isinstance(order_data.get('_token_preview'), dict) else {}
+    return str(
+        order_data.get('user_full_name')
+        or token_preview.get('name')
+        or token_preview.get('full_name')
+        or order_data.get('user_email')
+        or token_preview.get('email')
+        or ''
+    ).strip()
+
+
+def _driver_order_address_label(order_data: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(order_data, dict):
+        return ''
+    parts = [
+        order_data.get('user_calle'),
+        order_data.get('user_numeracion'),
+        order_data.get('user_barrio'),
+        order_data.get('user_department'),
+    ]
+    text_parts = [str(p).strip() for p in parts if str(p or '').strip()]
+    if text_parts:
+        return ', '.join(text_parts)
+    token_preview = order_data.get('_token_preview') if isinstance(order_data.get('_token_preview'), dict) else {}
+    nested_address = token_preview.get('address') if isinstance(token_preview, dict) else {}
+    preview_parts = [
+        token_preview.get('calle') or nested_address.get('street'),
+        token_preview.get('numeracion') or nested_address.get('number'),
+        token_preview.get('barrio') or nested_address.get('neighborhood'),
+        token_preview.get('department') or nested_address.get('department'),
+    ]
+    return ', '.join([str(p).strip() for p in preview_parts if str(p or '').strip()])
+
+
+def _sample_route_points(points: List[Dict[str, Any]], max_points: int = 120) -> List[Dict[str, Any]]:
+    if len(points) <= max_points:
+        return points
+    if max_points <= 2:
+        return [points[0], points[-1]]
+    sampled: List[Dict[str, Any]] = [points[0]]
+    span = len(points) - 1
+    for idx in range(1, max_points - 1):
+        src_index = int(round((idx * span) / (max_points - 1)))
+        src_index = max(1, min(src_index, len(points) - 2))
+        sampled.append(points[src_index])
+    sampled.append(points[-1])
+    return sampled
+
+
+def _get_driver_live_location_payload(
+    driver_id: Optional[int],
+    driver_username: Optional[str],
+    db: Session,
+) -> Optional[Dict[str, Any]]:
+    best_payload: Optional[Dict[str, Any]] = None
+    best_ts: Optional[datetime.datetime] = None
+
+    def _matches(payload: Dict[str, Any]) -> bool:
+        pid = str(payload.get('driver_id') or '').strip()
+        puser = str(payload.get('driver_username') or '').strip()
+        if driver_id is not None and pid == str(driver_id):
+            return True
+        if driver_username and puser == str(driver_username).strip():
+            return True
+        return False
+
+    def _consider(payload: Dict[str, Any], ts_value: Optional[datetime.datetime], age: Optional[float]) -> None:
+        nonlocal best_payload, best_ts
+        if not _matches(payload):
+            return
+        ts_norm = _parse_datetime_utc(ts_value) if ts_value is not None else None
+        if ts_norm is None:
+            ts_norm = datetime.datetime.now(datetime.timezone.utc)
+        if best_ts is not None and ts_norm <= best_ts:
+            return
+        next_payload = dict(payload)
+        if age is not None:
+            next_payload['age_sec'] = float(age)
+        best_payload = next_payload
+        best_ts = ts_norm
+
+    try:
+        now_ts = time.time()
+        with DRIVER_LOCATIONS_LOCK:
+            for entry in DRIVER_LOCATIONS.values():
+                if not isinstance(entry, dict):
+                    continue
+                ts_age = None
+                updated_at = entry.get('updated_at')
+                if updated_at is not None:
+                    try:
+                        ts_age = max(0.0, now_ts - float(updated_at))
+                    except Exception:
+                        ts_age = None
+                payload = dict(entry)
+                payload.pop('updated_at', None)
+                _consider(payload, payload.get('recorded_at'), ts_age)
+    except Exception:
+        pass
+
+    try:
+        q = db.query(models.AdminDriverLocation)
+        if driver_id is not None:
+            q = q.filter(models.AdminDriverLocation.admin_user_id == int(driver_id))
+        elif driver_username:
+            q = q.filter(models.AdminDriverLocation.username == str(driver_username).strip())
+        row = q.order_by(models.AdminDriverLocation.recorded_at.desc()).first()
+        if row is not None:
+            rec = row.recorded_at
+            rec_utc = _parse_datetime_utc(rec)
+            age_sec = None
+            if rec_utc is not None:
+                age_sec = max(0.0, (datetime.datetime.now(datetime.timezone.utc) - rec_utc).total_seconds())
+            _consider(
+                {
+                    'driver_id': row.admin_user_id,
+                    'driver_username': row.username,
+                    'driver_name': row.full_name or row.username,
+                    'lat': float(row.lat),
+                    'lon': float(row.lon),
+                    'accuracy': row.accuracy,
+                    'speed': row.speed,
+                    'heading': row.heading,
+                    'battery': row.battery,
+                    'recorded_at': row.recorded_at,
+                },
+                row.recorded_at,
+                age_sec,
+            )
+    except Exception:
+        pass
+
+    return best_payload
+
+
+def _get_driver_location_points(
+    driver_id: Optional[int],
+    driver_username: Optional[str],
+    start_utc: Optional[datetime.datetime],
+    db: Session,
+    live_payload: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    points: List[Dict[str, Any]] = []
+    seen = set()
+    try:
+        q = db.query(models.AdminDriverLocation)
+        if driver_id is not None:
+            q = q.filter(models.AdminDriverLocation.admin_user_id == int(driver_id))
+        elif driver_username:
+            q = q.filter(models.AdminDriverLocation.username == str(driver_username).strip())
+        if start_utc is not None:
+            q = q.filter(models.AdminDriverLocation.recorded_at >= start_utc)
+        rows = q.order_by(models.AdminDriverLocation.recorded_at.asc()).limit(3000).all()
+        for row in rows:
+            lat = _coerce_coord(getattr(row, 'lat', None))
+            lon = _coerce_coord(getattr(row, 'lon', None))
+            rec = _parse_datetime_utc(getattr(row, 'recorded_at', None))
+            if lat is None or lon is None or rec is None:
+                continue
+            key = (round(float(lat), 6), round(float(lon), 6), rec.isoformat())
+            if key in seen:
+                continue
+            seen.add(key)
+            points.append({
+                'lat': float(lat),
+                'lon': float(lon),
+                'recorded_at': rec,
+            })
+    except Exception:
+        points = []
+
+    if isinstance(live_payload, dict):
+        lat = _coerce_coord(live_payload.get('lat'))
+        lon = _coerce_coord(live_payload.get('lon'))
+        rec = _parse_datetime_utc(live_payload.get('recorded_at'))
+        if lat is not None and lon is not None and rec is not None:
+            key = (round(float(lat), 6), round(float(lon), 6), rec.isoformat())
+            if key not in seen:
+                points.append({
+                    'lat': float(lat),
+                    'lon': float(lon),
+                    'recorded_at': rec,
+                })
+
+    return _sample_route_points(points, max_points=140)
+
+
+def _sum_driver_path_km(points: List[Dict[str, Any]]) -> float:
+    total = 0.0
+    prev = None
+    for point in (points or []):
+        if prev is not None:
+            total += _haversine_km(prev['lat'], prev['lon'], point['lat'], point['lon'])
+        prev = point
+    return round(total, 2)
+
+
+def _estimate_driver_path_km(
+    active_orders: List[Dict[str, Any]],
+    history_today: List[Dict[str, Any]],
+    live_payload: Optional[Dict[str, Any]] = None,
+    db: Optional[Session] = None,
+) -> float:
+    route_nodes: List[Tuple[float, float]] = []
+    try:
+        start_lat, start_lon = _get_route_start_point(db)
+    except Exception:
+        start_lat, start_lon = None, None
+    if _is_mendoza_point(start_lat, start_lon):
+        route_nodes.append((float(start_lat), float(start_lon)))
+
+    ordered_history = sorted(
+        history_today,
+        key=lambda o: _parse_datetime_utc(o.get('delivered_at') or o.get('last_delivery_issue_at') or o.get('created_at')) or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc),
+    )
+    ordered_active = sorted(
+        active_orders,
+        key=lambda o: (o.get('route_order') is None, int(o.get('route_order') or 0), str(o.get('id') or '')),
+    )
+
+    for order_data in ordered_history + ordered_active:
+        point = _extract_driver_order_point(order_data)
+        if point:
+            route_nodes.append((point['lat'], point['lon']))
+
+    if isinstance(live_payload, dict):
+        lat = _coerce_coord(live_payload.get('lat'))
+        lon = _coerce_coord(live_payload.get('lon'))
+        if lat is not None and lon is not None:
+            route_nodes.append((float(lat), float(lon)))
+
+    total = 0.0
+    for idx in range(1, len(route_nodes)):
+        total += _haversine_km(route_nodes[idx - 1][0], route_nodes[idx - 1][1], route_nodes[idx][0], route_nodes[idx][1])
+    return round(total, 2)
+
+
+def _estimate_driver_active_minutes(
+    active_orders: List[Dict[str, Any]],
+    history_today: List[Dict[str, Any]],
+    live_payload: Optional[Dict[str, Any]] = None,
+) -> int:
+    timestamps: List[datetime.datetime] = []
+    for order_data in (history_today or []):
+        for raw in (
+            order_data.get('assigned_at'),
+            order_data.get('sent_at'),
+            order_data.get('delivered_at'),
+            order_data.get('last_delivery_issue_at'),
+            order_data.get('created_at'),
+        ):
+            parsed = _parse_datetime_utc(raw)
+            if parsed is not None:
+                timestamps.append(parsed)
+    for order_data in (active_orders or []):
+        for raw in (
+            order_data.get('assigned_at'),
+            order_data.get('sent_at'),
+            order_data.get('created_at'),
+        ):
+            parsed = _parse_datetime_utc(raw)
+            if parsed is not None:
+                timestamps.append(parsed)
+    live_dt = _parse_datetime_utc(live_payload.get('recorded_at')) if isinstance(live_payload, dict) else None
+    if live_dt is not None:
+        timestamps.append(live_dt)
+    if not timestamps:
+        return 0
+    start_dt = min(timestamps)
+    end_dt = max(timestamps)
+    return max(0, int(round((end_dt - start_dt).total_seconds() / 60.0)))
+
+
+def _build_driver_route_points(
+    active_orders: List[Dict[str, Any]],
+    live_payload: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    route_points: List[Dict[str, Any]] = []
+    if isinstance(live_payload, dict):
+        lat = _coerce_coord(live_payload.get('lat'))
+        lon = _coerce_coord(live_payload.get('lon'))
+        if lat is not None and lon is not None:
+            route_points.append({
+                'kind': 'live',
+                'lat': float(lat),
+                'lon': float(lon),
+                'label': str(live_payload.get('driver_name') or live_payload.get('driver_username') or 'Ubicación actual').strip() or 'Ubicación actual',
+                'recorded_at': live_payload.get('recorded_at'),
+            })
+    ordered_active = sorted(
+        active_orders,
+        key=lambda o: (o.get('route_order') is None, int(o.get('route_order') or 0), str(o.get('id') or '')),
+    )
+    for idx, order_data in enumerate(ordered_active, start=1):
+        point = _extract_driver_order_point(order_data)
+        if not point:
+            continue
+        route_points.append({
+            'kind': 'order',
+            'lat': float(point['lat']),
+            'lon': float(point['lon']),
+            'order_id': order_data.get('id'),
+            'route_order': order_data.get('route_order') if order_data.get('route_order') is not None else idx,
+            'label': _driver_order_customer_label(order_data) or f"Pedido #{order_data.get('id')}",
+            'address': _driver_order_address_label(order_data),
+            'status': order_data.get('status'),
+        })
+    return route_points
+
+
+def _build_driver_insights_payload(driver: Any, db: Session) -> Dict[str, Any]:
+    driver_id = getattr(driver, 'id', None)
+    driver_username = str(getattr(driver, 'username', '') or '').strip() or None
+    tzinfo, tz_name = _resolve_dashboard_tzinfo()
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    now_local = now_utc.astimezone(tzinfo)
+    start_local = datetime.datetime.combine(now_local.date(), datetime.time.min, tzinfo=tzinfo)
+    start_utc = start_local.astimezone(datetime.timezone.utc)
+    recent_cutoff_utc = now_utc - datetime.timedelta(days=7)
+
+    live_payload = _get_driver_live_location_payload(driver_id, driver_username, db)
+    all_orders = list_orders(skip=0, limit=2500, source=None, q=None, date=None, db=db)
+
+    active_orders: List[Dict[str, Any]] = []
+    history_today: List[Dict[str, Any]] = []
+    history_recent: List[Dict[str, Any]] = []
+
+    for order_data in (all_orders or []):
+        if not isinstance(order_data, dict):
+            continue
+        status_val = _normalize_order_status(order_data.get('status'))
+        if status_val in ('preparado', 'enviado') and _driver_matches_assigned_order(order_data, driver_id=driver_id, driver_username=driver_username):
+            active_orders.append(order_data)
+
+        issue_at = _parse_datetime_utc(order_data.get('last_delivery_issue_at'))
+        delivered_at = _parse_datetime_utc(order_data.get('delivered_at'))
+        event_dt = delivered_at or issue_at
+        has_issue = bool(issue_at or order_data.get('last_delivery_issue_type') or (order_data.get('delivery_issues') or []))
+        if status_val != 'entregado' and delivered_at is None and not has_issue:
+            continue
+        if not _driver_matches_delivery_event(order_data, driver_id=driver_id, driver_username=driver_username):
+            continue
+        if event_dt is not None and event_dt >= recent_cutoff_utc:
+            history_recent.append(order_data)
+        if event_dt is not None and event_dt >= start_utc:
+            history_today.append(order_data)
+
+    active_orders = sorted(
+        active_orders,
+        key=lambda o: (o.get('route_order') is None, int(o.get('route_order') or 0), str(o.get('id') or '')),
+    )
+    history_recent = sorted(
+        history_recent,
+        key=lambda o: _parse_datetime_utc(o.get('delivered_at') or o.get('last_delivery_issue_at') or o.get('created_at')) or datetime.datetime.min.replace(tzinfo=datetime.timezone.utc),
+        reverse=True,
+    )[:12]
+
+    location_points = _get_driver_location_points(driver_id, driver_username, start_utc, db, live_payload=live_payload)
+    route_points = _build_driver_route_points(active_orders, live_payload=live_payload)
+
+    km_estimated = len(location_points) < 2
+    active_time_estimated = len(location_points) < 2
+
+    if len(location_points) >= 2:
+        km_travelled = _sum_driver_path_km(location_points)
+        first_dt = _parse_datetime_utc(location_points[0].get('recorded_at'))
+        last_dt = _parse_datetime_utc(location_points[-1].get('recorded_at'))
+        if first_dt is not None and last_dt is not None:
+            active_minutes = max(0, int(round((last_dt - first_dt).total_seconds() / 60.0)))
+        else:
+            active_minutes = 0
+    else:
+        km_travelled = _estimate_driver_path_km(active_orders, history_today, live_payload=live_payload, db=db)
+        active_minutes = _estimate_driver_active_minutes(active_orders, history_today, live_payload=live_payload)
+
+    completed_today = 0
+    issues_today = 0
+    for order_data in (history_today or []):
+        status_val = _normalize_order_status(order_data.get('status'))
+        if status_val == 'entregado' or order_data.get('delivered_at'):
+            completed_today += 1
+        elif order_data.get('last_delivery_issue_at') or order_data.get('last_delivery_issue_type') or (order_data.get('delivery_issues') or []):
+            issues_today += 1
+    efficiency_base = completed_today + issues_today + len(active_orders)
+    efficiency_pct = round((completed_today / efficiency_base) * 100.0, 1) if efficiency_base > 0 else None
+
+    return {
+        'driver': {
+            'id': driver_id,
+            'username': getattr(driver, 'username', None),
+            'full_name': getattr(driver, 'full_name', None),
+            'role': getattr(driver, 'role', None),
+            'zone': getattr(driver, 'zone', None),
+            'is_active': getattr(driver, 'is_active', None),
+        },
+        'live_location': live_payload,
+        'metrics': {
+            'window_label': 'Hoy',
+            'timezone': tz_name,
+            'km_travelled': km_travelled,
+            'active_minutes': active_minutes,
+            'completed_deliveries': completed_today,
+            'efficiency_pct': efficiency_pct,
+            'active_orders': len(active_orders),
+            'issues': issues_today,
+            'km_estimated': km_estimated,
+            'active_time_estimated': active_time_estimated,
+        },
+        'active_orders': active_orders,
+        'history_orders': history_recent,
+        'route_points': route_points,
+        'location_points': location_points,
+        'route_mode': 'live_trace' if len(location_points) >= 2 else 'planned_route',
+        'updated_at': now_utc,
+    }
+
+
 @app.get('/admin/deliveries', response_model=List[schemas.OrderResponse])
 def admin_deliveries(
     skip: int = 0,
@@ -10510,6 +11009,38 @@ def admin_deliveries(
         reverse=True,
     )
     return out
+
+
+@app.get('/admin/driver-insights')
+def admin_driver_insights(
+    request: Request,
+    driver_id: Optional[str] = None,
+    driver_username: Optional[str] = None,
+    current_admin=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role not in ('owner', 'admin'):
+        raise HTTPException(status_code=403, detail='No autorizado')
+    if driver_id is None and not str(driver_username or '').strip():
+        raise HTTPException(status_code=400, detail='missing_driver')
+
+    driver = None
+    if driver_id is not None:
+        try:
+            driver = crud.get_admin_user_by_id(db, int(driver_id))
+        except Exception:
+            driver = None
+    if driver is None and driver_username:
+        driver = crud.get_admin_user_by_username(db, str(driver_username).strip())
+    if driver is None:
+        raise HTTPException(status_code=404, detail='Repartidor no encontrado')
+    if str(getattr(driver, 'role', '') or '').strip().lower() != 'repartidor':
+        raise HTTPException(status_code=400, detail='Usuario no es repartidor')
+
+    payload = _build_driver_insights_payload(driver, db)
+    headers = _cors_headers_for_request(request)
+    return JSONResponse(status_code=200, content=jsonable_encoder(payload), headers=headers)
 
 
 def _maybe_mark_driver_departure_enviado(

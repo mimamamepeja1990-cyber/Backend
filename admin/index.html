@@ -145,6 +145,45 @@
             <h4>Repartidores en ruta</h4>
             <div id="driverMap" class="driver-map"></div>
             <div id="driverMapEmpty" class="driver-map-empty">Esperando ubicación de repartidores...</div>
+            <div id="driverInspector" class="driver-inspector">
+              <div class="driver-inspector-head">
+                <div>
+                  <div class="driver-inspector-kicker">Operativa en vivo</div>
+                  <h5 id="driverInspectorTitle">Seleccioná un repartidor</h5>
+                  <p id="driverInspectorMeta" class="driver-inspector-meta">Hacé click sobre un repartidor del mapa para ver pedidos activos, ruta e historial.</p>
+                </div>
+                <div id="driverInspectorTabs" class="driver-inspector-tabs" role="tablist" aria-label="Vistas del repartidor">
+                  <button type="button" class="btn tab active" data-driver-view="orders">Pedidos activos</button>
+                  <button type="button" class="btn tab" data-driver-view="route">Ruta</button>
+                  <button type="button" class="btn tab" data-driver-view="history">Historial</button>
+                </div>
+              </div>
+              <div class="driver-metrics-grid">
+                <div class="driver-metric-card">
+                  <span class="driver-metric-label">Km recorridos</span>
+                  <strong id="driverMetricKm" class="driver-metric-value">—</strong>
+                  <span id="driverMetricKmMeta" class="driver-metric-meta">Seleccioná un repartidor</span>
+                </div>
+                <div class="driver-metric-card">
+                  <span class="driver-metric-label">Tiempo activo</span>
+                  <strong id="driverMetricTime" class="driver-metric-value">—</strong>
+                  <span id="driverMetricTimeMeta" class="driver-metric-meta">Operativa de hoy</span>
+                </div>
+                <div class="driver-metric-card">
+                  <span class="driver-metric-label">Entregas completadas</span>
+                  <strong id="driverMetricCompleted" class="driver-metric-value">—</strong>
+                  <span id="driverMetricCompletedMeta" class="driver-metric-meta">Operativa de hoy</span>
+                </div>
+                <div class="driver-metric-card">
+                  <span class="driver-metric-label">Eficiencia</span>
+                  <strong id="driverMetricEfficiency" class="driver-metric-value">—</strong>
+                  <span id="driverMetricEfficiencyMeta" class="driver-metric-meta">Sobre pedidos gestionados</span>
+                </div>
+              </div>
+              <div id="driverInspectorBody" class="driver-inspector-body">
+                <div class="empty-note">Seleccioná un repartidor para explorar su operación.</div>
+              </div>
+            </div>
           </div>
         </div>
         </section>
