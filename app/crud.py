@@ -2750,6 +2750,8 @@ def get_orders(
         'last_delivery_issue_type', 'last_delivery_issue_note', 'last_delivery_issue_photo_url', 'last_delivery_issue_at',
         'last_delivery_issue_by_id', 'last_delivery_issue_by_username',
         'cancel_reason',
+        'cancelled_at', 'cancelled_by_user_id',
+        'refund_reference', 'refund_status', 'refunded_at', 'refunded_amount',
     ]
     for c in optional:
         if c in existing:

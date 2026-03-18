@@ -286,6 +286,12 @@ class OrderResponse(BaseModel):
     last_delivery_issue_by_id: Optional[int] = None
     last_delivery_issue_by_username: Optional[str] = None
     cancel_reason: Optional[str] = None
+    cancelled_at: Optional[datetime] = None
+    cancelled_by_user_id: Optional[int] = None
+    refund_reference: Optional[str] = None
+    refund_status: Optional[str] = None
+    refunded_at: Optional[datetime] = None
+    refunded_amount: Optional[float] = None
 
 
 class OrderDeliveryIssueCreate(BaseModel):
@@ -298,6 +304,22 @@ class OrderDeliveryIssueResponse(BaseModel):
     action: str
     order: OrderResponse
     issue: DeliveryIssue
+
+
+class OrderCustomerCancelRequest(BaseModel):
+    reason: Optional[str] = None
+
+
+class OrderCustomerCancelResponse(BaseModel):
+    action: str
+    order: OrderResponse
+    refund_required: bool = False
+    refund_processed: bool = False
+    refund_status: Optional[str] = None
+    refund_reference: Optional[str] = None
+    refunded_at: Optional[datetime] = None
+    refunded_amount: Optional[float] = None
+    message: Optional[str] = None
 
 
 class DriverNextZoneUpdate(BaseModel):

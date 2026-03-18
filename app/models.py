@@ -132,6 +132,12 @@ class Order(Base):
     last_delivery_issue_by_id = Column(Integer, nullable=True)
     last_delivery_issue_by_username = Column(String(80), nullable=True)
     cancel_reason = Column(String(240), nullable=True)
+    cancelled_at = Column(DateTime(timezone=True), nullable=True)
+    cancelled_by_user_id = Column(Integer, nullable=True)
+    refund_reference = Column(String(200), nullable=True)
+    refund_status = Column(String(50), nullable=True)
+    refunded_at = Column(DateTime(timezone=True), nullable=True)
+    refunded_amount = Column(Float, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

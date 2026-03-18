@@ -408,6 +408,12 @@ def _startup_bootstrap_sync() -> None:
                 'last_delivery_issue_by_id': 'INTEGER',
                 'last_delivery_issue_by_username': 'VARCHAR(80)',
                 'cancel_reason': 'VARCHAR(240)',
+                'cancelled_at': 'TIMESTAMP',
+                'cancelled_by_user_id': 'INTEGER',
+                'refund_reference': 'VARCHAR(200)',
+                'refund_status': 'VARCHAR(50)',
+                'refunded_at': 'TIMESTAMP',
+                'refunded_amount': 'FLOAT',
             }
 
             try:
@@ -1178,6 +1184,8 @@ def _order_select_columns(existing_cols: Optional[set] = None) -> List[str]:
         'last_delivery_issue_type', 'last_delivery_issue_note', 'last_delivery_issue_photo_url', 'last_delivery_issue_at',
         'last_delivery_issue_by_id', 'last_delivery_issue_by_username',
         'cancel_reason',
+        'cancelled_at', 'cancelled_by_user_id',
+        'refund_reference', 'refund_status', 'refunded_at', 'refunded_amount',
     ]
     for c in optional:
         if c in existing_cols and c not in cols:
@@ -1211,6 +1219,11 @@ def _normalize_order_response_payload(order_data: Optional[Dict[str, Any]]) -> D
         od['closed_attempts'] = int(od.get('closed_attempts') or 0)
     except Exception:
         od['closed_attempts'] = 0
+    try:
+        refunded_amount = od.get('refunded_amount')
+        od['refunded_amount'] = float(refunded_amount) if refunded_amount is not None else None
+    except Exception:
+        od['refunded_amount'] = None
     latest_issue = _latest_delivery_issue(od.get('delivery_issues'))
     if latest_issue:
         od.setdefault('last_delivery_issue_type', latest_issue.get('type'))
@@ -2538,6 +2551,25 @@ def _build_tracking_button_html(order_data: Optional[Dict[str, Any]]) -> str:
     )
 
 
+
+def _build_my_orders_guide_html() -> str:
+    return (
+        "<div style='margin:18px 0 0 0;padding:16px;border:1px solid #fed7aa;background:#fff7ed;border-radius:12px;'>"
+        "<div style='font-size:14px;font-weight:800;color:#9a3412;margin:0 0 8px 0;'>Como ver tu pedido en Mi cuenta</div>"
+        "<ol style='margin:0;padding-left:18px;color:#7c2d12;font-size:13px;line-height:1.7;'>"
+        "<li>Ingresa al catalogo con tu cuenta.</li>"
+        "<li>Abre el apartado <strong>Mi cuenta</strong>.</li>"
+        "<li>Toca <strong>Mis pedidos</strong>.</li>"
+        "<li>Busca tu pedido pendiente.</li>"
+        "</ol>"
+        "<p style='margin:10px 0 0 0;font-size:13px;color:#7c2d12;'>"
+        "Si el pedido sigue pendiente (recibido o visto), desde esa pantalla podes cancelarlo. "
+        "Si pagaste con Mercado Pago y el cobro ya estaba aprobado, procesamos el reembolso automaticamente."
+        "</p>"
+        "</div>"
+    )
+
+
 def _build_brand_footer_text(brand_name: str) -> str:
     parts: List[str] = []
     try:
@@ -2691,6 +2723,7 @@ def _build_order_seen_html(order_data: Dict[str, Any]) -> str:
         if logo_url else ""
     )
     tracking_button = _build_tracking_button_html(order_data)
+    guide_html = _build_my_orders_guide_html()
     footer_text = html_escape(_build_brand_footer_text(str(os.environ.get('RESEND_BRAND_NAME') or 'DistriAr')))
 
     return (
@@ -3031,6 +3064,7 @@ def _build_order_confirmation_html(order_data: Dict[str, Any]) -> str:
         "</tr></thead>"
         f"<tbody>{''.join(rows)}</tbody>"
         "</table>"
+        f"{guide_html}"
         "<p style='margin:18px 0 0 0;font-size:12px;color:#64748b;'>Si necesitas ayuda, responde este correo y te asistimos.</p>"
         f"{tracking_button}"
         "</td></tr>"
@@ -3492,6 +3526,171 @@ async def _send_order_closed_cancellation_email(order_data: Optional[Dict[str, A
 
     logger.info(
         'Resend closed-cancel sent for order id=%s to=%s resend_id=%s',
+        order_payload.get('id'),
+        to_email,
+        resend_id,
+    )
+    return True
+
+
+
+def _build_order_customer_cancel_subject(order_data: Optional[Dict[str, Any]]) -> str:
+    order_payload = _enrich_order_contact_fields(order_data if isinstance(order_data, dict) else {})
+    order_id = order_payload.get('id')
+    return f"Cancelamos tu pedido #{order_id}" if order_id is not None else "Cancelamos tu pedido"
+
+
+
+def _build_order_customer_cancel_html(order_data: Optional[Dict[str, Any]]) -> str:
+    order_payload = _enrich_order_contact_fields(order_data if isinstance(order_data, dict) else {})
+    customer_name = html_escape(str(order_payload.get('user_full_name') or ''))
+    order_id = html_escape(str(order_payload.get('id') or ''))
+    cancel_reason = html_escape(str(order_payload.get('cancel_reason') or 'Cancelado por el cliente desde Mi cuenta.'))
+    support_email = html_escape(str(os.environ.get('RESEND_REPLY_TO') or ''))
+    greeting = f"Hola {customer_name}," if customer_name else "Hola,"
+    tracking_button = _build_tracking_button_html(order_payload)
+    guide_html = _build_my_orders_guide_html()
+
+    payment_method = str(order_payload.get('payment_method') or '').strip().lower()
+    payment_status = _normalize_mp_payment_status(order_payload.get('payment_status'))
+    refund_status = _normalize_mp_refund_status(order_payload.get('refund_status'))
+    refund_reference = html_escape(str(order_payload.get('refund_reference') or ''))
+    refunded_amount = ''
+    if order_payload.get('refunded_amount') is not None:
+        refunded_amount = _format_ars_money(order_payload.get('refunded_amount'))
+
+    if payment_method in ('mercadopago', 'mp', 'mercado_pago') and payment_status == 'refunded':
+        refund_line = "El pago aprobado de Mercado Pago fue reintegrado automaticamente."
+        if refunded_amount:
+            refund_line += f" Importe reintegrado: {refunded_amount}."
+        if refund_reference:
+            refund_line += f" Referencia del reembolso: {refund_reference}."
+    elif payment_method in ('mercadopago', 'mp', 'mercado_pago') and refund_status == 'pending':
+        refund_line = "El pago aprobado de Mercado Pago ya tiene un reembolso iniciado y te avisaremos ante cualquier novedad."
+    elif payment_method in ('mercadopago', 'mp', 'mercado_pago'):
+        refund_line = "El pedido fue cancelado antes de confirmar un cobro aprobado en Mercado Pago."
+    else:
+        refund_line = "El pedido fue cancelado correctamente."
+
+    support_line = (
+        f"Si necesitas ayuda, podes escribirnos a {support_email}."
+        if support_email else
+        "Si necesitas ayuda, responde este mensaje."
+    )
+
+    return (
+        "<div style='font-family:Arial,sans-serif;max-width:640px;margin:0 auto;padding:24px;color:#0f172a;'>"
+        f"<h2 style='margin:0 0 16px;'>Cancelamos tu pedido #{order_id}</h2>"
+        f"<p style='margin:0 0 12px;'>{greeting}</p>"
+        "<p style='margin:0 0 12px;'>Recibimos tu solicitud de cancelacion desde Mi cuenta y el pedido ya fue actualizado.</p>"
+        f"<p style='margin:0 0 12px;'><strong>Motivo registrado:</strong> {cancel_reason}</p>"
+        f"<p style='margin:0 0 12px;'>{html_escape(refund_line)}</p>"
+        "<p style='margin:0 0 12px;'>Puedes revisar el estado actualizado entrando a <strong>Mi cuenta</strong> y luego a <strong>Mis pedidos</strong>.</p>"
+        f"{guide_html}"
+        f"{tracking_button}"
+        f"<p style='margin:16px 0 0 0;'>{support_line}</p>"
+        "</div>"
+    )
+
+
+async def _send_order_customer_cancellation_email(order_data: Optional[Dict[str, Any]]) -> bool:
+    def _masked_key(v: str) -> str:
+        if not v:
+            return ''
+        if len(v) <= 8:
+            return '*' * len(v)
+        return f"{v[:4]}...{v[-4:]}"
+
+    enabled_raw = (os.environ.get('RESEND_ORDER_CUSTOMER_CANCEL_EMAIL_ENABLED') or 'true').strip().lower()
+    if enabled_raw in ('0', 'false', 'no', 'off'):
+        logger.info('RESEND_ORDER_CUSTOMER_CANCEL_EMAIL_ENABLED disabled. Skipping customer-cancel email.')
+        return False
+
+    api_key = (os.environ.get('RESEND_API_KEY') or '').strip()
+    if not api_key:
+        logger.warning('RESEND_API_KEY is not configured. Skipping customer-cancel email.')
+        return False
+    if api_key == 're_xxxxxxxxx':
+        logger.warning("RESEND_API_KEY is still 're_xxxxxxxxx'. Replace it with your real API key.")
+        return False
+
+    order_payload = _enrich_order_contact_fields(order_data if isinstance(order_data, dict) else {})
+    to_email = _extract_customer_email_for_order(order_payload, order_payload, None)
+    force_to_email = _normalize_email(os.environ.get('RESEND_FORCE_TO_EMAIL'))
+    if force_to_email:
+        logger.info(
+            'RESEND_FORCE_TO_EMAIL active: overriding recipient %s -> %s for customer-cancel order id=%s',
+            to_email,
+            force_to_email,
+            order_payload.get('id'),
+        )
+        to_email = force_to_email
+    if not to_email:
+        logger.info(
+            'Skipping customer-cancel email: no customer email found for order id=%s',
+            order_payload.get('id'),
+        )
+        return False
+
+    from_email = (os.environ.get('RESEND_FROM_EMAIL') or 'onboarding@resend.dev').strip()
+    logger.info(
+        'Resend customer-cancel send attempt order id=%s to=%s from=%s key=%s',
+        order_payload.get('id'),
+        to_email,
+        from_email,
+        _masked_key(api_key),
+    )
+
+    send_payload = {
+        'from': from_email,
+        'to': [to_email],
+        'subject': _build_order_customer_cancel_subject(order_payload),
+        'html': _build_order_customer_cancel_html(order_payload),
+    }
+    reply_to = _normalize_email(os.environ.get('RESEND_REPLY_TO'))
+    if reply_to:
+        send_payload['reply_to'] = reply_to
+
+    try:
+        timeout_seconds = float(os.environ.get('RESEND_TIMEOUT_SECONDS') or '12')
+    except Exception:
+        timeout_seconds = 12.0
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            response = await client.post(
+                'https://api.resend.com/emails',
+                headers={
+                    'Authorization': f'Bearer {api_key}',
+                    'Content-Type': 'application/json',
+                },
+                json=send_payload,
+            )
+    except Exception as e:
+        logger.warning('Resend request failed for customer-cancel order id=%s: %s', order_payload.get('id'), e)
+        return False
+
+    if response.status_code >= 400:
+        try:
+            body_preview = response.text[:300]
+        except Exception:
+            body_preview = '<unavailable>'
+        logger.warning(
+            'Resend customer-cancel failed for order id=%s status=%s body=%s',
+            order_payload.get('id'),
+            response.status_code,
+            body_preview,
+        )
+        return False
+
+    resend_id = None
+    try:
+        resend_id = (response.json() or {}).get('id')
+    except Exception:
+        resend_id = None
+
+    logger.info(
+        'Resend customer-cancel sent for order id=%s to=%s resend_id=%s',
         order_payload.get('id'),
         to_email,
         resend_id,
@@ -4157,6 +4356,12 @@ def _run_add_user_columns() -> dict:
         ('last_delivery_issue_by_id', 'INTEGER'),
         ('last_delivery_issue_by_username', 'VARCHAR(80)'),
         ('cancel_reason', 'VARCHAR(240)'),
+        ('cancelled_at', 'TIMESTAMP'),
+        ('cancelled_by_user_id', 'INTEGER'),
+        ('refund_reference', 'VARCHAR(200)'),
+        ('refund_status', 'VARCHAR(50)'),
+        ('refunded_at', 'TIMESTAMP'),
+        ('refunded_amount', 'FLOAT'),
     ]
     dialect = engine.dialect.name if engine and getattr(engine, 'dialect', None) else ''
     try:
@@ -8006,6 +8211,251 @@ def _normalize_mp_payment_status(value: Optional[str]) -> str:
     return 'mp_pending'
 
 
+
+def _is_mercadopago_payment_method(value: Any) -> bool:
+    raw = str(value or '').strip().lower()
+    return raw in ('mercadopago', 'mp', 'mercado_pago')
+
+
+
+def _normalize_mp_refund_status(value: Any) -> str:
+    raw = str(value or '').strip().lower()
+    if raw in ('approved', 'refunded'):
+        return 'approved'
+    if raw in ('pending', 'in_process', 'inprocess'):
+        return 'pending'
+    if raw in ('rejected', 'failed', 'cancelled', 'canceled'):
+        return 'failed'
+    return raw or 'approved'
+
+
+async def _resolve_mercadopago_payment_for_order(order_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    order_payload = _enrich_order_contact_fields(order_data if isinstance(order_data, dict) else {})
+    access_token = (os.environ.get('MERCADOPAGO_ACCESS_TOKEN') or '').strip()
+    if not access_token:
+        return {'ok': False, 'reason': 'missing_access_token'}
+
+    headers = {'Authorization': f'Bearer {access_token}'}
+    reference = str(order_payload.get('payment_reference') or '').strip()
+    order_id = str(order_payload.get('id') or '').strip()
+    timeout = httpx.Timeout(20.0, connect=8.0)
+
+    def _build_result(payment_payload: Dict[str, Any]) -> Dict[str, Any]:
+        payment_id = str(payment_payload.get('id') or '').strip()
+        payment_status = _normalize_mp_payment_status(payment_payload.get('status'))
+        return {
+            'ok': bool(payment_id),
+            'payment_id': payment_id or None,
+            'payment_reference': payment_id or reference or None,
+            'payment_status': payment_status,
+            'payload': payment_payload,
+        }
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            if reference.isdigit():
+                resp = await client.get(
+                    f'https://api.mercadopago.com/v1/payments/{reference}',
+                    headers=headers,
+                )
+                if resp.status_code < 400:
+                    try:
+                        return _build_result(resp.json() or {})
+                    except Exception:
+                        pass
+                else:
+                    logger.warning(
+                        'Mercado Pago payment lookup during cancel failed status=%s body=%s',
+                        resp.status_code,
+                        (resp.text or '')[:500],
+                    )
+
+            if not order_id:
+                return {'ok': False, 'reason': 'missing_order_id'}
+
+            resp = await client.get(
+                'https://api.mercadopago.com/v1/payments/search',
+                headers=headers,
+                params={
+                    'external_reference': order_id,
+                    'sort': 'date_created',
+                    'criteria': 'desc',
+                    'limit': 5,
+                },
+            )
+    except Exception as e:
+        logger.warning('Mercado Pago payment resolve failed for order id=%s: %s', order_id or None, e)
+        return {'ok': False, 'reason': 'lookup_failed', 'detail': str(e)}
+
+    if resp.status_code >= 400:
+        logger.warning(
+            'Mercado Pago payment search during cancel failed status=%s body=%s',
+            resp.status_code,
+            (resp.text or '')[:500],
+        )
+        return {'ok': False, 'reason': 'search_failed', 'status_code': resp.status_code}
+
+    try:
+        data = resp.json() or {}
+    except Exception:
+        return {'ok': False, 'reason': 'invalid_search_response'}
+
+    results = data.get('results') if isinstance(data, dict) else []
+    if not isinstance(results, list) or not results:
+        return {'ok': False, 'reason': 'payment_not_found'}
+
+    def _priority(item: Dict[str, Any]) -> tuple:
+        status_value = _normalize_mp_payment_status(item.get('status'))
+        order = {
+            'approved': 0,
+            'refunded': 1,
+            'in_process': 2,
+            'mp_pending': 2,
+            'rejected': 3,
+        }.get(status_value, 4)
+        return (order, -int(item.get('id') or 0) if str(item.get('id') or '').isdigit() else 0)
+
+    best = sorted([item for item in results if isinstance(item, dict)], key=_priority)[0]
+    return _build_result(best)
+
+
+async def _refund_mercadopago_payment_for_order(order_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    order_payload = _enrich_order_contact_fields(order_data if isinstance(order_data, dict) else {})
+    access_token = (os.environ.get('MERCADOPAGO_ACCESS_TOKEN') or '').strip()
+    if not access_token:
+        return {
+            'ok': False,
+            'reason': 'missing_access_token',
+            'message': 'Mercado Pago no esta configurado para procesar reintegros.',
+        }
+
+    resolved = await _resolve_mercadopago_payment_for_order(order_payload)
+    if not resolved.get('ok'):
+        return {
+            **resolved,
+            'message': 'No pudimos verificar el pago en Mercado Pago para procesar el reintegro.',
+        }
+
+    payment_id = str(resolved.get('payment_id') or '').strip()
+    payment_status = _normalize_mp_payment_status(resolved.get('payment_status'))
+    payment_reference = str(resolved.get('payment_reference') or payment_id or '').strip() or None
+    if not payment_id:
+        return {
+            'ok': False,
+            'reason': 'missing_payment_id',
+            'message': 'No encontramos el pago de Mercado Pago para reintegrar.',
+        }
+
+    if payment_status == 'refunded':
+        return {
+            'ok': True,
+            'refund_required': True,
+            'refund_processed': True,
+            'already_refunded': True,
+            'payment_id': payment_id,
+            'payment_reference': payment_reference,
+            'payment_status': 'refunded',
+            'refund_reference': str(order_payload.get('refund_reference') or payment_id),
+            'refund_status': 'approved',
+            'refunded_at': order_payload.get('refunded_at'),
+            'refunded_amount': order_payload.get('refunded_amount'),
+        }
+
+    if payment_status != 'approved':
+        return {
+            'ok': True,
+            'refund_required': False,
+            'refund_processed': False,
+            'payment_id': payment_id,
+            'payment_reference': payment_reference,
+            'payment_status': payment_status,
+        }
+
+    headers = {
+        'Authorization': f'Bearer {access_token}',
+        'Content-Type': 'application/json',
+        'X-Idempotency-Key': f'refund-order-{order_payload.get("id")}-{payment_id}',
+    }
+    timeout = httpx.Timeout(25.0, connect=10.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f'https://api.mercadopago.com/v1/payments/{payment_id}/refunds',
+                headers=headers,
+                json={},
+            )
+    except Exception as e:
+        logger.warning('Mercado Pago refund request failed for payment_id=%s: %s', payment_id, e)
+        return {
+            'ok': False,
+            'reason': 'refund_request_failed',
+            'detail': str(e),
+            'message': 'No pudimos contactar a Mercado Pago para procesar el reintegro.',
+        }
+
+    raw_text = ''
+    try:
+        raw_text = response.text or ''
+    except Exception:
+        raw_text = ''
+
+    if response.status_code >= 400:
+        lowered = raw_text.lower()
+        if 'already' in lowered and 'refund' in lowered:
+            return {
+                'ok': True,
+                'refund_required': True,
+                'refund_processed': True,
+                'already_refunded': True,
+                'payment_id': payment_id,
+                'payment_reference': payment_reference,
+                'payment_status': 'refunded',
+                'refund_reference': str(order_payload.get('refund_reference') or payment_id),
+                'refund_status': 'approved',
+                'refunded_at': order_payload.get('refunded_at'),
+                'refunded_amount': order_payload.get('refunded_amount'),
+            }
+        logger.warning(
+            'Mercado Pago refund failed status=%s body=%s',
+            response.status_code,
+            raw_text[:500],
+        )
+        return {
+            'ok': False,
+            'reason': 'refund_failed',
+            'status_code': response.status_code,
+            'detail': raw_text[:500],
+            'message': 'Mercado Pago no pudo completar el reintegro automaticamente.',
+        }
+
+    try:
+        data = response.json() or {}
+    except Exception:
+        data = {}
+
+    refund_status = _normalize_mp_refund_status(data.get('status'))
+    refunded_at = _parse_datetime_utc(data.get('date_created') or data.get('date_last_updated'))
+    refunded_amount = None
+    try:
+        amount_raw = data.get('amount') or data.get('transaction_amount')
+        refunded_amount = float(amount_raw) if amount_raw is not None else None
+    except Exception:
+        refunded_amount = None
+
+    return {
+        'ok': True,
+        'refund_required': True,
+        'refund_processed': True,
+        'payment_id': payment_id,
+        'payment_reference': payment_reference,
+        'payment_status': 'refunded' if refund_status == 'approved' else 'approved',
+        'refund_reference': str(data.get('id') or payment_id),
+        'refund_status': refund_status,
+        'refunded_at': refunded_at,
+        'refunded_amount': refunded_amount,
+    }
+
+
 async def _sync_mercadopago_payment(
     payment_id: Optional[str],
     external_reference: Optional[str],
@@ -9469,6 +9919,8 @@ def list_orders(
                     'last_delivery_issue_type', 'last_delivery_issue_note', 'last_delivery_issue_photo_url', 'last_delivery_issue_at',
                     'last_delivery_issue_by_id', 'last_delivery_issue_by_username',
                     'cancel_reason',
+                    'cancelled_at', 'cancelled_by_user_id',
+                    'refund_reference', 'refund_status', 'refunded_at', 'refunded_amount',
                 ]
             }
             customer_type_value = _normalize_customer_type(od.get('customer_type'))
@@ -9521,6 +9973,8 @@ def list_orders(
                             'delivery_lat', 'delivery_lon',
                             'route_id', 'route_order', 'route_generated_at',
                             'delivered_at', 'delivered_by_id', 'delivered_by_username',
+                            'cancelled_at', 'cancelled_by_user_id',
+                            'refund_reference', 'refund_status', 'refunded_at', 'refunded_amount',
                         ):
                             if not od.get(f) and p.get(f):
                                 od[f] = p.get(f)
@@ -10812,6 +11266,226 @@ async def create_order_delivery_issue(
         'action': action,
         'order': updated_order,
         'issue': issue_out,
+    }
+
+
+@app.post('/orders/{order_id}/cancel', response_model=schemas.OrderCustomerCancelResponse)
+async def cancel_customer_order(
+    order_id: str,
+    payload: Optional[schemas.OrderCustomerCancelRequest] = Body(default=None),
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        _run_add_user_columns()
+    except Exception:
+        logger.exception('cancel_customer_order: could not run orders optional-columns migration')
+
+    try:
+        insp = inspect(engine)
+        existing_cols = {c['name'] for c in insp.get_columns('orders')}
+    except Exception:
+        existing_cols = set()
+
+    use_id_int = False
+    id_param: Any = order_id
+    try:
+        id_param = int(order_id)
+        use_id_int = True
+    except Exception:
+        id_param = str(order_id)
+
+    order_data = _fetch_order_snapshot(id_param, use_id_int=use_id_int, existing_cols=existing_cols)
+    if not order_data:
+        raise HTTPException(status_code=404, detail='Pedido no encontrado')
+
+    order_payload = _enrich_order_contact_fields(order_data)
+    current_user_id = getattr(current_user, 'id', None)
+    current_email = _normalize_email(getattr(current_user, 'email', None))
+    order_user_id = order_payload.get('user_id')
+    order_email = _extract_customer_email_for_order(order_payload, order_payload, {'email': current_email, 'sub': current_email})
+
+    owns_order = False
+    if current_user_id is not None and order_user_id is not None and str(order_user_id) == str(current_user_id):
+        owns_order = True
+    if not owns_order and current_email and order_email and current_email == order_email:
+        owns_order = True
+    if not owns_order:
+        raise HTTPException(status_code=403, detail='Este pedido no pertenece a tu cuenta')
+
+    current_status = _normalize_order_status(order_payload.get('status'))
+    if current_status == 'cancelado':
+        raise HTTPException(status_code=409, detail='El pedido ya esta cancelado')
+    if current_status not in ('recibido', 'visto'):
+        raise HTTPException(status_code=409, detail='Este pedido ya no se puede cancelar desde Mi cuenta')
+
+    cancel_reason = str(getattr(payload, 'reason', '') if payload is not None else '').strip()
+    if not cancel_reason:
+        cancel_reason = 'Cancelado por el cliente desde Mi cuenta.'
+    cancel_reason = cancel_reason[:240]
+
+    payment_method = str(order_payload.get('payment_method') or '').strip().lower()
+    payment_reference = str(order_payload.get('payment_reference') or '').strip() or None
+    payment_status = _normalize_mp_payment_status(order_payload.get('payment_status'))
+    refund_result: Dict[str, Any] = {
+        'ok': True,
+        'refund_required': False,
+        'refund_processed': False,
+        'payment_status': payment_status,
+        'payment_reference': payment_reference,
+    }
+
+    if _is_mercadopago_payment_method(payment_method):
+        resolved_payment = await _resolve_mercadopago_payment_for_order(order_payload)
+        if resolved_payment.get('ok'):
+            payment_status = _normalize_mp_payment_status(resolved_payment.get('payment_status'))
+            payment_reference = str(resolved_payment.get('payment_reference') or payment_reference or '').strip() or None
+        elif payment_status == 'approved':
+            raise HTTPException(
+                status_code=502,
+                detail='No pudimos verificar el pago de Mercado Pago para procesar el reintegro.',
+            )
+
+        if payment_status == 'approved':
+            refund_input = dict(order_payload)
+            refund_input['payment_status'] = payment_status
+            refund_input['payment_reference'] = payment_reference
+            refund_result = await _refund_mercadopago_payment_for_order(refund_input)
+            if not refund_result.get('ok') or not refund_result.get('refund_processed'):
+                raise HTTPException(
+                    status_code=502,
+                    detail=refund_result.get('message') or 'No pudimos procesar el reintegro automaticamente.',
+                )
+        elif payment_status == 'refunded':
+            refund_result = {
+                'ok': True,
+                'refund_required': True,
+                'refund_processed': True,
+                'payment_status': 'refunded',
+                'payment_reference': payment_reference,
+                'refund_reference': str(order_payload.get('refund_reference') or payment_reference or ''),
+                'refund_status': str(order_payload.get('refund_status') or 'approved'),
+                'refunded_at': order_payload.get('refunded_at'),
+                'refunded_amount': order_payload.get('refunded_amount'),
+            }
+        else:
+            normalized_cancelled_payment = 'cancelled' if payment_status in ('mp_pending', 'in_process') else payment_status
+            refund_result = {
+                'ok': True,
+                'refund_required': False,
+                'refund_processed': False,
+                'payment_status': normalized_cancelled_payment,
+                'payment_reference': payment_reference,
+            }
+
+    now_ts = datetime.datetime.now(datetime.timezone.utc)
+    payment_status_update = refund_result.get('payment_status') if refund_result.get('payment_status') else payment_status
+    payment_reference_update = str(refund_result.get('payment_reference') or payment_reference or '').strip() or None
+    refund_reference = str(refund_result.get('refund_reference') or '').strip() or None
+    refund_status = str(refund_result.get('refund_status') or '').strip() or None
+    refunded_at = refund_result.get('refunded_at')
+    refunded_amount = refund_result.get('refunded_amount')
+    try:
+        refunded_amount = float(refunded_amount) if refunded_amount is not None else None
+    except Exception:
+        refunded_amount = None
+
+    set_parts = []
+    params: Dict[str, Any] = {'id': id_param}
+
+    def _set_column(column: str, value: Any) -> None:
+        if column not in existing_cols:
+            return
+        set_parts.append(f"{column} = :{column}")
+        params[column] = value
+
+    _set_column('status', 'cancelado')
+    _set_column('cancel_reason', cancel_reason)
+    _set_column('cancelled_at', now_ts)
+    _set_column('cancelled_by_user_id', current_user_id)
+    if payment_status_update:
+        _set_column('payment_status', str(payment_status_update))
+    if payment_reference_update:
+        _set_column('payment_reference', payment_reference_update)
+    if refund_reference:
+        _set_column('refund_reference', refund_reference)
+    if refund_status:
+        _set_column('refund_status', refund_status)
+    if refunded_at is not None:
+        _set_column('refunded_at', refunded_at)
+    if refunded_amount is not None:
+        _set_column('refunded_amount', refunded_amount)
+
+    for column in (
+        'route_id', 'route_order', 'route_generated_at',
+        'assigned_driver_id', 'assigned_driver_username', 'assigned_driver_name', 'assigned_driver_zone', 'assigned_at',
+    ):
+        if column in existing_cols:
+            set_parts.append(f"{column} = NULL")
+
+    if not set_parts:
+        raise HTTPException(status_code=500, detail='No se pudo actualizar el pedido')
+
+    where_sql = 'id = :id' if use_id_int else 'CAST(id AS TEXT) = :id'
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(f"UPDATE orders SET {', '.join(set_parts)} WHERE {where_sql}"),
+                params,
+            )
+    except Exception as e:
+        logger.exception('cancel_customer_order failed: %s', e)
+        raise HTTPException(status_code=500, detail='No se pudo cancelar el pedido')
+
+    updated_order = _fetch_order_snapshot(id_param, use_id_int=use_id_int, existing_cols=existing_cols) or _normalize_order_response_payload({
+        **order_payload,
+        'status': 'cancelado',
+        'cancel_reason': cancel_reason,
+        'cancelled_at': now_ts,
+        'cancelled_by_user_id': current_user_id,
+        'payment_status': payment_status_update,
+        'payment_reference': payment_reference_update,
+        'refund_reference': refund_reference,
+        'refund_status': refund_status,
+        'refunded_at': refunded_at,
+        'refunded_amount': refunded_amount,
+        'route_id': None,
+        'route_order': None,
+        'assigned_driver_id': None,
+        'assigned_driver_username': None,
+        'assigned_driver_name': None,
+        'assigned_driver_zone': None,
+        'assigned_at': None,
+    })
+
+    try:
+        await push_event({'action': 'order_updated', 'order': updated_order})
+    except Exception:
+        pass
+
+    try:
+        await _send_order_customer_cancellation_email(updated_order)
+    except Exception:
+        logger.exception('Could not send customer cancellation email for order id=%s', id_param)
+
+    if refund_result.get('refund_required') and refund_result.get('refund_processed'):
+        if str(payment_status_update or '').strip().lower() == 'refunded':
+            message = 'Pedido cancelado y reembolso procesado.'
+        else:
+            message = 'Pedido cancelado. El reembolso ya fue iniciado.'
+    else:
+        message = 'Pedido cancelado correctamente.'
+
+    return {
+        'action': 'cancelled',
+        'order': updated_order,
+        'refund_required': bool(refund_result.get('refund_required')),
+        'refund_processed': bool(refund_result.get('refund_processed')),
+        'refund_status': refund_status,
+        'refund_reference': refund_reference,
+        'refunded_at': refunded_at,
+        'refunded_amount': refunded_amount,
+        'message': message,
     }
 
 
