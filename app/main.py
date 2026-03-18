@@ -225,6 +225,10 @@ DRIVER_LOCATION_MAX_AGE_SEC = int(float(os.environ.get('DRIVER_LOCATION_MAX_AGE_
 DRIVER_LOCATION_STORE_HISTORY = _is_truthy(os.environ.get('DRIVER_LOCATION_STORE_HISTORY') or os.environ.get('DRIVER_LOCATION_HISTORY'))
 DRIVER_DEPOT_RADIUS_M = float(os.environ.get('DRIVER_DEPOT_RADIUS_M') or 30)
 ORDER_AUTO_MILESTONES = _is_truthy(os.environ.get('ORDER_AUTO_MILESTONES') or os.environ.get('ORDER_AUTO_STATUS_BY_TIME') or '0')
+OSRM_ROUTE_BASE = str(os.environ.get('OSRM_ROUTE_BASE') or 'https://router.project-osrm.org').strip().rstrip('/')
+OSRM_ROUTE_TIMEOUT_SEC = float(os.environ.get('OSRM_ROUTE_TIMEOUT_SEC') or 8)
+OSRM_ROUTE_MAX_WAYPOINTS = max(2, min(int(float(os.environ.get('OSRM_ROUTE_MAX_WAYPOINTS') or 20)), 25))
+OSRM_TRACE_MAX_POINTS = max(2, min(int(float(os.environ.get('OSRM_TRACE_MAX_POINTS') or 24)), 40))
 
 _GEOCODE_CACHE: Dict[str, Dict[str, Any]] = {}
 _GEOCODE_CACHE_LOCK = threading.Lock()
@@ -10631,6 +10635,182 @@ def _sample_route_points(points: List[Dict[str, Any]], max_points: int = 120) ->
     return sampled
 
 
+def _merge_geo_path_points(base: List[Dict[str, float]], extra: List[Dict[str, float]]) -> List[Dict[str, float]]:
+    merged: List[Dict[str, float]] = list(base or [])
+    for point in (extra or []):
+        lat = _coerce_coord(point.get('lat') if isinstance(point, dict) else None)
+        lon = _coerce_coord(point.get('lon') if isinstance(point, dict) else None)
+        if lat is None or lon is None:
+            continue
+        next_point = {'lat': float(lat), 'lon': float(lon)}
+        if merged:
+            prev = merged[-1]
+            if abs(prev['lat'] - next_point['lat']) < 0.000001 and abs(prev['lon'] - next_point['lon']) < 0.000001:
+                continue
+        merged.append(next_point)
+    return merged
+
+
+def _fetch_osrm_route_path(nodes: List[Tuple[float, float]]) -> List[Dict[str, float]]:
+    if not OSRM_ROUTE_BASE:
+        return []
+    cleaned: List[Tuple[float, float]] = []
+    for lat, lon in (nodes or []):
+        if not _is_mendoza_point(lat, lon):
+            continue
+        cleaned.append((float(lat), float(lon)))
+    if len(cleaned) < 2:
+        return [{'lat': float(lat), 'lon': float(lon)} for lat, lon in cleaned]
+
+    out: List[Dict[str, float]] = []
+    try:
+        with httpx.Client(timeout=OSRM_ROUTE_TIMEOUT_SEC) as client:
+            cursor = 0
+            while cursor < len(cleaned) - 1:
+                chunk = cleaned[cursor:min(len(cleaned), cursor + OSRM_ROUTE_MAX_WAYPOINTS)]
+                if len(chunk) < 2:
+                    break
+                coords = ';'.join([
+                    f"{lon:.6f},{lat:.6f}"
+                    for lat, lon in chunk
+                ])
+                resp = client.get(
+                    f"{OSRM_ROUTE_BASE}/route/v1/driving/{coords}",
+                    params={'overview': 'full', 'geometries': 'geojson', 'steps': 'false'},
+                )
+                resp.raise_for_status()
+                payload = resp.json() if resp.content else {}
+                if str(payload.get('code') or '') != 'Ok':
+                    return []
+                geometry = (((payload.get('routes') or [{}])[0]).get('geometry') or {}).get('coordinates') or []
+                segment: List[Dict[str, float]] = []
+                for coord in geometry:
+                    if not isinstance(coord, (list, tuple)) or len(coord) < 2:
+                        continue
+                    lat = _coerce_coord(coord[1])
+                    lon = _coerce_coord(coord[0])
+                    if lat is None or lon is None or not _is_mendoza_point(lat, lon):
+                        continue
+                    segment.append({'lat': float(lat), 'lon': float(lon)})
+                out = _merge_geo_path_points(out, segment)
+                cursor += max(1, len(chunk) - 1)
+    except Exception as e:
+        logger.warning('OSRM route path failed: %s', e)
+        return []
+    return out
+
+
+def _resolve_driver_trace_start_utc(
+    active_orders: List[Dict[str, Any]],
+    fallback_start_utc: Optional[datetime.datetime],
+) -> Optional[datetime.datetime]:
+    if not active_orders:
+        return fallback_start_utc
+    timestamps: List[datetime.datetime] = []
+    for order_data in (active_orders or []):
+        for raw in (
+            order_data.get('sent_at'),
+            order_data.get('assigned_at'),
+            order_data.get('route_generated_at'),
+            order_data.get('created_at'),
+        ):
+            parsed = _parse_datetime_utc(raw)
+            if parsed is not None:
+                timestamps.append(parsed)
+    if not timestamps:
+        return fallback_start_utc
+    derived = min(timestamps) - datetime.timedelta(minutes=15)
+    if fallback_start_utc is not None and derived < fallback_start_utc:
+        return fallback_start_utc
+    return derived
+
+
+def _trim_driver_location_points_to_current_run(
+    points: List[Dict[str, Any]],
+    db: Optional[Session] = None,
+) -> List[Dict[str, Any]]:
+    if len(points or []) < 2:
+        return list(points or [])
+    try:
+        depot_lat, depot_lon = _get_route_start_point(db)
+    except Exception:
+        depot_lat, depot_lon = None, None
+    if not _is_mendoza_point(depot_lat, depot_lon):
+        return list(points or [])
+    threshold_m = max(float(DRIVER_DEPOT_RADIUS_M or 0.0) * 1.5, 60.0)
+    last_depot_idx: Optional[int] = None
+    for idx, point in enumerate(points or []):
+        lat = _coerce_coord(point.get('lat') if isinstance(point, dict) else None)
+        lon = _coerce_coord(point.get('lon') if isinstance(point, dict) else None)
+        if lat is None or lon is None:
+            continue
+        try:
+            dist_m = _haversine_km(float(lat), float(lon), float(depot_lat), float(depot_lon)) * 1000.0
+        except Exception:
+            continue
+        if dist_m <= threshold_m:
+            last_depot_idx = idx
+    if last_depot_idx is not None and last_depot_idx < len(points) - 1:
+        return list(points[last_depot_idx:])
+    return list(points or [])
+
+
+def _build_driver_live_trace_path(location_points: List[Dict[str, Any]]) -> List[Dict[str, float]]:
+    sampled = _sample_route_points(list(location_points or []), max_points=OSRM_TRACE_MAX_POINTS)
+    nodes: List[Tuple[float, float]] = []
+    for point in sampled:
+        lat = _coerce_coord(point.get('lat') if isinstance(point, dict) else None)
+        lon = _coerce_coord(point.get('lon') if isinstance(point, dict) else None)
+        if lat is None or lon is None or not _is_mendoza_point(lat, lon):
+            continue
+        nodes.append((float(lat), float(lon)))
+    if len(nodes) < 2:
+        return [{'lat': lat, 'lon': lon} for lat, lon in nodes]
+    path = _fetch_osrm_route_path(nodes)
+    if path:
+        return path
+    return [{'lat': lat, 'lon': lon} for lat, lon in nodes]
+
+
+def _build_driver_planned_route_path(
+    active_orders: List[Dict[str, Any]],
+    live_payload: Optional[Dict[str, Any]] = None,
+    db: Optional[Session] = None,
+) -> List[Dict[str, float]]:
+    nodes: List[Tuple[float, float]] = []
+    live_lat = _coerce_coord(live_payload.get('lat')) if isinstance(live_payload, dict) else None
+    live_lon = _coerce_coord(live_payload.get('lon')) if isinstance(live_payload, dict) else None
+    if _is_mendoza_point(live_lat, live_lon):
+        nodes.append((float(live_lat), float(live_lon)))
+    else:
+        try:
+            depot_lat, depot_lon = _get_route_start_point(db)
+        except Exception:
+            depot_lat, depot_lon = None, None
+        if _is_mendoza_point(depot_lat, depot_lon):
+            nodes.append((float(depot_lat), float(depot_lon)))
+
+    ordered_active = sorted(
+        active_orders or [],
+        key=lambda o: (o.get('route_order') is None, int(o.get('route_order') or 0), str(o.get('id') or '')),
+    )
+    for order_data in ordered_active:
+        point = _extract_driver_order_point(order_data)
+        if not point:
+            continue
+        lat = _coerce_coord(point.get('lat'))
+        lon = _coerce_coord(point.get('lon'))
+        if lat is None or lon is None or not _is_mendoza_point(lat, lon):
+            continue
+        nodes.append((float(lat), float(lon)))
+    if len(nodes) < 2:
+        return [{'lat': lat, 'lon': lon} for lat, lon in nodes]
+    path = _fetch_osrm_route_path(nodes)
+    if path:
+        return path
+    return [{'lat': lat, 'lon': lon} for lat, lon in nodes]
+
+
 def _get_driver_live_location_payload(
     driver_id: Optional[int],
     driver_username: Optional[str],
@@ -10939,8 +11119,12 @@ def _build_driver_insights_payload(driver: Any, db: Session) -> Dict[str, Any]:
         reverse=True,
     )[:12]
 
-    location_points = _get_driver_location_points(driver_id, driver_username, start_utc, db, live_payload=live_payload)
+    trace_start_utc = _resolve_driver_trace_start_utc(active_orders, start_utc)
+    location_points = _get_driver_location_points(driver_id, driver_username, trace_start_utc, db, live_payload=live_payload)
+    location_points = _trim_driver_location_points_to_current_run(location_points, db=db)
     route_points = _build_driver_route_points(active_orders, live_payload=live_payload)
+    live_trace_path = _build_driver_live_trace_path(location_points)
+    planned_route_path = _build_driver_planned_route_path(active_orders, live_payload=live_payload, db=db)
 
     km_estimated = len(location_points) < 2
     active_time_estimated = len(location_points) < 2
@@ -10994,6 +11178,8 @@ def _build_driver_insights_payload(driver: Any, db: Session) -> Dict[str, Any]:
         'history_orders': history_recent,
         'route_points': route_points,
         'location_points': location_points,
+        'live_trace_path': live_trace_path,
+        'planned_route_path': planned_route_path,
         'route_mode': 'live_trace' if len(location_points) >= 2 else 'planned_route',
         'updated_at': now_utc,
     }
