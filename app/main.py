@@ -12319,7 +12319,7 @@ def admin_driver_location(
             )
             if updated > 0:
                 try:
-                    asyncio.create_task(push_event({"action": "updated"}))
+                    asyncio.create_task(push_event({"action": "orders_changed", "reason": "driver_departure"}))
                 except Exception:
                     pass
     except Exception:

@@ -1245,9 +1245,13 @@ function activateSection(sectionId){
   if (sectionId === 'dashboard') {
     try{ refreshSalesStats({ force: false, quiet: true }); }catch(_){ }
     try{ initDriverMap(); startDriverMapPolling(); }catch(_){ }
+    if (catalogRefreshPending) try{ scheduleCatalogRefresh('section:dashboard', 120); }catch(_){ }
   } else {
     stopDriverMapPolling();
     clearDriverRouteOverlays();
+  }
+  if ((sectionId === 'catalog' || sectionId === 'retail-prices' || sectionId === 'filters') && catalogRefreshPending) {
+    try{ scheduleCatalogRefresh(`section:${sectionId}`, 120); }catch(_){ }
   }
   if (sectionId === 'customers') { try{ refreshCustomers(false); }catch(_){ } }
   if (sectionId === 'retail-prices') { try{ refreshRetailPrices(); }catch(_){ } }
@@ -1894,6 +1898,159 @@ const dashboardAlertsWrap = document.querySelector('.dashboard-alerts');
 const alertLowStockEl = document.getElementById('alertLowStock');
 const alertOrdersUnseenEl = document.getElementById('alertOrdersUnseen');
 const alertOrdersUnpreparedEl = document.getElementById('alertOrdersUnprepared');
+const dashboardHeroTitleEl = document.getElementById('dashboardHeroTitle');
+const dashboardHeroValueEl = document.getElementById('dashboardHeroValue');
+const dashboardHeroLabelEl = document.getElementById('dashboardHeroLabel');
+const dashboardHeroMetaEl = document.getElementById('dashboardHeroMeta');
+const dashboardHeroPrimaryBtn = document.getElementById('dashboardHeroPrimaryBtn');
+const dashboardHeroSecondaryBtn = document.getElementById('dashboardHeroSecondaryBtn');
+const dashboardAlertLowStockEl = document.getElementById('dashboardAlertLowStock');
+const dashboardAlertUnseenEl = document.getElementById('dashboardAlertUnseen');
+const dashboardAlertUnpreparedEl = document.getElementById('dashboardAlertUnprepared');
+const dashboardSalesOrders30El = document.getElementById('dashboardSalesOrders30');
+const dashboardSalesRevenue30El = document.getElementById('dashboardSalesRevenue30');
+const dashboardSalesAvgTicket30El = document.getElementById('dashboardSalesAvgTicket30');
+const dashboardTotalActiveEl = document.getElementById('dashboardTotalActive');
+const dashboardAvgPriceEl = document.getElementById('dashboardAvgPrice');
+const dashboardCategoryCoverageEl = document.getElementById('dashboardCategoryCoverage');
+const dashboardCategoryCoverageMetaEl = document.getElementById('dashboardCategoryCoverageMeta');
+const dashboardActionNodes = Array.from(document.querySelectorAll('[data-dashboard-action]'));
+const dashboardState = {
+  unseen: 0,
+  unprepared: 0,
+  lowStock: 0,
+  totalActive: 0,
+  avgPrice: 0,
+  salesOrders30: 0,
+  salesRevenue30: 0,
+  salesAvgTicket30: 0,
+  activeCategories: 0,
+  uncategorized: 0,
+  categoryCoverage: 0,
+};
+const WS_CATALOG_REFRESH_DEBOUNCE_MS = 1600;
+const WS_OPERATIONS_REFRESH_DEBOUNCE_MS = 900;
+const ORDERS_POLL_INTERVAL_MS = 15000;
+let wsCatalogRefreshTimer = null;
+let wsOperationsRefreshTimer = null;
+let catalogRefreshPending = false;
+
+function cleanDashboardText(value){
+  let out = String(value == null ? '' : value);
+  const replacements = [
+    ['ÃƒÂ¡', 'a'], ['Ã¡', 'a'], ['á', 'a'],
+    ['ÃƒÂ©', 'e'], ['Ã©', 'e'], ['é', 'e'],
+    ['ÃƒÂ­', 'i'], ['Ã­', 'i'], ['í', 'i'],
+    ['ÃƒÂ³', 'o'], ['Ã³', 'o'], ['ó', 'o'],
+    ['ÃƒÂº', 'u'], ['Ãº', 'u'], ['ú', 'u'],
+    ['ÃƒÂ', 'A'], ['Ã', 'A'], ['Á', 'A'],
+    ['ÃƒÂ‰', 'E'], ['Ã‰', 'E'], ['É', 'E'],
+    ['ÃƒÂ', 'I'], ['Ã', 'I'], ['Í', 'I'],
+    ['ÃƒÂ“', 'O'], ['Ã“', 'O'], ['Ó', 'O'],
+    ['ÃƒÂš', 'U'], ['Ãš', 'U'], ['Ú', 'U'],
+    ['ÃƒÂ±', 'n'], ['Ã±', 'n'], ['ñ', 'n'],
+    ['ÃƒÂ¼', 'u'], ['Ã¼', 'u'], ['ü', 'u'],
+    ['Â·', ' - '], ['·', ' - '],
+    ['Ã¢â‚¬â€', '-'], ['â€”', '-'], ['—', '-'], ['–', '-'],
+    ['Ã‚', ''], ['Â', ''],
+  ];
+  replacements.forEach(([from, to]) => {
+    out = out.split(from).join(to);
+  });
+  out = out.replace(/\s+-\s+/g, ' - ');
+  out = out.replace(/\s+/g, ' ').trim();
+  return out;
+}
+
+function setNodeText(selectorOrNode, value){
+  try{
+    const node = typeof selectorOrNode === 'string' ? document.querySelector(selectorOrNode) : selectorOrNode;
+    if (node) node.textContent = cleanDashboardText(value);
+  }catch(_){ }
+}
+
+function normalizeDashboardStaticCopy(){
+  setNodeText('.dashboard-hero-kicker', 'Operacion');
+  setNodeText(dashboardHeroLabelEl, 'alertas activas');
+  setNodeText('#dashboardPriorityGrid [data-dashboard-action="orders"] .dashboard-priority-kicker', 'Atencion inmediata');
+  setNodeText('#dashboardPriorityGrid [data-dashboard-action="orders"] .dashboard-priority-label', 'Pedidos sin ver');
+  setNodeText('#dashboardPriorityGrid [data-dashboard-action="orders"] .dashboard-priority-meta', 'Entraron al panel y todavia no se revisaron.');
+  setNodeText('#dashboardPriorityGrid [data-dashboard-action="preparations"] .dashboard-priority-label', 'Pedidos sin preparar');
+  setNodeText('#dashboardPriorityGrid [data-dashboard-action="preparations"] .dashboard-priority-meta', 'Ya se vieron, pero todavia no quedaron listos.');
+  setNodeText('#dashboardPriorityGrid [data-dashboard-action="catalog"] .dashboard-priority-label', 'Stock bajo');
+  setNodeText('#dashboardPriorityGrid [data-dashboard-action="catalog"] .dashboard-priority-meta', 'Productos que pueden frenar venta o preparacion.');
+  setNodeText('.dashboard-group-business .dashboard-group-kicker', 'Negocio');
+  setNodeText('.dashboard-group-business h3', 'Como viene la venta');
+  setNodeText('.dashboard-group-business .dashboard-group-note', 'Ultimos 30 dias');
+  setNodeText('.dashboard-group-catalog .dashboard-group-kicker', 'Catalogo');
+  setNodeText('.dashboard-group-catalog h3', 'Salud del inventario');
+  setNodeText('.dashboard-group-catalog .dashboard-group-note', 'Base activa');
+  setNodeText('#dashboardSalesRevenue30 + .dashboard-kpi-meta', 'Facturacion acumulada del periodo.');
+  setNodeText('#dashboardSalesOrders30 + .dashboard-kpi-meta', 'Volumen total procesado en 30 dias.');
+  setNodeText('#dashboardAvgPrice + .dashboard-kpi-meta', 'Referencia rapida del catalogo mayorista.');
+  setNodeText('article[data-dashboard-action="filters"] .dashboard-kpi-label', 'Cobertura de categorias');
+  setNodeText(dashboardCategoryCoverageMetaEl, 'Esperando datos del catalogo.');
+  setNodeText('.dashboard-action-card[data-dashboard-action="orders"] .dashboard-action-kicker', 'Accion');
+  setNodeText('.dashboard-action-card[data-dashboard-action="orders"] strong', 'Ir a Pedidos');
+  setNodeText('.dashboard-action-card[data-dashboard-action="orders"] span:last-child', 'Revisa ingresos nuevos y movimiento del dia.');
+  setNodeText('.dashboard-action-card[data-dashboard-action="preparations"] strong', 'Ir a Preparaciones');
+  setNodeText('.dashboard-action-card[data-dashboard-action="preparations"] span:last-child', 'Marca listos y mantene la cocina ordenada.');
+  setNodeText('.dashboard-action-card[data-dashboard-action="catalog"] .dashboard-action-kicker', 'Catalogo');
+  setNodeText('.dashboard-action-card[data-dashboard-action="catalog"] strong', 'Ir a Catalogo');
+  setNodeText('.dashboard-action-card[data-dashboard-action="filters"] span:last-child', 'Ajusta como se clasifica y se muestra el surtido.');
+}
+
+normalizeDashboardStaticCopy();
+
+function shouldLiveRefreshOrders(){
+  return ['dashboard', 'orders', 'preparations', 'routes', 'deliveries'].includes(String(currentSectionId || ''));
+}
+
+function shouldLiveRefreshCatalog(){
+  return ['dashboard', 'catalog', 'retail-prices', 'filters'].includes(String(currentSectionId || ''));
+}
+
+function scheduleCatalogRefresh(reason = 'ws', delayMs = WS_CATALOG_REFRESH_DEBOUNCE_MS){
+  catalogRefreshPending = true;
+  if (!shouldLiveRefreshCatalog()) return;
+  if (wsCatalogRefreshTimer){
+    clearTimeout(wsCatalogRefreshTimer);
+    wsCatalogRefreshTimer = null;
+  }
+  wsCatalogRefreshTimer = setTimeout(async () => {
+    wsCatalogRefreshTimer = null;
+    if (!shouldLiveRefreshCatalog()){
+      catalogRefreshPending = true;
+      return;
+    }
+    try{
+      await ensureAllProductsCache({ force: true }).catch(() => null);
+      await refresh();
+      catalogRefreshPending = false;
+    }catch(e){
+      console.warn('scheduled catalog refresh failed', reason, e);
+    }
+  }, Math.max(150, Number(delayMs) || WS_CATALOG_REFRESH_DEBOUNCE_MS));
+}
+
+function scheduleOperationsRefresh(reason = 'ws', delayMs = WS_OPERATIONS_REFRESH_DEBOUNCE_MS){
+  if (!shouldLiveRefreshOrders()) return;
+  if (wsOperationsRefreshTimer){
+    clearTimeout(wsOperationsRefreshTimer);
+    wsOperationsRefreshTimer = null;
+  }
+  wsOperationsRefreshTimer = setTimeout(async () => {
+    wsOperationsRefreshTimer = null;
+    if (!shouldLiveRefreshOrders()) return;
+    try{ await refreshOrders('web'); }catch(e){ console.warn('scheduled orders refresh failed', reason, e); }
+    if (currentSectionId === 'routes'){
+      try{ await refreshRoutes(false); }catch(e){ console.warn('scheduled routes refresh failed', reason, e); }
+    }
+    if (currentSectionId === 'deliveries'){
+      try{ await refreshDeliveries(false); }catch(e){ console.warn('scheduled deliveries refresh failed', reason, e); }
+    }
+  }, Math.max(150, Number(delayMs) || WS_OPERATIONS_REFRESH_DEBOUNCE_MS));
+}
 const LOW_STOCK_FALLBACK = 5;
 
 const productsTableBody = document.querySelector('#productsTable tbody');
@@ -2419,11 +2576,173 @@ function formatShortDateLabel(iso){
   }catch(_){ return String(iso || ''); }
 }
 
+function setDashboardActionButton(btn, label, action){
+  if (!btn) return;
+  btn.textContent = cleanDashboardText(label || 'Abrir') || 'Abrir';
+  if (action){
+    btn.dataset.dashboardAction = action;
+    btn.disabled = false;
+    btn.classList.remove('hidden');
+  } else {
+    btn.dataset.dashboardAction = '';
+    btn.disabled = true;
+    btn.classList.add('hidden');
+  }
+}
+
+function runDashboardAction(action){
+  const target = String(action || '').trim().toLowerCase();
+  if (!target) return;
+  try{
+    if (target === 'orders'){
+      if (activateSection('orders')) refreshOrders('web');
+      return;
+    }
+    if (target === 'preparations'){
+      if (activateSection('preparations')) refreshPreparations(false);
+      return;
+    }
+    if (target === 'catalog'){
+      if (activateSection('catalog')) refresh();
+      return;
+    }
+    if (target === 'filters'){
+      if (activateSection('filters')) try{ renderFilters(); }catch(_){ }
+      return;
+    }
+    if (target === 'routes'){
+      if (activateSection('routes')) refreshRoutes(false);
+      return;
+    }
+    activateSection(target);
+  }catch(e){
+    console.warn('dashboard action failed', target, e);
+  }
+}
+
+function setDashboardPriorityCard(el, label, count){
+  if (!el) return;
+  const num = Number(count);
+  const safeCount = Number.isFinite(num) ? Math.max(0, num) : 0;
+  const valueEl = el.querySelector('.dashboard-priority-value');
+  const labelEl = el.querySelector('.dashboard-priority-label');
+  if (valueEl) valueEl.textContent = formatNumber(safeCount);
+  if (labelEl) labelEl.textContent = cleanDashboardText(label);
+  el.dataset.count = String(safeCount);
+  el.classList.toggle('is-clear', safeCount === 0);
+  el.setAttribute('aria-label', `${label}: ${safeCount}`);
+}
+
+function getDashboardHeroConfig(){
+  const unseen = Number(dashboardState.unseen || 0);
+  const unprepared = Number(dashboardState.unprepared || 0);
+  const lowStock = Number(dashboardState.lowStock || 0);
+  if (unseen > 0){
+    return {
+      title: 'Hay pedidos nuevos esperando revisión',
+      value: formatNumber(unseen),
+      label: unseen === 1 ? 'pedido sin ver' : 'pedidos sin ver',
+      meta: 'Esto es lo primero que deberías destrabar para que el flujo siga hacia preparación.',
+      primary: { label: 'Ver pedidos', action: 'orders' },
+      secondary: unprepared > 0 ? { label: 'Ver preparaciones', action: 'preparations' } : { label: 'Ir a catálogo', action: 'catalog' },
+    };
+  }
+  if (unprepared > 0){
+    return {
+      title: 'La operación ya pide pasar a preparación',
+      value: formatNumber(unprepared),
+      label: unprepared === 1 ? 'pedido sin preparar' : 'pedidos sin preparar',
+      meta: 'Los pedidos ya fueron vistos, pero todavía no quedaron listos para asignación o reparto.',
+      primary: { label: 'Ver preparaciones', action: 'preparations' },
+      secondary: lowStock > 0 ? { label: 'Revisar catálogo', action: 'catalog' } : { label: 'Ver pedidos', action: 'orders' },
+    };
+  }
+  if (lowStock > 0){
+    return {
+      title: 'Hay productos al límite de stock',
+      value: formatNumber(lowStock),
+      label: lowStock === 1 ? 'producto crítico' : 'productos críticos',
+      meta: 'Esto no siempre frena ventas hoy, pero sí puede romper preparación y reposición en cualquier momento.',
+      primary: { label: 'Revisar catálogo', action: 'catalog' },
+      secondary: { label: 'Ir a filtros', action: 'filters' },
+    };
+  }
+  return {
+    title: 'La operación está bajo control',
+    value: '0',
+    label: 'alertas críticas',
+    meta: 'Usá este panel para seguir ventas, orden del catálogo y trazabilidad operativa sin perder foco.',
+    primary: { label: 'Ver rutas', action: 'routes' },
+    secondary: { label: 'Ir a catálogo', action: 'catalog' },
+  };
+}
+
+function syncDashboardSummary(){
+  const totalActive = Number(dashboardState.totalActive || 0);
+  const categoryCoverage = Number(dashboardState.categoryCoverage || 0);
+  const activeCategories = Number(dashboardState.activeCategories || 0);
+  const uncategorized = Number(dashboardState.uncategorized || 0);
+  if (dashboardCategoryCoverageEl){
+    dashboardCategoryCoverageEl.textContent = totalActive > 0 ? formatPercent(categoryCoverage) : '-';
+    if (totalActive <= 0) dashboardCategoryCoverageEl.textContent = '-';
+  }
+  if (dashboardCategoryCoverageMetaEl){
+    if (totalActive <= 0){
+      dashboardCategoryCoverageMetaEl.textContent = 'Esperando datos del catÃ¡logo.';
+    } else if (uncategorized > 0){
+      dashboardCategoryCoverageMetaEl.textContent = `${formatNumber(activeCategories)} categorÃ­as activas · ${formatNumber(uncategorized)} sin categorizar`;
+    } else {
+      dashboardCategoryCoverageMetaEl.textContent = `${formatNumber(activeCategories)} categorÃ­as activas · cobertura completa`;
+    }
+  }
+  const hero = getDashboardHeroConfig();
+  if (dashboardHeroTitleEl) dashboardHeroTitleEl.textContent = hero.title;
+  if (dashboardHeroValueEl) dashboardHeroValueEl.textContent = hero.value;
+  if (dashboardHeroLabelEl) dashboardHeroLabelEl.textContent = hero.label;
+  if (dashboardHeroMetaEl) dashboardHeroMetaEl.textContent = hero.meta;
+  if (dashboardCategoryCoverageMetaEl) dashboardCategoryCoverageMetaEl.textContent = cleanDashboardText(dashboardCategoryCoverageMetaEl.textContent);
+  if (dashboardHeroTitleEl) dashboardHeroTitleEl.textContent = cleanDashboardText(dashboardHeroTitleEl.textContent);
+  if (dashboardHeroValueEl) dashboardHeroValueEl.textContent = cleanDashboardText(dashboardHeroValueEl.textContent);
+  if (dashboardHeroLabelEl) dashboardHeroLabelEl.textContent = cleanDashboardText(dashboardHeroLabelEl.textContent);
+  if (dashboardHeroMetaEl) dashboardHeroMetaEl.textContent = cleanDashboardText(dashboardHeroMetaEl.textContent);
+  setDashboardActionButton(dashboardHeroPrimaryBtn, hero.primary && hero.primary.label, hero.primary && hero.primary.action);
+  setDashboardActionButton(dashboardHeroSecondaryBtn, hero.secondary && hero.secondary.label, hero.secondary && hero.secondary.action);
+}
+
+dashboardActionNodes.forEach((node) => {
+  if (node.tagName !== 'BUTTON'){
+    try{ node.setAttribute('role', 'button'); node.setAttribute('tabindex', '0'); }catch(_){ }
+    node.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' '){
+        ev.preventDefault();
+        const action = ev.currentTarget && ev.currentTarget.dataset ? ev.currentTarget.dataset.dashboardAction : '';
+        runDashboardAction(action);
+      }
+    });
+  }
+  node.addEventListener('click', (ev) => {
+    const action = ev.currentTarget && ev.currentTarget.dataset ? ev.currentTarget.dataset.dashboardAction : '';
+    runDashboardAction(action);
+  });
+});
+
 function renderSalesStats(stats){
   const st = stats && typeof stats === 'object' ? stats : null;
   try{ if (salesOrders30El) salesOrders30El.textContent = st ? formatNumber(st.orders || 0) : '—'; }catch(_){ }
   try{ if (salesRevenue30El) salesRevenue30El.textContent = st ? formatMoney(st.revenue || 0) : '—'; }catch(_){ }
   try{ if (salesAvgTicket30El) salesAvgTicket30El.textContent = st ? formatMoney(st.avg_ticket || 0) : '—'; }catch(_){ }
+  try{ if (dashboardSalesOrders30El) dashboardSalesOrders30El.textContent = st ? formatNumber(st.orders || 0) : '-'; }catch(_){ }
+  try{ if (dashboardSalesRevenue30El) dashboardSalesRevenue30El.textContent = st ? formatMoney(st.revenue || 0) : '-'; }catch(_){ }
+  try{ if (dashboardSalesAvgTicket30El) dashboardSalesAvgTicket30El.textContent = st ? formatMoney(st.avg_ticket || 0) : '-'; }catch(_){ }
+  dashboardState.salesOrders30 = st ? Number(st.orders || 0) : 0;
+  dashboardState.salesRevenue30 = st ? Number(st.revenue || 0) : 0;
+  dashboardState.salesAvgTicket30 = st ? Number(st.avg_ticket || 0) : 0;
+  if (!st){
+    try{ if (dashboardSalesOrders30El) dashboardSalesOrders30El.textContent = '-'; }catch(_){ }
+    try{ if (dashboardSalesRevenue30El) dashboardSalesRevenue30El.textContent = '-'; }catch(_){ }
+    try{ if (dashboardSalesAvgTicket30El) dashboardSalesAvgTicket30El.textContent = '-'; }catch(_){ }
+  }
+  syncDashboardSummary();
 
   // Chart (by_day)
   if (!salesChartCanvas || typeof Chart === 'undefined') return;
@@ -3951,22 +4270,21 @@ async function refreshRetailPrices(){
 }
 
 function updateDashboardAlertsVisibility(){
-  if (!dashboardAlertsWrap) return;
+  const priorityGrid = document.getElementById('dashboardPriorityGrid');
+  if (!priorityGrid) return;
   try{
-    const items = Array.from(dashboardAlertsWrap.querySelectorAll('.alert-item'));
-    const anyVisible = items.some(it => !it.classList.contains('hidden'));
-    dashboardAlertsWrap.classList.toggle('hidden', !anyVisible);
+    const items = Array.from(priorityGrid.querySelectorAll('.dashboard-priority-card'));
+    const allClear = items.length > 0 && items.every((it) => Number(it.dataset.count || 0) === 0);
+    priorityGrid.classList.toggle('all-clear', allClear);
   }catch(_){ }
 }
 
 function updateAlertItem(el, label, count){
   if (!el) return;
   const num = Number(count);
-  const safeCount = Number.isFinite(num) ? num : 0;
+  const safeCount = Number.isFinite(num) ? Math.max(0, num) : 0;
   el.textContent = `⚠ ${label}: ${formatNumber(safeCount)}`;
-  el.classList.toggle('hidden', safeCount === 0);
   el.classList.toggle('alert-ok', safeCount === 0);
-  updateDashboardAlertsVisibility();
 }
 
 function getProductStockValue(p){
@@ -3988,7 +4306,11 @@ function isProductLowStock(p){
 function updateLowStockAlert(products){
   const list = Array.isArray(products) ? products : [];
   const lowCount = list.filter(isProductLowStock).length;
+  dashboardState.lowStock = lowCount;
   updateAlertItem(alertLowStockEl, 'Productos con stock bajo', lowCount);
+  setDashboardPriorityCard(dashboardAlertLowStockEl, 'Stock bajo', lowCount);
+  updateDashboardAlertsVisibility();
+  syncDashboardSummary();
   return lowCount;
 }
 
@@ -4001,8 +4323,14 @@ function updateOrderAlertCounts(orders){
     if (st === 'recibido') unseen += 1;
     else if (st === 'visto') unprepared += 1;
   });
+  dashboardState.unseen = unseen;
+  dashboardState.unprepared = unprepared;
   updateAlertItem(alertOrdersUnseenEl, 'Pedidos sin ver', unseen);
   updateAlertItem(alertOrdersUnpreparedEl, 'Pedidos sin preparar', unprepared);
+  setDashboardPriorityCard(dashboardAlertUnseenEl, 'Pedidos sin ver', unseen);
+  setDashboardPriorityCard(dashboardAlertUnpreparedEl, 'Pedidos sin preparar', unprepared);
+  updateDashboardAlertsVisibility();
+  syncDashboardSummary();
   return { unseen, unprepared };
 }
 
@@ -4068,7 +4396,7 @@ function renderCategoryOverview(products){
       <div class="category-hero">
         <div class="category-hero-kicker">Categoría líder</div>
         <div class="category-hero-name">${escapeHtml(topEntry.label)}</div>
-        <div class="category-hero-meta">${formatNumber(topEntry.count)} productos · ${formatNumber(topShare, { digits: 1 })}% del catálogo activo</div>
+        <div class="category-hero-meta">${formatNumber(topEntry.count)} productos · ${formatPercent(topShare)} del catálogo activo</div>
       </div>
       <div class="category-overview-meta">
         <div class="category-mini-stat">
@@ -4079,7 +4407,7 @@ function renderCategoryOverview(products){
         <div class="category-mini-stat">
           <span class="category-mini-stat-label">Sin categoría</span>
           <span class="category-mini-stat-value">${formatNumber(uncategorized ? uncategorized.count : 0)}</span>
-          <span class="category-mini-stat-sub">${uncategorized ? `${formatNumber(((uncategorized.count / total) * 100), { digits: 1 })}% pendiente de ajuste` : 'Cobertura categorizada completa'}</span>
+          <span class="category-mini-stat-sub">${uncategorized ? `${formatPercent((uncategorized.count / total) * 100)} pendiente de ajuste` : 'Cobertura categorizada completa'}</span>
         </div>
       </div>
     </div>
@@ -4094,7 +4422,7 @@ function renderCategoryOverview(products){
             <div class="category-rank-main">
               <div class="category-rank-title">
                 <span class="category-rank-name">${escapeHtml(entry.label)}</span>
-                <span class="category-rank-share">${formatNumber(share, { digits: 1 })}%</span>
+                <span class="category-rank-share">${formatPercent(share)}</span>
               </div>
               <div class="category-rank-bar">
                 <span class="category-rank-bar-fill" style="width:${Math.max(8, Math.min(100, share))}%;background:linear-gradient(90deg, ${colors[0]}, ${colors[1]});"></span>
@@ -4115,9 +4443,18 @@ function updateStats(products){
   const list = Array.isArray(products) ? products : [];
   const totalActive = list.filter(p => p && p.active).length;
   document.getElementById('totalActive').textContent = formatNumber(totalActive);
+  try{ if (dashboardTotalActiveEl) dashboardTotalActiveEl.textContent = formatNumber(totalActive); }catch(_){ }
   const avg = list.reduce((s,p)=> s + Number((p && p.price) || 0), 0) / (list.length || 1);
   document.getElementById('avgPrice').textContent = formatMoney(avg);
+  try{ if (dashboardAvgPriceEl) dashboardAvgPriceEl.textContent = formatMoney(avg); }catch(_){ }
+  dashboardState.totalActive = totalActive;
+  dashboardState.avgPrice = Number.isFinite(avg) ? avg : 0;
   updateLowStockAlert(list);
+  const categoryEntries = buildDashboardCategoryEntries(list);
+  const uncategorized = categoryEntries.find((entry) => String(entry.label || '').toLowerCase() === 'sin categorÃ­a');
+  dashboardState.activeCategories = categoryEntries.length;
+  dashboardState.uncategorized = Number((categoryEntries.find((entry) => String(entry.label || '').toLowerCase().includes('sin categor')) || {}).count || 0);
+  dashboardState.categoryCoverage = totalActive > 0 ? (((totalActive - dashboardState.uncategorized) / totalActive) * 100) : 0;
   const byCat = {};
   list.forEach(p => { const k = (p && p.category) ? p.category : 'Sin categoría'; byCat[k] = (byCat[k] || 0) + 1 });
   try{
@@ -4130,6 +4467,7 @@ function updateStats(products){
   }catch(e){ console.warn('Could not destroy previous categoryChart', e); }
   window.categoryChart = null;
   try{ renderCategoryOverview(list); }catch(e){ console.error('Failed to render category overview', e); }
+  syncDashboardSummary();
 }
 
 // Modal and form behaviors
@@ -7766,7 +8104,11 @@ function regroupOrdersForTable(source){
 
 // Add periodic polling as a fallback so the orders table refreshes even if WS fails
 try{
-  setInterval(()=>{ refreshOrders('web'); }, 10000); // every 10s
+  setInterval(()=>{
+    if (shouldLiveRefreshOrders()){
+      refreshOrders('web');
+    }
+  }, ORDERS_POLL_INTERVAL_MS);
 }catch(e){ console.warn('orders polling setup failed', e); }
 
 // websocket to refresh list live with reconnection/backoff
@@ -7796,8 +8138,23 @@ function setupSocket(attempt = 0){
         try{ updateDriverMarker(data.driver); }catch(_){ }
         return;
       }
-      if(['created','updated','deleted'].includes(data.action)){
-        refresh(); showToast(`Evento: ${data.action}`);
+      if (data && data.action === 'orders_changed'){
+        scheduleOperationsRefresh(`ws:${data.action}`, 400);
+        return;
+      }
+      if (data && data.action === 'order_updated' && data.order){
+        try{ mergePatchedOrderIntoCaches(data.order, data.order.id); }catch(_){ }
+        scheduleOperationsRefresh('ws:order_updated', 250);
+        return;
+      }
+      if (['created', 'updated', 'deleted', 'bulk_updated'].includes(data.action)){
+        const hasProductPayload = !!(data && data.product && (typeof data.product.id !== 'undefined' || typeof data.product.name !== 'undefined'));
+        if (hasProductPayload || data.action === 'created' || data.action === 'deleted' || data.action === 'bulk_updated'){
+          scheduleCatalogRefresh(`ws:${data.action}`, hasProductPayload ? 1200 : 1600);
+        } else {
+          scheduleOperationsRefresh(`ws:${data.action}`, 500);
+        }
+        return;
       }
       if(data.action && data.action.indexOf && data.action.indexOf('order') === 0){
         // Debug: show raw event payload in console so we can inspect user_* fields
@@ -7812,6 +8169,7 @@ function setupSocket(attempt = 0){
             if(src === 'web') {
               insertOrderAtTop(data.order);
               showToast(`Pedido recibido: #${data.order.id}`);
+              scheduleOperationsRefresh('ws:order_created_inline', 250);
             }
             return;
           }catch(e){ console.warn('insertOrderAtTop failed, falling back to full refresh', e); }
@@ -7830,13 +8188,14 @@ function setupSocket(attempt = 0){
                     if(srv && srv.source === 'web'){
                       insertOrderAtTop(srv);
                       try{ showToast(`Pedido recibido: #${srv.id}`); }catch(_){ }
+                      scheduleOperationsRefresh('ws:order_created_by_id', 250);
                     }
                   }catch(_){ }
                 } else {
                   // fallback: full refresh web table
-                  refreshOrders('web');
+                  scheduleOperationsRefresh('ws:order_created_fallback', 250);
                 }
-              }catch(e){ console.warn('fetch by id after ws event failed', e); refreshOrders('web'); }
+              }catch(e){ console.warn('fetch by id after ws event failed', e); scheduleOperationsRefresh('ws:order_created_fetch_fail', 250); }
             })();
             return;
           }

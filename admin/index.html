@@ -101,6 +101,122 @@
       </header>
 
       <section id="dashboard" class="section">
+        <div class="dashboard-shell">
+          <div class="dashboard-hero-panel">
+            <div class="dashboard-hero-copy">
+              <div class="dashboard-hero-kicker">OperaciÃ³n</div>
+              <h2 id="dashboardHeroTitle" class="dashboard-hero-title">Lo importante primero</h2>
+              <div class="dashboard-hero-focus">
+                <span id="dashboardHeroValue" class="dashboard-hero-value">-</span>
+                <span id="dashboardHeroLabel" class="dashboard-hero-label">alertas activas</span>
+              </div>
+              <p id="dashboardHeroMeta" class="dashboard-hero-meta">PriorizÃ¡ pedidos, preparaciones y stock desde un solo bloque.</p>
+              <div class="dashboard-hero-actions">
+                <button id="dashboardHeroPrimaryBtn" class="btn primary" type="button" data-dashboard-action="orders">Ver pedidos</button>
+                <button id="dashboardHeroSecondaryBtn" class="btn dashboard-ghost-btn" type="button" data-dashboard-action="preparations">Ver preparaciones</button>
+              </div>
+            </div>
+            <div id="dashboardPriorityGrid" class="dashboard-priority-grid">
+              <button id="dashboardAlertUnseen" class="dashboard-priority-card tone-critical" type="button" data-dashboard-action="orders">
+                <span class="dashboard-priority-kicker">AtenciÃ³n inmediata</span>
+                <strong class="dashboard-priority-value">-</strong>
+                <span class="dashboard-priority-label">Pedidos sin ver</span>
+                <span class="dashboard-priority-meta">Entraron al panel y todavÃ­a no se revisaron.</span>
+              </button>
+              <button id="dashboardAlertUnprepared" class="dashboard-priority-card tone-warn" type="button" data-dashboard-action="preparations">
+                <span class="dashboard-priority-kicker">Siguiente paso</span>
+                <strong class="dashboard-priority-value">-</strong>
+                <span class="dashboard-priority-label">Pedidos sin preparar</span>
+                <span class="dashboard-priority-meta">Ya se vieron, pero todavÃ­a no quedaron listos.</span>
+              </button>
+              <button id="dashboardAlertLowStock" class="dashboard-priority-card tone-stock" type="button" data-dashboard-action="catalog">
+                <span class="dashboard-priority-kicker">Control interno</span>
+                <strong class="dashboard-priority-value">-</strong>
+                <span class="dashboard-priority-label">Stock bajo</span>
+                <span class="dashboard-priority-meta">Productos que pueden frenar venta o preparaciÃ³n.</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="dashboard-metric-groups">
+            <section class="dashboard-group-card dashboard-group-business">
+              <div class="dashboard-group-head">
+                <div>
+                  <div class="dashboard-group-kicker">Negocio</div>
+                  <h3>Cómo viene la venta</h3>
+                </div>
+                <div class="dashboard-group-note">Últimos 30 días</div>
+              </div>
+              <div class="dashboard-kpi-grid">
+                <article class="dashboard-kpi-card">
+                  <span class="dashboard-kpi-label">Ventas</span>
+                  <strong id="dashboardSalesRevenue30" class="dashboard-kpi-value">-</strong>
+                  <span class="dashboard-kpi-meta">FacturaciÃ³n acumulada del perÃ­odo.</span>
+                </article>
+                <article class="dashboard-kpi-card">
+                  <span class="dashboard-kpi-label">Pedidos</span>
+                  <strong id="dashboardSalesOrders30" class="dashboard-kpi-value">-</strong>
+                  <span class="dashboard-kpi-meta">Volumen total procesado en 30 dÃ­as.</span>
+                </article>
+                <article class="dashboard-kpi-card">
+                  <span class="dashboard-kpi-label">Ticket promedio</span>
+                  <strong id="dashboardSalesAvgTicket30" class="dashboard-kpi-value">-</strong>
+                  <span class="dashboard-kpi-meta">Valor medio por pedido confirmado.</span>
+                </article>
+              </div>
+            </section>
+
+            <section class="dashboard-group-card dashboard-group-catalog">
+              <div class="dashboard-group-head">
+                <div>
+                  <div class="dashboard-group-kicker">CatÃ¡logo</div>
+                  <h3>Salud del inventario</h3>
+                </div>
+                <div class="dashboard-group-note">Base activa</div>
+              </div>
+              <div class="dashboard-kpi-grid">
+                <article class="dashboard-kpi-card" data-dashboard-action="catalog">
+                  <span class="dashboard-kpi-label">Productos activos</span>
+                  <strong id="dashboardTotalActive" class="dashboard-kpi-value">-</strong>
+                  <span class="dashboard-kpi-meta">Cantidad disponible para vender hoy.</span>
+                </article>
+                <article class="dashboard-kpi-card" data-dashboard-action="catalog">
+                  <span class="dashboard-kpi-label">Precio promedio</span>
+                  <strong id="dashboardAvgPrice" class="dashboard-kpi-value">-</strong>
+                  <span class="dashboard-kpi-meta">Referencia rÃ¡pida del catÃ¡logo mayorista.</span>
+                </article>
+                <article class="dashboard-kpi-card" data-dashboard-action="filters">
+                  <span class="dashboard-kpi-label">Cobertura de categorÃ­as</span>
+                  <strong id="dashboardCategoryCoverage" class="dashboard-kpi-value">-</strong>
+                  <span id="dashboardCategoryCoverageMeta" class="dashboard-kpi-meta">Esperando datos del catÃ¡logo.</span>
+                </article>
+              </div>
+            </section>
+          </div>
+
+          <div class="dashboard-action-rail">
+            <button class="dashboard-action-card" type="button" data-dashboard-action="orders">
+              <span class="dashboard-action-kicker">AcciÃ³n</span>
+              <strong>Ir a Pedidos</strong>
+              <span>RevisÃ¡ ingresos nuevos y movimiento del dÃ­a.</span>
+            </button>
+            <button class="dashboard-action-card" type="button" data-dashboard-action="preparations">
+              <span class="dashboard-action-kicker">Flujo</span>
+              <strong>Ir a Preparaciones</strong>
+              <span>MarcÃ¡ listos y mantenÃ© la cocina ordenada.</span>
+            </button>
+            <button class="dashboard-action-card" type="button" data-dashboard-action="catalog">
+              <span class="dashboard-action-kicker">CatÃ¡logo</span>
+              <strong>Ir a CatÃ¡logo</strong>
+              <span>Stock, precios e imagen del inventario activo.</span>
+            </button>
+            <button class="dashboard-action-card" type="button" data-dashboard-action="filters">
+              <span class="dashboard-action-kicker">Orden</span>
+              <strong>Ir a Filtros</strong>
+              <span>AjustÃ¡ cÃ³mo se clasifica y se muestra el surtido.</span>
+            </button>
+          </div>
+        </div>
 
       
         <div class="cards">
