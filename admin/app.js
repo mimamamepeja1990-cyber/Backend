@@ -49,6 +49,9 @@ const DRIVER_ROUTE_SEGMENT_MIN_MS = 120;
 const DRIVER_ROUTE_SEGMENT_MAX_MS = 900;
 const DRIVER_USE_ROAD_SNAPPING = true;
 const DRIVER_ROUTE_DIRECTIONS_MAX_WAYPOINTS = 23;
+const DRIVER_OSRM_ROUTE_BASE = 'https://router.project-osrm.org';
+const DRIVER_OSRM_MAX_WAYPOINTS = 20;
+const DRIVER_OSRM_TRACE_MAX_POINTS = 24;
 const DRIVER_MAP_STYLE = [
   { elementType: 'geometry', stylers: [{ color: '#eef2f6' }] },
   { elementType: 'labels.text.fill', stylers: [{ color: '#334155' }] },
@@ -305,6 +308,33 @@ function normalizePathPoints(points){
   return out;
 }
 
+function normalizeDriverOverlayPath(points){
+  if (!Array.isArray(points)) return [];
+  const out = [];
+  points.forEach((point) => {
+    const lat = Number(point && point.lat);
+    const lon = Number(point && (point.lng ?? point.lon));
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    out.push({ lat, lng: lon });
+  });
+  return out;
+}
+
+function sampleDriverOverlayPath(points, maxPoints){
+  const path = normalizePathPoints(points);
+  if (path.length <= maxPoints) return path;
+  if (maxPoints <= 2) return [path[0], path[path.length - 1]];
+  const sampled = [path[0]];
+  const span = path.length - 1;
+  for (let idx = 1; idx < maxPoints - 1; idx += 1){
+    let srcIndex = Math.round((idx * span) / (maxPoints - 1));
+    srcIndex = Math.max(1, Math.min(srcIndex, path.length - 2));
+    sampled.push(path[srcIndex]);
+  }
+  sampled.push(path[path.length - 1]);
+  return sampled;
+}
+
 function buildDriverRouteCacheKey(routePoints){
   if (!Array.isArray(routePoints)) return '';
   return routePoints.map((point, index) => {
@@ -327,6 +357,27 @@ function mergeDriverRoutePath(target, source){
     out.push(point);
   });
   return out;
+}
+
+async function requestDriverOsrmSegment(stops){
+  if (!Array.isArray(stops) || stops.length < 2){
+    throw new Error('invalid-osrm-segment');
+  }
+  const coords = stops.map((point) => `${Number(point.lng).toFixed(6)},${Number(point.lat).toFixed(6)}`).join(';');
+  const url = `${DRIVER_OSRM_ROUTE_BASE}/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`;
+  const resp = await fetch(url, { cache: 'no-store' });
+  if (!resp.ok){
+    throw new Error(`osrm-http-${resp.status}`);
+  }
+  const payload = await resp.json();
+  if (!payload || payload.code !== 'Ok' || !payload.routes || !payload.routes[0]){
+    throw new Error(String((payload && payload.code) || 'osrm-route-failed'));
+  }
+  const coordsList = (((payload.routes || [])[0] || {}).geometry || {}).coordinates || [];
+  return normalizeDriverOverlayPath(coordsList.map((coord) => ({
+    lat: Number(coord && coord[1]),
+    lng: Number(coord && coord[0]),
+  })));
 }
 
 function requestDriverRoadSegment(service, stops){
@@ -373,17 +424,31 @@ async function buildDriverRoadPath(driverId, routePoints){
     return state.plannedRoutePromise;
   }
   const service = getDirectionsService();
-  if (!service) return stops;
 
   state.plannedRouteKey = cacheKey;
   state.plannedRoutePromise = (async () => {
     let cursor = 0;
     let fullPath = [];
-    while (cursor < stops.length - 1){
-      const chunk = stops.slice(cursor, Math.min(stops.length, cursor + DRIVER_ROUTE_DIRECTIONS_MAX_WAYPOINTS + 2));
-      const segmentPath = await requestDriverRoadSegment(service, chunk);
-      fullPath = mergeDriverRoutePath(fullPath, segmentPath);
-      cursor += Math.max(1, chunk.length - 1);
+    try{
+      while (cursor < stops.length - 1){
+        const chunk = stops.slice(cursor, Math.min(stops.length, cursor + DRIVER_OSRM_MAX_WAYPOINTS));
+        const segmentPath = await requestDriverOsrmSegment(chunk);
+        fullPath = mergeDriverRoutePath(fullPath, segmentPath);
+        cursor += Math.max(1, chunk.length - 1);
+      }
+    }catch(osrmErr){
+      if (service){
+        cursor = 0;
+        fullPath = [];
+        while (cursor < stops.length - 1){
+          const chunk = stops.slice(cursor, Math.min(stops.length, cursor + DRIVER_ROUTE_DIRECTIONS_MAX_WAYPOINTS + 2));
+          const segmentPath = await requestDriverRoadSegment(service, chunk);
+          fullPath = mergeDriverRoutePath(fullPath, segmentPath);
+          cursor += Math.max(1, chunk.length - 1);
+        }
+      } else {
+        throw osrmErr;
+      }
     }
     state.plannedRoutePath = fullPath.length > 1 ? fullPath.slice() : stops.slice();
     state.plannedRoutePromise = null;
@@ -394,6 +459,38 @@ async function buildDriverRoadPath(driverId, routePoints){
     throw err;
   });
   return state.plannedRoutePromise;
+}
+
+async function buildDriverLiveTraceRoadPath(driverId, points){
+  const state = getDriverRouteState(driverId);
+  const sampled = sampleDriverOverlayPath(points, DRIVER_OSRM_TRACE_MAX_POINTS);
+  if (!state || sampled.length < 2) return sampled;
+  const cacheKey = 'live|' + sampled.map((point) => `${point.lat.toFixed(5)}:${point.lng.toFixed(5)}`).join('|');
+  if (state.liveTraceKey === cacheKey && Array.isArray(state.liveTracePath) && state.liveTracePath.length > 1){
+    return state.liveTracePath.slice();
+  }
+  if (state.liveTracePromise && state.liveTraceKey === cacheKey){
+    return state.liveTracePromise;
+  }
+  state.liveTraceKey = cacheKey;
+  state.liveTracePromise = (async () => {
+    let cursor = 0;
+    let fullPath = [];
+    while (cursor < sampled.length - 1){
+      const chunk = sampled.slice(cursor, Math.min(sampled.length, cursor + DRIVER_OSRM_MAX_WAYPOINTS));
+      const segmentPath = await requestDriverOsrmSegment(chunk);
+      fullPath = mergeDriverRoutePath(fullPath, segmentPath);
+      cursor += Math.max(1, chunk.length - 1);
+    }
+    state.liveTracePath = fullPath.length > 1 ? fullPath.slice() : sampled.slice();
+    state.liveTracePromise = null;
+    return state.liveTracePath.slice();
+  })().catch((err) => {
+    state.liveTracePromise = null;
+    state.liveTracePath = sampled.slice();
+    throw err;
+  });
+  return state.liveTracePromise;
 }
 
 function fitDriverRouteBounds(locationPoints, routePoints, plannedPath){
@@ -785,12 +882,8 @@ function renderDriverRouteOverlay(insights, focusMap){
   clearDriverRouteOverlays();
   if (!(driverMapReady && window.google && window.google.maps) || !insights) return;
   const overlayReqId = driverRouteOverlayReqSeq;
-  const locationPoints = (Array.isArray(insights.location_points) ? insights.location_points : []).map((point) => {
-    const lat = Number(point && point.lat);
-    const lon = Number(point && (point.lon ?? point.lng));
-    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
-    return { lat, lng: lon };
-  }).filter(Boolean);
+  const locationPoints = normalizeDriverOverlayPath(Array.isArray(insights.location_points) ? insights.location_points : []);
+  const liveTracePath = normalizeDriverOverlayPath(Array.isArray(insights.live_trace_path) ? insights.live_trace_path : []);
   const routePoints = (Array.isArray(insights.route_points) ? insights.route_points : []).map((point) => {
     const lat = Number(point && point.lat);
     const lon = Number(point && (point.lon ?? point.lng));
@@ -799,15 +892,41 @@ function renderDriverRouteOverlay(insights, focusMap){
   }).filter(Boolean);
   const driverId = getDriverId((insights && insights.driver) || selectedDriverData || {});
   const fallbackPath = routePoints.map((point) => ({ lat: point.lat, lng: point.lng }));
-
-  if (locationPoints.length > 1){
+  const plannedPathFromPayload = normalizeDriverOverlayPath(Array.isArray(insights.planned_route_path) ? insights.planned_route_path : []);
+  const drawLivePath = (path) => {
+    const normalized = normalizePathPoints(path);
+    if (normalized.length <= 1) return;
+    if (driverLiveTracePolyline){
+      try{ driverLiveTracePolyline.setMap(null); }catch(_){ }
+      driverLiveTracePolyline = null;
+    }
     driverLiveTracePolyline = new google.maps.Polyline({
       map: driverMap,
-      path: locationPoints,
+      path: normalized,
       strokeColor: '#0ea5e9',
       strokeOpacity: 0.95,
       strokeWeight: 4,
     });
+  };
+
+  if (liveTracePath.length > 1){
+    drawLivePath(liveTracePath);
+  } else if (locationPoints.length > 1){
+    buildDriverLiveTraceRoadPath(driverId, locationPoints)
+      .then((path) => {
+        if (overlayReqId !== driverRouteOverlayReqSeq) return;
+        drawLivePath(path);
+        if (focusMap){
+          fitDriverRouteBounds(normalizePathPoints(path), routePoints, plannedPathFromPayload.length > 1 ? plannedPathFromPayload : fallbackPath);
+        }
+      })
+      .catch((err) => {
+        console.warn('driver live trace osrm fallback', err);
+        if (overlayReqId !== driverRouteOverlayReqSeq) return;
+        drawLivePath(locationPoints);
+      });
+  } else if (locationPoints.length > 0){
+    drawLivePath(locationPoints);
   }
   routePoints.forEach((point, idx) => {
     if (String(point.kind || '') !== 'order') return;
@@ -828,9 +947,22 @@ function renderDriverRouteOverlay(insights, focusMap){
     driverRouteStopMarkers.push(marker);
   });
   if (focusMap){
-    fitDriverRouteBounds(locationPoints, routePoints, fallbackPath);
+    fitDriverRouteBounds(liveTracePath.length > 1 ? liveTracePath : locationPoints, routePoints, plannedPathFromPayload.length > 1 ? plannedPathFromPayload : fallbackPath);
   }
   if (routePoints.length <= 1){
+    return;
+  }
+  if (plannedPathFromPayload.length > 1){
+    driverPlannedRoutePolyline = new google.maps.Polyline({
+      map: driverMap,
+      path: plannedPathFromPayload,
+      strokeColor: locationPoints.length > 1 ? '#f59e0b' : '#f26b38',
+      strokeOpacity: locationPoints.length > 1 ? 0.46 : 0.92,
+      strokeWeight: locationPoints.length > 1 ? 4 : 5,
+    });
+    if (focusMap){
+      fitDriverRouteBounds(liveTracePath.length > 1 ? liveTracePath : locationPoints, routePoints, plannedPathFromPayload);
+    }
     return;
   }
   buildDriverRoadPath(driverId, routePoints)
@@ -845,7 +977,7 @@ function renderDriverRouteOverlay(insights, focusMap){
         strokeWeight: locationPoints.length > 1 ? 4 : 5,
       });
       if (focusMap){
-        fitDriverRouteBounds(locationPoints, routePoints, finalPath);
+        fitDriverRouteBounds(liveTracePath.length > 1 ? liveTracePath : locationPoints, routePoints, finalPath);
       }
     })
     .catch((err) => {
@@ -859,7 +991,7 @@ function renderDriverRouteOverlay(insights, focusMap){
         strokeWeight: locationPoints.length > 1 ? 3 : 4,
       });
       if (focusMap){
-        fitDriverRouteBounds(locationPoints, routePoints, fallbackPath);
+        fitDriverRouteBounds(liveTracePath.length > 1 ? liveTracePath : locationPoints, routePoints, fallbackPath);
       }
     });
 }
