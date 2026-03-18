@@ -37,6 +37,7 @@ let driverLiveTracePolyline = null;
 let driverPlannedRoutePolyline = null;
 const driverRouteStopMarkers = [];
 let driverInsightsReqSeq = 0;
+let driverRouteOverlayReqSeq = 0;
 // 0 disables age-based hiding; rely on explicit offline events instead.
 const DRIVER_LOCATION_STALE_SEC = 0;
 const DRIVER_ANIM_MIN_MS = 600;
@@ -47,6 +48,7 @@ const DRIVER_ROUTE_MIN_DISTANCE_M = 60;
 const DRIVER_ROUTE_SEGMENT_MIN_MS = 120;
 const DRIVER_ROUTE_SEGMENT_MAX_MS = 900;
 const DRIVER_USE_ROAD_SNAPPING = true;
+const DRIVER_ROUTE_DIRECTIONS_MAX_WAYPOINTS = 23;
 const DRIVER_MAP_STYLE = [
   { elementType: 'geometry', stylers: [{ color: '#eef2f6' }] },
   { elementType: 'labels.text.fill', stylers: [{ color: '#334155' }] },
@@ -120,6 +122,7 @@ function syncAllDriverMarkerStyles(){
 }
 
 function clearDriverRouteOverlays(){
+  driverRouteOverlayReqSeq += 1;
   if (driverLiveTracePolyline){
     try{ driverLiveTracePolyline.setMap(null); }catch(_){ }
     driverLiveTracePolyline = null;
@@ -300,6 +303,120 @@ function normalizePathPoints(points){
     }
   });
   return out;
+}
+
+function buildDriverRouteCacheKey(routePoints){
+  if (!Array.isArray(routePoints)) return '';
+  return routePoints.map((point, index) => {
+    const lat = Number(point && point.lat);
+    const lng = Number(point && (point.lng ?? point.lon));
+    return [
+      String(point && point.kind || 'point'),
+      String(point && point.order_id || index),
+      Number.isFinite(lat) ? lat.toFixed(5) : 'nan',
+      Number.isFinite(lng) ? lng.toFixed(5) : 'nan',
+    ].join(':');
+  }).join('|');
+}
+
+function mergeDriverRoutePath(target, source){
+  const out = Array.isArray(target) ? target.slice() : [];
+  normalizePathPoints(source).forEach((point) => {
+    const prev = out.length ? out[out.length - 1] : null;
+    if (prev && Math.abs(prev.lat - point.lat) < 0.000001 && Math.abs(prev.lng - point.lng) < 0.000001) return;
+    out.push(point);
+  });
+  return out;
+}
+
+function requestDriverRoadSegment(service, stops){
+  return new Promise((resolve, reject) => {
+    if (!service || !Array.isArray(stops) || stops.length < 2){
+      reject(new Error('invalid-road-segment'));
+      return;
+    }
+    const origin = { lat: Number(stops[0].lat), lng: Number(stops[0].lng) };
+    const destination = { lat: Number(stops[stops.length - 1].lat), lng: Number(stops[stops.length - 1].lng) };
+    const waypoints = stops.slice(1, -1).map((point) => ({
+      location: { lat: Number(point.lat), lng: Number(point.lng) },
+      stopover: true,
+    }));
+    service.route(
+      {
+        origin,
+        destination,
+        waypoints,
+        optimizeWaypoints: false,
+        travelMode: google.maps.TravelMode.DRIVING,
+        provideRouteAlternatives: false,
+      },
+      (result, status) => {
+        if (status === 'OK' && result && result.routes && result.routes[0]){
+          resolve(normalizePathPoints(result.routes[0].overview_path || []));
+          return;
+        }
+        reject(new Error(String(status || 'route-failed')));
+      },
+    );
+  });
+}
+
+async function buildDriverRoadPath(driverId, routePoints){
+  const state = getDriverRouteState(driverId);
+  const stops = normalizePathPoints((routePoints || []).map((point) => ({ lat: Number(point.lat), lng: Number(point.lng) })));
+  if (!state || stops.length < 2) return stops;
+  const cacheKey = buildDriverRouteCacheKey(routePoints);
+  if (state.plannedRouteKey === cacheKey && Array.isArray(state.plannedRoutePath) && state.plannedRoutePath.length > 1){
+    return state.plannedRoutePath.slice();
+  }
+  if (state.plannedRoutePromise && state.plannedRouteKey === cacheKey){
+    return state.plannedRoutePromise;
+  }
+  const service = getDirectionsService();
+  if (!service) return stops;
+
+  state.plannedRouteKey = cacheKey;
+  state.plannedRoutePromise = (async () => {
+    let cursor = 0;
+    let fullPath = [];
+    while (cursor < stops.length - 1){
+      const chunk = stops.slice(cursor, Math.min(stops.length, cursor + DRIVER_ROUTE_DIRECTIONS_MAX_WAYPOINTS + 2));
+      const segmentPath = await requestDriverRoadSegment(service, chunk);
+      fullPath = mergeDriverRoutePath(fullPath, segmentPath);
+      cursor += Math.max(1, chunk.length - 1);
+    }
+    state.plannedRoutePath = fullPath.length > 1 ? fullPath.slice() : stops.slice();
+    state.plannedRoutePromise = null;
+    return state.plannedRoutePath.slice();
+  })().catch((err) => {
+    state.plannedRoutePromise = null;
+    state.plannedRoutePath = stops.slice();
+    throw err;
+  });
+  return state.plannedRoutePromise;
+}
+
+function fitDriverRouteBounds(locationPoints, routePoints, plannedPath){
+  if (!(driverMapReady && window.google && window.google.maps)) return;
+  const bounds = new google.maps.LatLngBounds();
+  let pointCount = 0;
+  locationPoints.forEach((point) => { bounds.extend(point); pointCount += 1; });
+  normalizePathPoints(plannedPath).forEach((point) => { bounds.extend(point); pointCount += 1; });
+  if (!pointCount){
+    routePoints.forEach((point) => {
+      bounds.extend({ lat: Number(point.lat), lng: Number(point.lng) });
+      pointCount += 1;
+    });
+  }
+  if (pointCount > 1){
+    try{ driverMap.fitBounds(bounds, 64); }catch(_){ }
+  } else if (pointCount === 1){
+    try{
+      const center = bounds.getCenter();
+      driverMap.setCenter(center);
+      driverMap.setZoom(13);
+    }catch(_){ }
+  }
 }
 
 function startDriverRouteAnimation(id, points, durationMs){
@@ -667,6 +784,7 @@ function bindDriverInspectorBodyActions(){
 function renderDriverRouteOverlay(insights, focusMap){
   clearDriverRouteOverlays();
   if (!(driverMapReady && window.google && window.google.maps) || !insights) return;
+  const overlayReqId = driverRouteOverlayReqSeq;
   const locationPoints = (Array.isArray(insights.location_points) ? insights.location_points : []).map((point) => {
     const lat = Number(point && point.lat);
     const lon = Number(point && (point.lon ?? point.lng));
@@ -679,6 +797,8 @@ function renderDriverRouteOverlay(insights, focusMap){
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
     return Object.assign({}, point, { lat, lng: lon });
   }).filter(Boolean);
+  const driverId = getDriverId((insights && insights.driver) || selectedDriverData || {});
+  const fallbackPath = routePoints.map((point) => ({ lat: point.lat, lng: point.lng }));
 
   if (locationPoints.length > 1){
     driverLiveTracePolyline = new google.maps.Polyline({
@@ -687,15 +807,6 @@ function renderDriverRouteOverlay(insights, focusMap){
       strokeColor: '#0ea5e9',
       strokeOpacity: 0.95,
       strokeWeight: 4,
-    });
-  }
-  if (routePoints.length > 1){
-    driverPlannedRoutePolyline = new google.maps.Polyline({
-      map: driverMap,
-      path: routePoints.map((point) => ({ lat: point.lat, lng: point.lng })),
-      strokeColor: locationPoints.length > 1 ? '#f59e0b' : '#f26b38',
-      strokeOpacity: locationPoints.length > 1 ? 0.42 : 0.92,
-      strokeWeight: locationPoints.length > 1 ? 3 : 4,
     });
   }
   routePoints.forEach((point, idx) => {
@@ -716,21 +827,41 @@ function renderDriverRouteOverlay(insights, focusMap){
     });
     driverRouteStopMarkers.push(marker);
   });
-
-  if (!focusMap) return;
-  const bounds = new google.maps.LatLngBounds();
-  let pointCount = 0;
-  locationPoints.forEach((point) => { bounds.extend(point); pointCount += 1; });
-  routePoints.forEach((point) => { bounds.extend({ lat: point.lat, lng: point.lng }); pointCount += 1; });
-  if (pointCount > 1){
-    try{ driverMap.fitBounds(bounds, 64); }catch(_){ }
-  } else if (pointCount === 1 && (routePoints[0] || locationPoints[0])){
-    const onlyPoint = routePoints[0] || locationPoints[0];
-    try{
-      driverMap.setCenter({ lat: onlyPoint.lat, lng: onlyPoint.lng });
-      driverMap.setZoom(13);
-    }catch(_){ }
+  if (focusMap){
+    fitDriverRouteBounds(locationPoints, routePoints, fallbackPath);
   }
+  if (routePoints.length <= 1){
+    return;
+  }
+  buildDriverRoadPath(driverId, routePoints)
+    .then((plannedPath) => {
+      if (overlayReqId !== driverRouteOverlayReqSeq) return;
+      const finalPath = normalizePathPoints(plannedPath).length > 1 ? normalizePathPoints(plannedPath) : fallbackPath;
+      driverPlannedRoutePolyline = new google.maps.Polyline({
+        map: driverMap,
+        path: finalPath,
+        strokeColor: locationPoints.length > 1 ? '#f59e0b' : '#f26b38',
+        strokeOpacity: locationPoints.length > 1 ? 0.46 : 0.92,
+        strokeWeight: locationPoints.length > 1 ? 4 : 5,
+      });
+      if (focusMap){
+        fitDriverRouteBounds(locationPoints, routePoints, finalPath);
+      }
+    })
+    .catch((err) => {
+      console.warn('driver route directions fallback', err);
+      if (overlayReqId !== driverRouteOverlayReqSeq) return;
+      driverPlannedRoutePolyline = new google.maps.Polyline({
+        map: driverMap,
+        path: fallbackPath,
+        strokeColor: locationPoints.length > 1 ? '#f59e0b' : '#f26b38',
+        strokeOpacity: locationPoints.length > 1 ? 0.42 : 0.92,
+        strokeWeight: locationPoints.length > 1 ? 3 : 4,
+      });
+      if (focusMap){
+        fitDriverRouteBounds(locationPoints, routePoints, fallbackPath);
+      }
+    });
 }
 
 function buildDriverInspectorMeta(insights){
@@ -802,7 +933,7 @@ function renderDriverRouteView(insights){
   const routePoints = Array.isArray(insights && insights.route_points) ? insights.route_points : [];
   const locationPoints = Array.isArray(insights && insights.location_points) ? insights.location_points : [];
   const mode = String((insights && insights.route_mode) || '');
-  const label = mode === 'live_trace' ? 'Trayecto real reciente dibujado en el mapa' : 'Ruta planificada dibujada en el mapa';
+  const label = mode === 'live_trace' ? 'Trayecto real reciente sobre calles' : 'Ruta planificada sobre calles';
   if (!routePoints.length){
     if (locationPoints.length > 1){
       return `
