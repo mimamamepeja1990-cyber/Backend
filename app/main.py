@@ -4056,6 +4056,27 @@ async def debug_clear(request: Request):
                 logger.exception('debug/clear failed to delete %s: %s', name, e_del)
                 return 0
 
+        def _delete_rows_by_ids(table_name: str, column_name: str, values, cast_column: bool = False) -> int:
+            ids = [str(v).strip() for v in (values or []) if str(v).strip()]
+            if not ids or not _table_exists(table_name):
+                return 0
+            deleted = 0
+            column_sql = f"CAST({column_name} AS TEXT)" if cast_column else column_name
+            try:
+                with engine.begin() as conn:
+                    for start in range(0, len(ids), 200):
+                        chunk = ids[start:start + 200]
+                        params = {f'id_{idx}': chunk[idx] for idx in range(len(chunk))}
+                        placeholders = ", ".join([f":id_{idx}" for idx in range(len(chunk))])
+                        res = conn.execute(text(f"DELETE FROM {table_name} WHERE {column_sql} IN ({placeholders})"), params)
+                        try:
+                            deleted += max(int(res.rowcount or 0), 0)
+                        except Exception:
+                            pass
+            except Exception as e_del:
+                logger.exception('debug/clear failed to delete selected rows from %s: %s', table_name, e_del)
+            return deleted
+
         result = {'ok': True, 'target': target, 'deleted': {}, 'updated': {}}
 
         if target == 'catalog':
@@ -4145,31 +4166,56 @@ async def debug_clear(request: Request):
 
         elif target == 'preparations':
             try:
+                prep_order_ids = []
+                prep_seen = set()
+                prep_statuses = ('visto', 'preparado', 'preparando', 'preparing', 'prepared', 'seen', 'viewed')
+
                 if _table_exists('orders'):
                     insp_local = inspect(engine)
                     cols = {c['name'] for c in (insp_local.get_columns('orders') or [])}
-                    if 'status' in cols:
+                    if 'id' in cols and 'status' in cols:
+                        params = {f'st_{idx}': prep_statuses[idx] for idx in range(len(prep_statuses))}
+                        placeholders = ", ".join([f":st_{idx}" for idx in range(len(prep_statuses))])
                         with engine.begin() as conn:
-                            res = conn.execute(
-                                text("UPDATE orders SET status = :status WHERE LOWER(status) IN ('visto','preparado','preparando','preparing','prepared','seen','viewed')"),
-                                {'status': 'entregado'}
-                            )
-                            try:
-                                result['updated']['orders_status_updated'] = int(res.rowcount or 0)
-                            except Exception:
-                                result['updated']['orders_status_updated'] = 0
+                            rows = conn.execute(
+                                text(f"SELECT CAST(id AS TEXT) FROM orders WHERE LOWER(COALESCE(status, '')) IN ({placeholders})"),
+                                params,
+                            ).fetchall()
+                        for row in rows or []:
+                            oid = str((row[0] if row else '') or '').strip()
+                            if oid and oid not in prep_seen:
+                                prep_seen.add(oid)
+                                prep_order_ids.append(oid)
                 db = SessionLocal()
                 try:
                     try:
-                        crud.set_setting(db, 'order_status_overrides', {})
+                        overrides = crud.get_setting(db, 'order_status_overrides')
+                        if isinstance(overrides, dict):
+                            cleaned = {}
+                            removed = 0
+                            for key, value in overrides.items():
+                                oid = str(key or '').strip()
+                                if _normalize_order_status(value) in ('visto', 'preparado'):
+                                    removed += 1
+                                    if oid and oid not in prep_seen:
+                                        prep_seen.add(oid)
+                                        prep_order_ids.append(oid)
+                                    continue
+                                cleaned[key] = value
+                            if removed:
+                                crud.set_setting(db, 'order_status_overrides', cleaned)
+                                result['updated']['order_status_overrides_removed'] = removed
                     except Exception:
-                        logger.exception('debug/clear preparations: failed to reset status overrides')
+                        logger.exception('debug/clear preparations: failed to prune status overrides')
                 finally:
                     try:
                         db.close()
                     except Exception:
                         pass
                 try:
+                    result['deleted']['orders'] = _delete_rows_by_ids('orders', 'id', prep_order_ids, cast_column=True)
+                    result['deleted']['order_token_previews'] = _delete_rows_by_ids('order_token_previews', 'order_id', prep_order_ids)
+                    ORDER_PAYLOAD_CACHE.clear()
                     ORDER_STATUS_CACHE.clear()
                 except Exception:
                     pass

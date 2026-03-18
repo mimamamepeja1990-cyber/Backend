@@ -1577,6 +1577,7 @@ async function runAdminClear(target){
     } else if (target.key === 'preparations'){
       try{ await refreshOrders('web'); }catch(_){ }
       try{ await refreshPreparations(true); }catch(_){ }
+      try{ await refreshCustomers(true); }catch(_){ }
     }
   }catch(e){
     const msg = (e && e.payload && (e.payload.detail || e.payload.error)) ? (e.payload.detail || e.payload.error) : (e && e.message ? e.message : 'Error');
@@ -4197,6 +4198,7 @@ async function onDelete(id){
 const orderSearch_web = document.getElementById('orderSearch_web');
 const orderDate_web = document.getElementById('orderDate_web');
 const clearOrderDate_web = document.getElementById('clearOrderDate_web');
+const markAllSeenBtn_web = document.getElementById('markAllSeenBtn_web');
 const refreshOrdersBtn_web = document.getElementById('refreshOrdersBtn_web');
 const ordersTypeTabMayorista = document.getElementById('ordersTypeTab_mayorista');
 const ordersTypeTabMinorista = document.getElementById('ordersTypeTab_minorista');
@@ -4206,11 +4208,115 @@ const preparationsSearch = document.getElementById('preparationsSearch');
 const preparationsDate = document.getElementById('preparationsDate');
 const filterPreparationsTomorrowBtn = document.getElementById('filterPreparationsTomorrow');
 const clearPreparationsDate = document.getElementById('clearPreparationsDate');
+const markAllPreparedBtn = document.getElementById('markAllPreparedBtn');
 const refreshPreparationsBtn = document.getElementById('refreshPreparationsBtn');
 const preparationsList = document.getElementById('preparationsList');
 let currentOrderCustomerType = 'mayorista';
 let lastOrdersBaseWeb = [];
 let lastPreparationsBase = [];
+
+function mergePatchedOrderIntoCaches(updated, fallbackId){
+  const uid = String((updated && updated.id) || fallbackId || '').trim();
+  if (!uid || !updated || updated.id == null) return;
+
+  let replacedInPreparations = false;
+  lastPreparationsBase = (lastPreparationsBase || []).map((entry) => {
+    if (String(entry && entry.id) === uid){
+      replacedInPreparations = true;
+      return mergeOrderRecord(entry, updated);
+    }
+    return entry;
+  });
+  if (!replacedInPreparations){
+    lastPreparationsBase = [updated, ...(lastPreparationsBase || [])];
+  }
+
+  let replacedInOrders = false;
+  lastOrdersBaseWeb = (lastOrdersBaseWeb || []).map((entry) => {
+    if (String(entry && entry.id) === uid){
+      replacedInOrders = true;
+      return mergeOrderRecord(entry, updated);
+    }
+    return entry;
+  });
+  if (!replacedInOrders){
+    lastOrdersBaseWeb = [updated, ...(lastOrdersBaseWeb || [])];
+  }
+}
+
+async function patchOrderStatus(orderId, targetStatus){
+  await ensureApiBase();
+  const updated = await safeFetch(API_BASE + '/orders/' + encodeURIComponent(orderId) + '/status', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ status: targetStatus }),
+  });
+  mergePatchedOrderIntoCaches(updated, orderId);
+  return updated;
+}
+
+function collectBulkActionIds(selector, root){
+  const seen = new Set();
+  const out = [];
+  try{
+    Array.from((root || document).querySelectorAll(selector)).forEach((node) => {
+      const id = node && node.dataset ? String(node.dataset.id || '').trim() : '';
+      if (!id || seen.has(id) || (node && node.disabled)) return;
+      seen.add(id);
+      out.push(id);
+    });
+  }catch(_){ }
+  return out;
+}
+
+async function runBulkOrderStatusUpdate(ids, targetStatus, button, options){
+  const orderIds = Array.isArray(ids) ? ids.filter(Boolean) : [];
+  const total = orderIds.length;
+  const progressLabel = options && options.progressLabel ? String(options.progressLabel) : 'Actualizando';
+  const emptyMessage = options && options.emptyMessage ? String(options.emptyMessage) : 'No hay pedidos para actualizar.';
+  const successSuffix = options && options.successSuffix ? String(options.successSuffix) : 'actualizados';
+  if (!total){
+    showToast(emptyMessage);
+    return;
+  }
+  if (!confirm(progressLabel + ' ' + total + ' pedido(s)?')) return;
+
+  const controls = [markAllSeenBtn_web, markAllPreparedBtn, refreshOrdersBtn_web, refreshPreparationsBtn].filter(Boolean);
+  const previousLabels = new Map();
+  controls.forEach((el) => {
+    previousLabels.set(el, String(el.textContent || ''));
+    el.disabled = true;
+  });
+
+  let successCount = 0;
+  let failedCount = 0;
+  try{
+    for (let index = 0; index < orderIds.length; index += 1){
+      if (button) button.textContent = progressLabel + ' ' + String(index + 1) + '/' + String(total);
+      try{
+        await patchOrderStatus(orderIds[index], targetStatus);
+        successCount += 1;
+      }catch(err){
+        failedCount += 1;
+        console.error('bulk status patch failed', { orderId: orderIds[index], targetStatus, err });
+      }
+    }
+    try{ await refreshOrders('web'); }catch(_){ }
+    try{ await refreshPreparations(true); }catch(_){ }
+    if (failedCount){
+      showToast('Listo: ' + successCount + '/' + total + ' ' + successSuffix + '. ' + failedCount + ' fallaron.', failedCount === total ? 'error' : 'warning');
+    } else {
+      showToast('Se marcaron ' + successCount + ' pedidos como ' + successSuffix + '.');
+    }
+  } finally {
+    previousLabels.forEach((label, el) => {
+      try{
+        el.disabled = false;
+        el.textContent = label;
+      }catch(_){ }
+    });
+  }
+}
 
 function normalizeOrderCustomerType(value){
   const v = String(value || '').trim().toLowerCase();
@@ -5863,37 +5969,8 @@ function renderPreparations(list){
         if (!id) return;
         btn.disabled = true;
         btn.textContent = 'Guardando...';
-        const updated = await safeFetch(
-          API_BASE + '/orders/' + encodeURIComponent(id) + '/status',
-          {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ status: 'preparado' }),
-          },
-        );
+        const updated = await patchOrderStatus(id, 'preparado');
         const uid = String((updated && updated.id) || id);
-        let replacedInPreparations = false;
-        lastPreparationsBase = (lastPreparationsBase || []).map((entry) => {
-          if (String(entry && entry.id) === uid){
-            replacedInPreparations = true;
-            return mergeOrderRecord(entry, updated);
-          }
-          return entry;
-        });
-        if (!replacedInPreparations && updated && updated.id != null){
-          lastPreparationsBase = [updated, ...(lastPreparationsBase || [])];
-        }
-        let replacedInOrders = false;
-        lastOrdersBaseWeb = (lastOrdersBaseWeb || []).map((entry) => {
-          if (String(entry && entry.id) === uid){
-            replacedInOrders = true;
-            return mergeOrderRecord(entry, updated);
-          }
-          return entry;
-        });
-        if (!replacedInOrders && updated && updated.id != null){
-          lastOrdersBaseWeb = [updated, ...(lastOrdersBaseWeb || [])];
-        }
         try{
           const modal = document.getElementById('orderModal');
           if (modal && !modal.classList.contains('hidden')){
@@ -6631,6 +6708,14 @@ async function refreshOrders(source){
 // Wire refresh buttons per-section and add a single test push button
 const anchorForTest = document.querySelector('#refreshOrdersBtn_web');
 if(refreshOrdersBtn_web) refreshOrdersBtn_web.addEventListener('click', ()=> refreshOrders('web'));
+if(markAllSeenBtn_web) markAllSeenBtn_web.addEventListener('click', async ()=> {
+  const ids = collectBulkActionIds('#ordersTable_web .markSeenBtn[data-id]');
+  await runBulkOrderStatusUpdate(ids, 'visto', markAllSeenBtn_web, {
+    progressLabel: 'Marcando vistos',
+    emptyMessage: 'No hay pedidos visibles para marcar como vistos.',
+    successSuffix: 'vistos',
+  });
+});
 try{
   const testBtn = document.createElement('button'); testBtn.id = 'testPushBtn'; testBtn.className = 'btn'; testBtn.style.marginLeft = '8px'; testBtn.textContent = 'Probar evento WS';
   if(anchorForTest && anchorForTest.parentNode) anchorForTest.parentNode.appendChild(testBtn); else document.body.appendChild(testBtn);
@@ -6657,6 +6742,14 @@ if(filterPreparationsTomorrowBtn) filterPreparationsTomorrowBtn.addEventListener
   renderPreparations(lastPreparationsBase);
 });
 if(clearPreparationsDate) clearPreparationsDate.addEventListener('click', ()=> { if(preparationsDate) preparationsDate.value = ''; renderPreparations(lastPreparationsBase); });
+if(markAllPreparedBtn) markAllPreparedBtn.addEventListener('click', async ()=> {
+  const ids = collectBulkActionIds('.prepMarkPreparedBtn[data-id]', preparationsList || document);
+  await runBulkOrderStatusUpdate(ids, 'preparado', markAllPreparedBtn, {
+    progressLabel: 'Marcando preparados',
+    emptyMessage: 'No hay pedidos visibles para marcar como preparados.',
+    successSuffix: 'preparados',
+  });
+});
 if(refreshPreparationsBtn) refreshPreparationsBtn.addEventListener('click', ()=> refreshPreparations(true));
 
 // Tabs and badges wiring (web only)
