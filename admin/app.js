@@ -4196,10 +4196,15 @@ async function handleSave(ev){
     else { created = await createProduct(payload); showToast('Producto creado'); }
     // update product-categories mapping (use id when available, otherwise fallback to name)
     try{
-      const key = String((created && created.id) ? created.id : payload.name);
-      const mapping = loadProductCategories() || {};
-      if(selectedCats && selectedCats.length) mapping[key] = selectedCats; else delete mapping[key];
-      await saveProductCategories(mapping);
+      if(selectedCats && selectedCats.length){
+        const key = String((created && created.id) ? created.id : payload.name);
+        const mapping = loadProductCategories() || {};
+        mapping[key] = selectedCats;
+        await saveProductCategories(mapping);
+      } else {
+        await fetchAndSyncProductCategories().catch(()=>null);
+      }
+      await fetchAndSyncFiltersFromServer().catch(()=>null);
     }catch(e){ console.warn('Failed to save product categories', e); }
 
     closeModal(); refresh();
@@ -4735,6 +4740,7 @@ const filtersSection = document.getElementById('filters');
 const filterNameInput = document.getElementById('filterName');
 const addFilterBtn = document.getElementById('addFilterBtn');
 const importFiltersBtn = document.getElementById('importFiltersBtn');
+const autoCategorizeCatalogBtn = document.getElementById('autoCategorizeCatalogBtn');
 const filtersTableBody = document.querySelector('#filtersTable tbody');
 
 async function fetchOrders(q = '', date = '', source = '', limit = ''){
@@ -7519,6 +7525,34 @@ if(importFiltersBtn) importFiltersBtn.addEventListener('click', async ()=>{
   }catch(e){
     console.error('importFilters failed', e);
     showToast('Error importando filtros','error');
+  }
+});
+
+if(autoCategorizeCatalogBtn) autoCategorizeCatalogBtn.addEventListener('click', async ()=>{
+  const btn = autoCategorizeCatalogBtn;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Sincronizando...';
+  try{
+    const result = await safeFetch(`${API_BASE}/admin/products/auto-categorize`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ overwrite_category: false }),
+    });
+    await fetchAndSyncFiltersFromServer().catch(()=>null);
+    await fetchAndSyncProductCategories().catch(()=>null);
+    renderFilters();
+    refresh();
+    const processed = Number(result && result.processed_products || 0);
+    const categorized = Number(result && result.categorized_products || 0);
+    const createdFilters = Number(result && result.created_filters || 0);
+    showToast(`Catalogo sincronizado: ${categorized}/${processed} productos categorizados, ${createdFilters} filtros nuevos`);
+  }catch(e){
+    console.error('auto-categorize catalog failed', e);
+    showToast('Error auto-categorizando catalogo', 'error');
+  }finally{
+    btn.disabled = false;
+    btn.textContent = original;
   }
 });
 

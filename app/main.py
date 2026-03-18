@@ -4235,6 +4235,603 @@ async def debug_clear(request: Request):
 # -------------------------------------------------------------------
 # Filters endpoint: serve and persist admin-managed filters so public catalog can fetch them
 # -------------------------------------------------------------------
+_AUTO_CATEGORY_RULES = [
+    {
+        'value': 'quesos',
+        'name': 'Quesos',
+        'priority': 220,
+        'terms': [
+            'queso', 'quesos', 'mozzarella', 'muzzarella', 'cremoso', 'tybo',
+            'pategras', 'provolone', 'provoleta', 'gouda', 'sardo',
+            'reggianito', 'cheddar', 'parmesano', 'parmesan', 'azul',
+            'roquefort', 'brie', 'camembert', 'fontina',
+        ],
+        'also': ['lacteos'],
+    },
+    {
+        'value': 'fiambres',
+        'name': 'Fiambres',
+        'priority': 210,
+        'terms': [
+            'fiambre', 'fiambres', 'jamon', 'jamones', 'jamon cocido',
+            'jamon crudo', 'paleta', 'mortadela', 'salamin', 'salame',
+            'pastron', 'panceta', 'pepperoni', 'peperoni', 'lomito',
+            'bondiola feteada', 'feteado', 'feteada',
+        ],
+        'also': [],
+    },
+    {
+        'value': 'embutidos',
+        'name': 'Embutidos',
+        'priority': 205,
+        'terms': [
+            'embutido', 'embutidos', 'chorizo', 'chorizos', 'morcilla',
+            'morcillas', 'longaniza', 'longanizas', 'salchicha parrillera',
+            'salchichon', 'cantimpalo', 'butifarra',
+        ],
+        'also': ['fiambres'],
+    },
+    {
+        'value': 'hamburguesas',
+        'name': 'Hamburguesas',
+        'priority': 200,
+        'terms': [
+            'hamburguesa', 'hamburguesas', 'burger', 'burgers', 'medallon',
+            'medallones', 'paty',
+        ],
+        'also': ['congelados'],
+    },
+    {
+        'value': 'milanesas',
+        'name': 'Milanesas',
+        'priority': 198,
+        'terms': [
+            'milanesa', 'milanesas', 'suprema rebozada', 'supremas rebozadas',
+            'nugget', 'nuggets', 'bastoncitos de pollo',
+        ],
+        'also': ['congelados'],
+    },
+    {
+        'value': 'pollo',
+        'name': 'Pollo',
+        'priority': 190,
+        'terms': [
+            'pollo', 'pechuga', 'pata muslo', 'suprema', 'alita', 'muslo',
+            'gallina',
+        ],
+        'also': [],
+    },
+    {
+        'value': 'carne vacuna',
+        'name': 'Carne vacuna',
+        'priority': 188,
+        'terms': [
+            'vacuno', 'vacuna', 'carne picada', 'picada', 'asado', 'nalga',
+            'peceto', 'roast beef', 'bife', 'bifes', 'vacio', 'entrania',
+            'matambre', 'bola de lomo', 'lomo', 'cuadrada',
+        ],
+        'also': [],
+    },
+    {
+        'value': 'cerdo',
+        'name': 'Cerdo',
+        'priority': 186,
+        'terms': [
+            'cerdo', 'bondiola', 'costilla de cerdo', 'matambre de cerdo',
+            'pechito de cerdo', 'solomillo', 'carre', 'pulled pork',
+        ],
+        'also': [],
+    },
+    {
+        'value': 'pescados y mariscos',
+        'name': 'Pescados y mariscos',
+        'priority': 184,
+        'terms': [
+            'merluza', 'atun', 'salmon', 'langostino', 'calamar', 'marisco',
+            'pescado', 'surimi',
+        ],
+        'also': ['congelados'],
+    },
+    {
+        'value': 'lacteos',
+        'name': 'Lacteos',
+        'priority': 180,
+        'terms': [
+            'lacteo', 'lacteos', 'leche', 'crema', 'manteca', 'mantequilla',
+            'yogur', 'yogurt', 'dulce de leche', 'postrecito', 'flan',
+            'danette', 'danonino',
+        ],
+        'also': [],
+    },
+    {
+        'value': 'pastas',
+        'name': 'Pastas',
+        'priority': 170,
+        'terms': [
+            'raviol', 'ravioles', 'tallarin', 'tallarines', 'fideos', 'noqui',
+            'noquis', 'canelones', 'sorrentinos', 'lasagna', 'tapa de empanada',
+            'tapa empanada', 'tapa pascualina',
+        ],
+        'also': [],
+    },
+    {
+        'value': 'panificados',
+        'name': 'Panificados',
+        'priority': 168,
+        'terms': [
+            'pan', 'pancho', 'pan de pancho', 'pan de hamburguesa', 'prepizza',
+            'pizza', 'empanada', 'factura', 'medialuna', 'tapa sandwich',
+            'tapa de sandwich',
+        ],
+        'also': [],
+    },
+    {
+        'value': 'aderezos y salsas',
+        'name': 'Aderezos y salsas',
+        'priority': 166,
+        'terms': [
+            'mayonesa', 'ketchup', 'mostaza', 'barbacoa', 'barbecue',
+            'chimichurri', 'salsa golf', 'aderezo', 'salsa cesar',
+            'sriracha', 'picante', 'salsa de soja', 'teriyaki',
+        ],
+        'also': ['almacen'],
+    },
+    {
+        'value': 'bebidas',
+        'name': 'Bebidas',
+        'priority': 164,
+        'terms': [
+            'gaseosa', 'agua', 'jugo', 'cerveza', 'vino', 'fernet', 'bebida',
+            'cola', 'sprite', 'fanta', 'soda', 'energizante', 'isotonica',
+        ],
+        'also': [],
+    },
+    {
+        'value': 'snacks',
+        'name': 'Snacks',
+        'priority': 160,
+        'terms': [
+            'papas fritas', 'snack', 'mani', 'palitos', 'nachos', 'puflitos',
+            'doritos',
+        ],
+        'also': [],
+    },
+    {
+        'value': 'helados y postres',
+        'name': 'Helados y postres',
+        'priority': 158,
+        'terms': [
+            'helado', 'palito helado', 'postre', 'gelatina', 'mousse',
+            'tiramisu', 'brownie', 'alfajor helado',
+        ],
+        'also': ['congelados'],
+    },
+    {
+        'value': 'limpieza',
+        'name': 'Limpieza',
+        'priority': 150,
+        'terms': [
+            'detergente', 'lavandina', 'desinfectante', 'jabon', 'suavizante',
+            'limpiador', 'desengrasante', 'esponja', 'trapo', 'limpieza',
+        ],
+        'also': [],
+    },
+    {
+        'value': 'descartables',
+        'name': 'Descartables',
+        'priority': 148,
+        'terms': [
+            'vaso', 'vasos', 'plato', 'platos', 'cubierto', 'cubiertos',
+            'servilleta', 'servilletas', 'bandeja', 'bandejas', 'film',
+            'aluminio', 'bolsa', 'bolsas', 'guante', 'guantes', 'descartable',
+        ],
+        'also': [],
+    },
+    {
+        'value': 'almacen',
+        'name': 'Almacen',
+        'priority': 140,
+        'terms': [
+            'arroz', 'harina', 'azucar', 'sal', 'condimento', 'especia',
+            'yerba', 'cafe', 'te', 'galletita', 'galletitas', 'aceite',
+            'vinagre', 'pure de tomate', 'salsa de tomate', 'lenteja',
+            'garbanzo', 'poroto', 'mermelada', 'dulce', 'conserva',
+            'enlatado', 'avena', 'cereal',
+        ],
+        'also': [],
+    },
+    {
+        'value': 'congelados',
+        'name': 'Congelados',
+        'priority': 120,
+        'terms': [
+            'congelado', 'congelada', 'freezer', 'ultracongelado', 'prefrito',
+            'prefrita', 'frozen',
+        ],
+        'also': [],
+    },
+]
+
+_AUTO_CATEGORY_RULES_BY_VALUE = {rule['value']: rule for rule in _AUTO_CATEGORY_RULES}
+_AUTO_CATEGORY_ALIAS_MAP = {
+    'lacteo': 'lacteos',
+    'lacteos': 'lacteos',
+    'queso': 'quesos',
+    'quesos': 'quesos',
+    'fiambre': 'fiambres',
+    'fiambres': 'fiambres',
+    'embutido': 'embutidos',
+    'embutidos': 'embutidos',
+    'hamburguesa': 'hamburguesas',
+    'hamburguesas': 'hamburguesas',
+    'milanesa': 'milanesas',
+    'milanesas': 'milanesas',
+    'pescados': 'pescados y mariscos',
+    'mariscos': 'pescados y mariscos',
+    'pescados y mariscos': 'pescados y mariscos',
+    'aderezos': 'aderezos y salsas',
+    'salsas': 'aderezos y salsas',
+    'aderezos y salsas': 'aderezos y salsas',
+    'helados': 'helados y postres',
+    'postres': 'helados y postres',
+    'helados y postres': 'helados y postres',
+    'descartable': 'descartables',
+    'descartables': 'descartables',
+}
+_AUTO_GENERIC_CATEGORIES = {
+    '',
+    'general',
+    'generales',
+    'otros',
+    'otro',
+    'varios',
+    'sin categoria',
+    'sin categorias',
+    'misc',
+}
+
+
+def _normalize_auto_text(value: Any) -> str:
+    try:
+        raw = str(value or '').strip().lower()
+    except Exception:
+        return ''
+    if not raw:
+        return ''
+    try:
+        raw = unicodedata.normalize('NFKD', raw)
+        raw = ''.join(ch for ch in raw if not unicodedata.combining(ch))
+    except Exception:
+        pass
+    raw = raw.replace('&', ' y ')
+    raw = re.sub(r'[_/\\|]+', ' ', raw)
+    raw = re.sub(r'[^a-z0-9\s-]+', ' ', raw)
+    raw = re.sub(r'\s+', ' ', raw)
+    return raw.strip()
+
+
+def _normalize_auto_category_value(value: Any) -> str:
+    text = _normalize_auto_text(value)
+    if not text:
+        return ''
+    return _AUTO_CATEGORY_ALIAS_MAP.get(text, text)
+
+
+def _looks_generic_auto_category(value: Any) -> bool:
+    return _normalize_auto_category_value(value) in _AUTO_GENERIC_CATEGORIES
+
+
+def _auto_category_display_name(value: Any) -> str:
+    normalized = _normalize_auto_category_value(value)
+    if not normalized:
+        return ''
+    rule = _AUTO_CATEGORY_RULES_BY_VALUE.get(normalized)
+    if rule:
+        return str(rule.get('name') or normalized)
+    words = [part for part in normalized.split(' ') if part]
+    return ' '.join(word[:1].upper() + word[1:] for word in words)
+
+
+def _normalize_backend_filters_list(items: Any) -> List[Dict[str, str]]:
+    rows = items if isinstance(items, list) else []
+    seen = set()
+    out: List[Dict[str, str]] = []
+    for idx, item in enumerate(rows):
+        if isinstance(item, str):
+            value = _normalize_auto_category_value(item)
+            name = _auto_category_display_name(value)
+        elif isinstance(item, dict):
+            raw_value = item.get('value') or item.get('name') or item.get('label') or item.get('id')
+            value = _normalize_auto_category_value(raw_value)
+            name = str(item.get('name') or item.get('label') or _auto_category_display_name(value)).strip()
+        else:
+            continue
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        out.append({
+            'id': f"auto_{re.sub(r'[^a-z0-9]+', '_', value).strip('_') or idx}",
+            'name': name or _auto_category_display_name(value),
+            'value': value,
+        })
+    return out
+
+
+def _extract_product_category_values(raw: Any) -> List[str]:
+    items: List[str] = []
+    if isinstance(raw, list):
+        items = [str(item or '').strip() for item in raw]
+    elif isinstance(raw, str):
+        items = [part.strip() for part in raw.split(',')]
+    elif isinstance(raw, dict):
+        items = [str(item or '').strip() for item in raw.values()]
+    out: List[str] = []
+    seen = set()
+    for item in items:
+        value = _normalize_auto_category_value(item)
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        out.append(value)
+    return out
+
+
+def _normalize_product_categories_mapping(raw: Any) -> Dict[str, List[str]]:
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[str, List[str]] = {}
+    for key, value in raw.items():
+        clean_key = str(key or '').strip()
+        if not clean_key:
+            continue
+        clean_values = _extract_product_category_values(value)
+        if clean_values:
+            out[clean_key] = clean_values
+    return out
+
+
+def _contains_auto_term(haystack: str, term: str) -> bool:
+    text = _normalize_auto_text(haystack)
+    probe = _normalize_auto_text(term)
+    if not text or not probe:
+        return False
+    return f" {probe} " in f" {text} "
+
+
+def _append_unique_value(target: List[str], value: Any) -> None:
+    normalized = _normalize_auto_category_value(value)
+    if normalized and normalized not in target:
+        target.append(normalized)
+
+
+def _derive_product_categories(product_row: Dict[str, Any]) -> Dict[str, Any]:
+    name_text = _normalize_auto_text(product_row.get('name'))
+    desc_text = _normalize_auto_text(product_row.get('description'))
+    brand_text = _normalize_auto_text(product_row.get('brand'))
+    code_text = _normalize_auto_text(product_row.get('code'))
+    category_text = _normalize_auto_category_value(product_row.get('category'))
+    aux_text = ' '.join(part for part in [desc_text, brand_text, code_text, category_text] if part)
+    full_text = ' '.join(part for part in [name_text, aux_text] if part)
+
+    matches: List[Dict[str, Any]] = []
+    for rule in _AUTO_CATEGORY_RULES:
+        score = 0
+        for term in rule.get('terms') or []:
+            if _contains_auto_term(name_text, term):
+                score += 10
+            elif _contains_auto_term(aux_text, term):
+                score += 6
+            elif _contains_auto_term(full_text, term):
+                score += 3
+        if category_text and category_text == rule.get('value'):
+            score += 40
+        if score <= 0:
+            continue
+        matches.append({
+            'value': rule.get('value'),
+            'name': rule.get('name'),
+            'score': int(score + int(rule.get('priority') or 0)),
+            'also': list(rule.get('also') or []),
+        })
+
+    matches.sort(key=lambda item: (-int(item.get('score') or 0), str(item.get('value') or '')))
+
+    filters: List[str] = []
+    if category_text and not _looks_generic_auto_category(category_text):
+        _append_unique_value(filters, category_text)
+    for match in matches:
+        _append_unique_value(filters, match.get('value'))
+        for extra in match.get('also') or []:
+            _append_unique_value(filters, extra)
+
+    primary = ''
+    if category_text and not _looks_generic_auto_category(category_text):
+        primary = category_text
+    elif matches:
+        primary = _normalize_auto_category_value(matches[0].get('value'))
+    elif category_text:
+        primary = category_text
+
+    if primary:
+        filters = [value for value in filters if value != primary]
+        filters.insert(0, primary)
+
+    return {
+        'primary': primary,
+        'filters': filters[:8],
+        'matched': [str(item.get('value') or '') for item in matches[:8] if item.get('value')],
+        'confidence': 'high' if matches else ('manual' if primary else 'none'),
+    }
+
+
+def _write_catalog_settings_snapshot(filename: str, payload: Any) -> None:
+    os.makedirs(CATALOG_DIR, exist_ok=True)
+    with open(os.path.join(CATALOG_DIR, filename), 'w', encoding='utf-8') as f:
+        f.write(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _auto_sync_catalog_categories(
+    db: Session,
+    product_ids: Optional[List[int]] = None,
+    overwrite_category: bool = False,
+) -> Dict[str, Any]:
+    try:
+        bind = db.get_bind()
+        insp = inspect(bind)
+        existing = {c['name'] for c in insp.get_columns('products')}
+    except Exception:
+        existing = {'id', 'name', 'brand', 'description', 'category', 'code'}
+
+    cols = ['id', 'name', 'description', 'category']
+    for optional_col in ('brand', 'code'):
+        if optional_col in existing:
+            cols.append(optional_col)
+    sql = f"SELECT {', '.join(cols)} FROM products"
+    params: Dict[str, Any] = {}
+    if product_ids:
+        normalized_ids = [int(pid) for pid in product_ids if pid is not None]
+        if normalized_ids:
+            placeholders = []
+            for idx, pid in enumerate(normalized_ids):
+                key = f'pid_{idx}'
+                placeholders.append(f":{key}")
+                params[key] = pid
+            sql += f" WHERE id IN ({', '.join(placeholders)})"
+    rows = crud._safe_execute_fetchall(db, sql, params) or []
+
+    filters_before = _normalize_backend_filters_list(crud.get_setting(db, 'filters'))
+    mapping_before = _normalize_product_categories_mapping(crud.get_setting(db, 'product_categories'))
+    filters_map = {item['value']: dict(item) for item in filters_before}
+    mapping_after = dict(mapping_before)
+    updated_products = 0
+    created_filters = 0
+    processed = 0
+    categorized = 0
+    unmatched: List[Dict[str, Any]] = []
+
+    for row in rows:
+        product = {cols[idx]: row[idx] for idx in range(len(cols))}
+        processed += 1
+        derived = _derive_product_categories(product)
+        pid = product.get('id')
+        pid_key = str(pid) if pid is not None else ''
+        name_key = str(product.get('name') or '').strip()
+
+        current_category = _normalize_auto_category_value(product.get('category'))
+        next_category = current_category
+        if derived.get('primary'):
+            if overwrite_category or not current_category or _looks_generic_auto_category(current_category):
+                next_category = _normalize_auto_category_value(derived.get('primary'))
+        if next_category and next_category != current_category and pid is not None:
+            db.execute(
+                text("UPDATE products SET category = :category WHERE id = :pid"),
+                {'category': next_category, 'pid': int(pid)},
+            )
+            updated_products += 1
+        if next_category:
+            categorized += 1
+
+        existing_values = []
+        if pid_key and pid_key in mapping_after:
+            existing_values = list(mapping_after.get(pid_key) or [])
+        elif name_key and name_key in mapping_after:
+            existing_values = list(mapping_after.get(name_key) or [])
+        merged_values: List[str] = []
+        for value in existing_values:
+            _append_unique_value(merged_values, value)
+        if next_category:
+            _append_unique_value(merged_values, next_category)
+        for value in derived.get('filters') or []:
+            _append_unique_value(merged_values, value)
+        if pid_key:
+            if merged_values:
+                mapping_after[pid_key] = merged_values
+            else:
+                mapping_after.pop(pid_key, None)
+        if name_key and name_key != pid_key:
+            mapping_after.pop(name_key, None)
+
+        for value in merged_values:
+            if value not in filters_map:
+                filters_map[value] = {
+                    'id': f"auto_{re.sub(r'[^a-z0-9]+', '_', value).strip('_') or 'filter'}",
+                    'name': _auto_category_display_name(value),
+                    'value': value,
+                }
+                created_filters += 1
+        if not next_category and not merged_values:
+            unmatched.append({
+                'id': pid,
+                'name': str(product.get('name') or '')[:120],
+            })
+
+    filters_after = sorted(
+        filters_map.values(),
+        key=lambda item: (str(item.get('name') or '').lower(), str(item.get('value') or '')),
+    )
+
+    db.commit()
+
+    filters_changed = filters_after != filters_before
+    mapping_changed = mapping_after != mapping_before
+
+    filters_saved = False
+    mapping_saved = False
+    if filters_changed:
+        try:
+            filters_saved = bool(crud.set_setting(db, 'filters', filters_after))
+        except Exception:
+            logger.exception('auto category sync: failed to persist filters')
+            filters_saved = False
+        try:
+            _write_catalog_settings_snapshot('filters.json', filters_after)
+        except Exception:
+            logger.exception('auto category sync: failed to write filters snapshot')
+    if mapping_changed:
+        try:
+            mapping_saved = bool(crud.set_setting(db, 'product_categories', mapping_after))
+        except Exception:
+            logger.exception('auto category sync: failed to persist product categories')
+            mapping_saved = False
+        try:
+            _write_catalog_settings_snapshot('product_categories.json', mapping_after)
+        except Exception:
+            logger.exception('auto category sync: failed to write product categories snapshot')
+
+    return {
+        'processed_products': processed,
+        'categorized_products': categorized,
+        'updated_products': updated_products,
+        'created_filters': created_filters,
+        'filters_count': len(filters_after),
+        'mapping_count': len(mapping_after),
+        'filters_saved': filters_saved,
+        'mapping_saved': mapping_saved,
+        'unmatched_products': unmatched[:25],
+    }
+
+
+async def _push_catalog_category_events(sync_result: Optional[Dict[str, Any]]) -> None:
+    if not isinstance(sync_result, dict):
+        return
+    try:
+        if sync_result.get('filters_saved'):
+            await push_event({
+                'type': 'filters-updated',
+                'count': int(sync_result.get('filters_count') or 0),
+            })
+    except Exception:
+        pass
+    try:
+        if sync_result.get('mapping_saved'):
+            await push_event({
+                'type': 'product-categories-updated',
+                'count': int(sync_result.get('mapping_count') or 0),
+            })
+    except Exception:
+        pass
+
+
 @app.get('/filters.json')
 def get_filters(request: Request, db: Session = Depends(get_db)):
     """Return admin-managed filters. Prefer the DB-backed setting when available
@@ -4358,6 +4955,50 @@ async def set_product_categories(request: Request, db: Session = Depends(get_db)
     except Exception as e:
         logger.exception('set_product_categories failed: %s', e)
         raise HTTPException(status_code=500, detail='Failed to save product categories')
+
+
+@app.post('/admin/products/auto-categorize')
+async def auto_categorize_catalog(
+    payload: Dict[str, Any] = Body(default=None),
+    current_admin=Depends(get_current_admin_user),
+):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role not in ('owner', 'admin'):
+        raise HTTPException(status_code=403, detail='No autorizado')
+
+    payload = payload or {}
+    raw_ids = payload.get('ids') if isinstance(payload, dict) else None
+    ids: List[int] = []
+    if isinstance(raw_ids, list):
+        for item in raw_ids:
+            try:
+                ids.append(int(item))
+            except Exception:
+                continue
+    overwrite_category = bool(payload.get('overwrite_category')) if isinstance(payload, dict) else False
+
+    def task():
+        db = SessionLocal()
+        try:
+            return _auto_sync_catalog_categories(
+                db,
+                product_ids=ids or None,
+                overwrite_category=overwrite_category,
+            )
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+    result = await anyio.to_thread.run_sync(task)
+    try:
+        await anyio.to_thread.run_sync(write_catalog_snapshot)
+    except Exception:
+        pass
+    _invalidate_products_cache()
+    await _push_catalog_category_events(result)
+    return result
 
 
 def _run_add_user_columns() -> dict:
@@ -6334,7 +6975,7 @@ async def create_product(payload: schemas.ProductCreate, request: Request, backg
         try:
             prod = crud.create_product(db, payload, actor=actor)
             if not prod:
-                return None
+                return None, None
             # Convert safely to dict whether prod is a dict or object
             if isinstance(prod, dict):
                 getv = prod.get
@@ -6361,7 +7002,13 @@ async def create_product(payload: schemas.ProductCreate, request: Request, backg
                 'discount': float(getv('discount', 0.0) or 0.0),
                 'sale_unit': str(getv('sale_unit', 'unit') or 'unit')
             }
-            return result
+            sync_result = None
+            try:
+                if result.get('id'):
+                    sync_result = _auto_sync_catalog_categories(db, product_ids=[int(result.get('id'))])
+            except Exception:
+                logger.exception('POST /products auto-categorize failed for id=%s', result.get('id'))
+            return result, sync_result
         finally:
             try:
                 db.rollback()
@@ -6374,7 +7021,7 @@ async def create_product(payload: schemas.ProductCreate, request: Request, backg
                 pass
 
     try:
-        result = await anyio.to_thread.run_sync(task)
+        result, sync_result = await anyio.to_thread.run_sync(task)
         if not result:
             raise HTTPException(status_code=500, detail='Product creation failed')
         # Normalize result to plain dict
@@ -6387,6 +7034,7 @@ async def create_product(payload: schemas.ProductCreate, request: Request, backg
             await push_event({"action": "created", "product": {"id": result.get('id')}})
         except:
             pass
+        await _push_catalog_category_events(sync_result)
         
         try:
             await anyio.to_thread.run_sync(write_catalog_snapshot)
@@ -7174,18 +7822,34 @@ async def bulk_update_products(payload: List[schemas.ProductBulkUpdateItem], req
     def task():
         db = SessionLocal()
         try:
-            return crud.bulk_update_products(db, payload or [], actor=actor)
+            result = crud.bulk_update_products(db, payload or [], actor=actor)
+            sync_result = None
+            try:
+                ids_to_sync = []
+                for item in (result or {}).get('results') or []:
+                    if not isinstance(item, dict) or not item.get('ok'):
+                        continue
+                    try:
+                        ids_to_sync.append(int(item.get('id')))
+                    except Exception:
+                        continue
+                if ids_to_sync:
+                    sync_result = _auto_sync_catalog_categories(db, product_ids=ids_to_sync)
+            except Exception:
+                logger.exception('PATCH /products/bulk auto-categorize failed')
+            return result, sync_result
         finally:
             try:
                 db.close()
             except Exception:
                 pass
 
-    result = await anyio.to_thread.run_sync(task)
+    result, sync_result = await anyio.to_thread.run_sync(task)
     try:
         await push_event({"action": "bulk_updated", "updated": int((result or {}).get('updated') or 0)})
     except Exception:
         pass
+    await _push_catalog_category_events(sync_result)
     try:
         await anyio.to_thread.run_sync(write_catalog_snapshot)
     except Exception:
@@ -7421,6 +8085,14 @@ async def import_products_excel(
             except Exception as e:
                 skipped += 1
                 errors.append({'row': idx, 'error': str(e)[:200]})
+        sync_result = None
+        try:
+            ids_to_sync = [int(v) for v in (created_ids + updated_ids) if v]
+            if ids_to_sync:
+                sync_result = _auto_sync_catalog_categories(db, product_ids=ids_to_sync)
+        except Exception:
+            logger.exception('products/import-excel auto-categorize failed')
+
         return {
             'rows': len(rows),
             'created': created,
@@ -7431,12 +8103,13 @@ async def import_products_excel(
             'errors': errors[:50],
             'created_ids': [c for c in created_ids if c],
             'updated_ids': [u for u in updated_ids if u],
-        }, created_products
-    result, created_products = await anyio.to_thread.run_sync(task)
+        }, created_products, sync_result
+    result, created_products, sync_result = await anyio.to_thread.run_sync(task)
     try:
         await push_event({"action": "imported", "created": int(result.get('created') or 0)})
     except Exception:
         pass
+    await _push_catalog_category_events(sync_result)
     try:
         await anyio.to_thread.run_sync(write_catalog_snapshot)
     except Exception:
@@ -7593,24 +8266,29 @@ async def update_product(product_id: int, payload: schemas.ProductUpdate, reques
         db = SessionLocal()
         try:
             prod = crud.update_product(db, product_id, payload, actor=actor, action='update')
+            sync_result = None
+            try:
+                sync_result = _auto_sync_catalog_categories(db, product_ids=[int(product_id)])
+            except Exception:
+                logger.exception('PUT /products/%s auto-categorize failed', product_id)
             if isinstance(prod, dict):
-                return prod
+                return prod, sync_result
             # Convert ORM instance to plain dict before session closes
             try:
-                return {k: getattr(prod, k) for k in ('id','code','name','brand','price','price_retail','cost','description','category','image_url','active','stock','min_stock','stock_kg','kg_per_unit','discount','sale_unit','created_at','updated_at') if hasattr(prod, k)}
+                return ({k: getattr(prod, k) for k in ('id','code','name','brand','price','price_retail','cost','description','category','image_url','active','stock','min_stock','stock_kg','kg_per_unit','discount','sale_unit','created_at','updated_at') if hasattr(prod, k)}, sync_result)
             except Exception:
                 try:
-                    return jsonable_encoder(prod)
+                    return (jsonable_encoder(prod), sync_result)
                 except Exception:
                     try:
-                        return {'id': getattr(prod, 'id', None)}
+                        return ({'id': getattr(prod, 'id', None)}, sync_result)
                     except Exception:
-                        return {}
+                        return ({}, sync_result)
         finally:
             db.close()
 
     try:
-        prod = await anyio.to_thread.run_sync(task)
+        prod, sync_result = await anyio.to_thread.run_sync(task)
     except Exception as e:
         try:
             tb = traceback.format_exc()
@@ -7629,6 +8307,7 @@ async def update_product(product_id: int, payload: schemas.ProductUpdate, reques
         await push_event({"action": "updated", "product": {"id": prod_id}})
     except Exception:
         pass
+    await _push_catalog_category_events(sync_result)
     try:
         await anyio.to_thread.run_sync(write_catalog_snapshot)
     except Exception:
