@@ -927,6 +927,11 @@ body.auth-locked .auth-overlay{display:flex}
 .routes-row{font-size:13px;color:#334155;margin-top:6px}
 .user-zone-control{display:flex;align-items:center;gap:8px}
 .user-zone-control select{min-width:160px}
+.user-zone-control-next{margin-bottom:6px}
+.user-next-zone-meta{font-size:12px;color:#64748b}
+.delivery-incident-note{margin-top:4px;font-size:12px;color:#475569;line-height:1.35}
+.delivery-photo-link{display:inline-flex;align-items:center;justify-content:center}
+.delivery-photo-thumb{width:56px;height:56px;object-fit:cover;border-radius:12px;border:1px solid rgba(15,23,42,0.08);background:#fff}
 @media (max-width: 1000px){
   .routes-columns{grid-template-columns:1fr}
 }

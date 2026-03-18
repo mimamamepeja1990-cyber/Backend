@@ -399,6 +399,15 @@ def _startup_bootstrap_sync() -> None:
                 'delivered_at': 'TIMESTAMP',
                 'delivered_by_id': 'INTEGER',
                 'delivered_by_username': 'VARCHAR(80)',
+                'delivery_issues': 'TEXT',
+                'closed_attempts': 'INTEGER DEFAULT 0',
+                'last_delivery_issue_type': 'VARCHAR(50)',
+                'last_delivery_issue_note': 'TEXT',
+                'last_delivery_issue_photo_url': 'VARCHAR(500)',
+                'last_delivery_issue_at': 'TIMESTAMP',
+                'last_delivery_issue_by_id': 'INTEGER',
+                'last_delivery_issue_by_username': 'VARCHAR(80)',
+                'cancel_reason': 'VARCHAR(240)',
             }
 
             try:
@@ -910,6 +919,7 @@ _ORDER_STATUS_RANK = {
     'entregado': 5,
 }
 _ORDER_TZINFO_CACHE: Dict[str, Any] = {}
+_DRIVER_NEXT_ZONE_SETTING_KEY = 'driver_next_zone_assignments_v1'
 
 
 def _normalize_order_status(value: Any) -> str:
@@ -1077,6 +1087,309 @@ def _merge_order_statuses(*values: Any) -> str:
             best = v
             best_rank = r
     return best
+
+
+def _normalize_delivery_issue_type(value: Any) -> Optional[str]:
+    try:
+        raw = str(value or '').strip().lower()
+    except Exception:
+        raw = ''
+    if not raw:
+        return None
+    raw = re.sub(r'[\s\-]+', '_', raw)
+    aliases = {
+        'issue': 'problema',
+        'incident': 'problema',
+        'problem': 'problema',
+        'problema': 'problema',
+        'closed': 'negocio_cerrado',
+        'cerrado': 'negocio_cerrado',
+        'negocio_cerrado': 'negocio_cerrado',
+        'business_closed': 'negocio_cerrado',
+    }
+    norm = aliases.get(raw, raw)
+    return norm if norm in ('problema', 'negocio_cerrado') else None
+
+
+def _parse_delivery_issues(value: Any) -> List[Dict[str, Any]]:
+    if value is None:
+        return []
+    data = value
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except Exception:
+            return []
+    if not isinstance(data, list):
+        return []
+    out: List[Dict[str, Any]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        issue_type = _normalize_delivery_issue_type(item.get('type'))
+        if not issue_type:
+            continue
+        normalized = dict(item)
+        normalized['type'] = issue_type
+        note_val = normalized.get('note')
+        if note_val is not None:
+            normalized['note'] = str(note_val).strip()
+        photo_url = str(normalized.get('photo_url') or '').strip()
+        normalized['photo_url'] = photo_url or None
+        closed_attempt = normalized.get('closed_attempt')
+        try:
+            normalized['closed_attempt'] = int(closed_attempt) if closed_attempt is not None else None
+        except Exception:
+            normalized['closed_attempt'] = None
+        out.append(normalized)
+    return out
+
+
+def _latest_delivery_issue(issues: Any) -> Optional[Dict[str, Any]]:
+    parsed = _parse_delivery_issues(issues)
+    if not parsed:
+        return None
+    return parsed[-1]
+
+
+def _order_select_columns(existing_cols: Optional[set] = None) -> List[str]:
+    if existing_cols is None:
+        try:
+            insp = inspect(engine)
+            existing_cols = {c['name'] for c in insp.get_columns('orders')}
+        except Exception:
+            existing_cols = set()
+    cols = ['id']
+    for c in ('items', 'total', 'created_at', 'status'):
+        if c in existing_cols:
+            cols.append(c)
+    optional = [
+        'customer_type',
+        'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion', 'user_postal_code', 'user_department',
+        '_token_received', '_token_preview', 'source',
+        'payment_method', 'payment_status', 'payment_reference',
+        'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
+        'assigned_driver_id', 'assigned_driver_username', 'assigned_driver_name', 'assigned_driver_zone', 'assigned_at',
+        'delivery_lat', 'delivery_lon',
+        'route_id', 'route_order', 'route_generated_at',
+        'sent_at',
+        'delivered_at', 'delivered_by_id', 'delivered_by_username',
+        'delivery_issues', 'closed_attempts',
+        'last_delivery_issue_type', 'last_delivery_issue_note', 'last_delivery_issue_photo_url', 'last_delivery_issue_at',
+        'last_delivery_issue_by_id', 'last_delivery_issue_by_username',
+        'cancel_reason',
+    ]
+    for c in optional:
+        if c in existing_cols and c not in cols:
+            cols.append(c)
+    return cols
+
+
+def _normalize_order_response_payload(order_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    od = dict(order_data or {})
+    if 'items' not in od:
+        od['items'] = []
+    if 'total' not in od:
+        od['total'] = 0
+    if 'status' not in od:
+        od['status'] = 'recibido'
+    try:
+        if isinstance(od.get('items'), str):
+            od['items'] = json.loads(od['items'])
+    except Exception:
+        od['items'] = []
+    try:
+        if isinstance(od.get('_token_preview'), str):
+            od['_token_preview'] = json.loads(od['_token_preview'])
+    except Exception:
+        pass
+    try:
+        od['delivery_issues'] = _parse_delivery_issues(od.get('delivery_issues'))
+    except Exception:
+        od['delivery_issues'] = []
+    try:
+        od['closed_attempts'] = int(od.get('closed_attempts') or 0)
+    except Exception:
+        od['closed_attempts'] = 0
+    latest_issue = _latest_delivery_issue(od.get('delivery_issues'))
+    if latest_issue:
+        od.setdefault('last_delivery_issue_type', latest_issue.get('type'))
+        od.setdefault('last_delivery_issue_note', latest_issue.get('note'))
+        od.setdefault('last_delivery_issue_photo_url', latest_issue.get('photo_url'))
+        od.setdefault('last_delivery_issue_at', latest_issue.get('created_at'))
+        od.setdefault('last_delivery_issue_by_id', latest_issue.get('reported_by_id'))
+        od.setdefault('last_delivery_issue_by_username', latest_issue.get('reported_by_username'))
+    try:
+        od = _attach_maps_url(od)
+    except Exception:
+        pass
+    return od
+
+
+def _fetch_order_snapshot(order_id_value: Any, use_id_int: Optional[bool] = None, existing_cols: Optional[set] = None) -> Optional[Dict[str, Any]]:
+    if use_id_int is None:
+        try:
+            int(order_id_value)
+            use_id_int = True
+        except Exception:
+            use_id_int = False
+    id_param = int(order_id_value) if use_id_int else str(order_id_value)
+    cols = _order_select_columns(existing_cols=existing_cols)
+    if not cols:
+        return None
+    cols_sql = ', '.join(cols)
+    if use_id_int:
+        row = _safe_engine_fetchone(f"SELECT {cols_sql} FROM orders WHERE id = :id LIMIT 1", {'id': id_param})
+    else:
+        row = _safe_engine_fetchone(f"SELECT {cols_sql} FROM orders WHERE CAST(id AS TEXT) = :id LIMIT 1", {'id': id_param})
+    if not row:
+        return None
+    data = {k: row[idx] for idx, k in enumerate(cols)}
+    return _normalize_order_response_payload(data)
+
+
+def _build_delivery_issue_record(
+    issue_type: str,
+    note: Optional[str] = None,
+    photo_url: Optional[str] = None,
+    actor_id: Optional[int] = None,
+    actor_username: Optional[str] = None,
+    closed_attempt: Optional[int] = None,
+    created_at: Optional[datetime.datetime] = None,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        'type': issue_type,
+        'note': str(note or '').strip() or None,
+        'photo_url': str(photo_url or '').strip() or None,
+        'created_at': (created_at or datetime.datetime.now(datetime.timezone.utc)).isoformat(),
+        'reported_by_id': actor_id,
+        'reported_by_username': actor_username,
+    }
+    if closed_attempt is not None:
+        payload['closed_attempt'] = int(closed_attempt)
+    return payload
+
+
+def _reindex_driver_active_orders(
+    driver_id: Optional[int] = None,
+    driver_username: Optional[str] = None,
+    move_order_id_to_end: Optional[Any] = None,
+    db: Optional[Session] = None,
+) -> int:
+    if driver_id is None and not str(driver_username or '').strip():
+        return 0
+    db_local = db or SessionLocal()
+    close_db = db is None
+    updated = 0
+    try:
+        orders = list_orders(skip=0, limit=2000, source=None, q=None, date=None, db=db_local)
+        active = []
+        for od in (orders or []):
+            try:
+                status_val = _normalize_order_status(od.get('status'))
+                if status_val not in ('preparado', 'enviado'):
+                    continue
+                assigned_id = od.get('assigned_driver_id')
+                assigned_user = str(od.get('assigned_driver_username') or '').strip()
+                if driver_id is not None and str(assigned_id or '') == str(driver_id):
+                    active.append(od)
+                    continue
+                if driver_username and assigned_user == str(driver_username).strip():
+                    active.append(od)
+            except Exception:
+                continue
+        active.sort(key=lambda o: (o.get('route_order') is None, int(o.get('route_order') or 0), str(o.get('id') or '')))
+        if move_order_id_to_end is not None:
+            focus = None
+            rest = []
+            for od in active:
+                if str(od.get('id')) == str(move_order_id_to_end):
+                    focus = od
+                else:
+                    rest.append(od)
+            active = rest + ([focus] if focus else [])
+        if not active:
+            return 0
+        now_ts = datetime.datetime.now(datetime.timezone.utc)
+        route_id = str(active[0].get('route_id') or '').strip() or f"route-manual-{driver_id or driver_username}-{int(time.time())}"
+        with engine.begin() as conn:
+            for idx, od in enumerate(active, start=1):
+                oid = od.get('id')
+                if oid is None:
+                    continue
+                params = {'route_order': idx, 'route_id': route_id, 'route_generated_at': now_ts, 'id': oid}
+                try:
+                    if str(oid).isdigit():
+                        conn.execute(
+                            text("UPDATE orders SET route_order = :route_order, route_id = :route_id, route_generated_at = :route_generated_at WHERE id = :id"),
+                            {'route_order': idx, 'route_id': route_id, 'route_generated_at': now_ts, 'id': int(oid)},
+                        )
+                    else:
+                        conn.execute(
+                            text("UPDATE orders SET route_order = :route_order, route_id = :route_id, route_generated_at = :route_generated_at WHERE CAST(id AS TEXT) = :id"),
+                            {'route_order': idx, 'route_id': route_id, 'route_generated_at': now_ts, 'id': str(oid)},
+                        )
+                    updated += 1
+                except Exception:
+                    continue
+        return updated
+    finally:
+        if close_db:
+            try:
+                db_local.close()
+            except Exception:
+                pass
+
+
+def _driver_next_zone_delivery_date(now_utc: Optional[datetime.datetime] = None) -> str:
+    tzinfo = _resolve_order_tzinfo()
+    base_utc = now_utc or datetime.datetime.now(datetime.timezone.utc)
+    if base_utc.tzinfo is None:
+        base_utc = base_utc.replace(tzinfo=datetime.timezone.utc)
+    local_dt = base_utc.astimezone(tzinfo)
+    return (local_dt.date() + datetime.timedelta(days=1)).isoformat()
+
+
+def _load_driver_next_zone_assignments(db: Session) -> Dict[str, Any]:
+    data = crud.get_setting(db, _DRIVER_NEXT_ZONE_SETTING_KEY) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_driver_next_zone_assignments(db: Session, data: Dict[str, Any]) -> bool:
+    return crud.set_setting(db, _DRIVER_NEXT_ZONE_SETTING_KEY, data)
+
+
+def _cleanup_driver_next_zone_assignments(data: Dict[str, Any], today_key: Optional[str] = None) -> Dict[str, Any]:
+    if not isinstance(data, dict):
+        return {}
+    if today_key:
+        threshold = today_key
+    else:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        threshold = now_utc.astimezone(_resolve_order_tzinfo()).date().isoformat()
+    cleaned: Dict[str, Any] = {}
+    for key, value in data.items():
+        if not isinstance(value, dict):
+            continue
+        delivery_date = str(value.get('delivery_date') or '').strip()
+        if delivery_date and delivery_date < threshold:
+            continue
+        cleaned[str(key)] = value
+    return cleaned
+
+
+def _build_driver_next_zone_notice(driver: Any, zone_value: Optional[str], updated_by: Optional[str] = None) -> Dict[str, Any]:
+    zone_text = _normalize_admin_zone(zone_value)
+    delivery_date = _driver_next_zone_delivery_date()
+    return {
+        'driver_id': getattr(driver, 'id', None),
+        'driver_username': getattr(driver, 'username', None),
+        'zone': zone_text,
+        'delivery_date': delivery_date,
+        'message': (f"Mañana te toca la zona {zone_text}." if zone_text else None),
+        'updated_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        'updated_by': updated_by,
+    }
 
 
 def _normalize_email(value: Any) -> Optional[str]:
@@ -3050,6 +3363,142 @@ async def _send_order_prepared_notification_email(order_data: Optional[Dict[str,
     return True
 
 
+def _build_order_closed_cancel_subject(order_data: Optional[Dict[str, Any]]) -> str:
+    order_payload = _enrich_order_contact_fields(order_data if isinstance(order_data, dict) else {})
+    order_id = order_payload.get('id')
+    return f"No pudimos entregar tu pedido #{order_id}" if order_id is not None else "No pudimos entregar tu pedido"
+
+
+def _build_order_closed_cancel_html(order_data: Optional[Dict[str, Any]]) -> str:
+    order_payload = _enrich_order_contact_fields(order_data if isinstance(order_data, dict) else {})
+    customer_name = html_escape(str(order_payload.get('user_full_name') or ''))
+    order_id = html_escape(str(order_payload.get('id') or ''))
+    snapshot = _extract_order_address_snapshot(order_payload)
+    address = html_escape(str(_compose_order_maps_query(snapshot) or snapshot.get('raw_address') or ''))
+    support_email = html_escape(str(os.environ.get('RESEND_REPLY_TO') or ''))
+    greeting = f"Hola {customer_name}," if customer_name else "Hola,"
+    support_line = (
+        f"Si querés reprogramar la entrega, podés escribirnos a {support_email}."
+        if support_email else
+        "Si querés reprogramar la entrega, respondé este mensaje."
+    )
+    return (
+        "<div style='font-family:Arial,sans-serif;max-width:640px;margin:0 auto;padding:24px;color:#0f172a;'>"
+        f"<h2 style='margin:0 0 16px;'>No pudimos entregar tu pedido #{order_id}</h2>"
+        f"<p style='margin:0 0 12px;'>{greeting}</p>"
+        "<p style='margin:0 0 12px;'>Intentamos realizar la entrega, pero el negocio estaba cerrado y no pudimos concretarla.</p>"
+        f"<p style='margin:0 0 12px;'><strong>Dirección:</strong> {address or '-'}</p>"
+        "<p style='margin:0 0 12px;'>El pedido fue cancelado para evitar nuevos intentos fallidos.</p>"
+        f"<p style='margin:0;'>{support_line}</p>"
+        "</div>"
+    )
+
+
+async def _send_order_closed_cancellation_email(order_data: Optional[Dict[str, Any]]) -> bool:
+    def _masked_key(v: str) -> str:
+        if not v:
+            return ''
+        if len(v) <= 8:
+            return '*' * len(v)
+        return f"{v[:4]}...{v[-4:]}"
+
+    enabled_raw = (os.environ.get('RESEND_ORDER_CLOSED_CANCEL_EMAIL_ENABLED') or 'true').strip().lower()
+    if enabled_raw in ('0', 'false', 'no', 'off'):
+        logger.info('RESEND_ORDER_CLOSED_CANCEL_EMAIL_ENABLED disabled. Skipping closed-cancel email.')
+        return False
+
+    api_key = (os.environ.get('RESEND_API_KEY') or '').strip()
+    if not api_key:
+        logger.warning('RESEND_API_KEY is not configured. Skipping closed-cancel email.')
+        return False
+    if api_key == 're_xxxxxxxxx':
+        logger.warning("RESEND_API_KEY is still 're_xxxxxxxxx'. Replace it with your real API key.")
+        return False
+
+    order_payload = _enrich_order_contact_fields(order_data if isinstance(order_data, dict) else {})
+    to_email = _extract_customer_email_for_order(order_payload, order_payload, None)
+    force_to_email = _normalize_email(os.environ.get('RESEND_FORCE_TO_EMAIL'))
+    if force_to_email:
+        logger.info(
+            'RESEND_FORCE_TO_EMAIL active: overriding recipient %s -> %s for closed-cancel order id=%s',
+            to_email,
+            force_to_email,
+            order_payload.get('id'),
+        )
+        to_email = force_to_email
+    if not to_email:
+        logger.info(
+            'Skipping closed-cancel email: no customer email found for order id=%s',
+            order_payload.get('id'),
+        )
+        return False
+
+    from_email = (os.environ.get('RESEND_FROM_EMAIL') or 'onboarding@resend.dev').strip()
+    logger.info(
+        'Resend closed-cancel send attempt order id=%s to=%s from=%s key=%s',
+        order_payload.get('id'),
+        to_email,
+        from_email,
+        _masked_key(api_key),
+    )
+
+    send_payload = {
+        'from': from_email,
+        'to': [to_email],
+        'subject': _build_order_closed_cancel_subject(order_payload),
+        'html': _build_order_closed_cancel_html(order_payload),
+    }
+    reply_to = _normalize_email(os.environ.get('RESEND_REPLY_TO'))
+    if reply_to:
+        send_payload['reply_to'] = reply_to
+
+    try:
+        timeout_seconds = float(os.environ.get('RESEND_TIMEOUT_SECONDS') or '12')
+    except Exception:
+        timeout_seconds = 12.0
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            response = await client.post(
+                'https://api.resend.com/emails',
+                headers={
+                    'Authorization': f'Bearer {api_key}',
+                    'Content-Type': 'application/json',
+                },
+                json=send_payload,
+            )
+    except Exception as e:
+        logger.warning('Resend request failed for closed-cancel order id=%s: %s', order_payload.get('id'), e)
+        return False
+
+    if response.status_code >= 400:
+        try:
+            body_preview = response.text[:300]
+        except Exception:
+            body_preview = '<unavailable>'
+        logger.warning(
+            'Resend closed-cancel failed for order id=%s status=%s body=%s',
+            order_payload.get('id'),
+            response.status_code,
+            body_preview,
+        )
+        return False
+
+    resend_id = None
+    try:
+        resend_id = (response.json() or {}).get('id')
+    except Exception:
+        resend_id = None
+
+    logger.info(
+        'Resend closed-cancel sent for order id=%s to=%s resend_id=%s',
+        order_payload.get('id'),
+        to_email,
+        resend_id,
+    )
+    return True
+
+
 def _resend_status_snapshot() -> Dict[str, Any]:
     api_key = (os.environ.get('RESEND_API_KEY') or '').strip()
     from_email = (os.environ.get('RESEND_FROM_EMAIL') or 'onboarding@resend.dev').strip()
@@ -3699,6 +4148,15 @@ def _run_add_user_columns() -> dict:
         ('delivered_at', 'TIMESTAMP'),
         ('delivered_by_id', 'INTEGER'),
         ('delivered_by_username', 'VARCHAR(80)'),
+        ('delivery_issues', 'TEXT'),
+        ('closed_attempts', 'INTEGER DEFAULT 0'),
+        ('last_delivery_issue_type', 'VARCHAR(50)'),
+        ('last_delivery_issue_note', 'TEXT'),
+        ('last_delivery_issue_photo_url', 'VARCHAR(500)'),
+        ('last_delivery_issue_at', 'TIMESTAMP'),
+        ('last_delivery_issue_by_id', 'INTEGER'),
+        ('last_delivery_issue_by_username', 'VARCHAR(80)'),
+        ('cancel_reason', 'VARCHAR(240)'),
     ]
     dialect = engine.dialect.name if engine and getattr(engine, 'dialect', None) else ''
     try:
@@ -5503,6 +5961,103 @@ def admin_update_user(
     except Exception as e:
         logger.exception('admin_update_user failed: %s', e)
         raise HTTPException(status_code=500, detail='No se pudo actualizar el usuario')
+
+
+@app.patch('/admin/users/{user_key}/next-zone', response_model=schemas.DriverNextZoneNoticeResponse)
+def admin_update_user_next_zone(
+    user_key: str,
+    payload: schemas.DriverNextZoneUpdate,
+    current_admin=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role not in ('owner', 'admin'):
+        raise HTTPException(status_code=403, detail='No autorizado')
+    user = None
+    try:
+        if str(user_key).isdigit():
+            user = crud.get_admin_user_by_id(db, int(user_key))
+    except Exception:
+        user = None
+    if not user:
+        user = crud.get_admin_user_by_username(db, user_key)
+    if not user:
+        raise HTTPException(status_code=404, detail='Usuario no encontrado')
+    target_role = str(getattr(user, 'role', '') or '').strip().lower()
+    if target_role != 'repartidor':
+        raise HTTPException(status_code=403, detail='Solo se puede asignar zona a repartidores')
+
+    assignments = _load_driver_next_zone_assignments(db)
+    assignments = _cleanup_driver_next_zone_assignments(assignments)
+
+    zone = _normalize_admin_zone(getattr(payload, 'zone', None))
+    if zone:
+        zone_tokens = _parse_admin_zones(zone)
+        if not zone_tokens:
+            raise HTTPException(status_code=400, detail='Zona requerida')
+        allowed_tokens = {_normalize_region_token(dep) for dep in _MENDOZA_DEPARTMENTS}
+        invalid = [z for z in zone_tokens if z not in allowed_tokens]
+        if invalid:
+            raise HTTPException(status_code=400, detail='Zona inválida')
+        canonical = _canonicalize_zones(zone_tokens)
+        zone = ', '.join(canonical)
+        notice = _build_driver_next_zone_notice(user, zone, updated_by=getattr(current_admin, 'username', None))
+        assignments[str(getattr(user, 'id'))] = notice
+        if not _save_driver_next_zone_assignments(db, assignments):
+            raise HTTPException(status_code=500, detail='No se pudo guardar la zona del día siguiente')
+        return notice
+
+    assignments.pop(str(getattr(user, 'id')), None)
+    if not _save_driver_next_zone_assignments(db, assignments):
+        raise HTTPException(status_code=500, detail='No se pudo limpiar la zona del día siguiente')
+    return {
+        'driver_id': getattr(user, 'id', None),
+        'driver_username': getattr(user, 'username', None),
+        'zone': None,
+        'delivery_date': _driver_next_zone_delivery_date(),
+        'message': None,
+        'updated_at': datetime.datetime.now(datetime.timezone.utc),
+        'updated_by': getattr(current_admin, 'username', None),
+    }
+
+
+@app.get('/admin/driver-next-zone', response_model=schemas.DriverNextZoneNoticeResponse)
+def admin_driver_next_zone(current_admin=Depends(get_current_admin_user), db: Session = Depends(get_db)):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role != 'repartidor':
+        raise HTTPException(status_code=403, detail='No autorizado')
+    assignments = _load_driver_next_zone_assignments(db)
+    cleaned = _cleanup_driver_next_zone_assignments(assignments)
+    if cleaned != assignments:
+        _save_driver_next_zone_assignments(db, cleaned)
+        assignments = cleaned
+    notice = assignments.get(str(getattr(current_admin, 'id', '')))
+    if not isinstance(notice, dict):
+        return {
+            'driver_id': getattr(current_admin, 'id', None),
+            'driver_username': getattr(current_admin, 'username', None),
+            'zone': None,
+            'delivery_date': None,
+            'message': None,
+        'updated_at': None,
+        'updated_by': None,
+    }
+    return notice
+
+
+@app.get('/admin/driver-next-zones', response_model=List[schemas.DriverNextZoneNoticeResponse])
+def admin_driver_next_zones(current_admin=Depends(get_current_admin_user), db: Session = Depends(get_db)):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role not in ('owner', 'admin'):
+        raise HTTPException(status_code=403, detail='No autorizado')
+    assignments = _load_driver_next_zone_assignments(db)
+    cleaned = _cleanup_driver_next_zone_assignments(assignments)
+    if cleaned != assignments:
+        _save_driver_next_zone_assignments(db, cleaned)
+        assignments = cleaned
+    rows = [value for value in assignments.values() if isinstance(value, dict)]
+    rows.sort(key=lambda item: (str(item.get('driver_username') or '').lower(), str(item.get('delivery_date') or '')))
+    return rows
 
 @app.post("/products")
 async def create_product(payload: schemas.ProductCreate, request: Request, background_tasks: BackgroundTasks):
@@ -8910,6 +9465,10 @@ def list_orders(
                     'route_id', 'route_order', 'route_generated_at',
                     'sent_at',
                     'delivered_at', 'delivered_by_id', 'delivered_by_username',
+                    'delivery_issues', 'closed_attempts',
+                    'last_delivery_issue_type', 'last_delivery_issue_note', 'last_delivery_issue_photo_url', 'last_delivery_issue_at',
+                    'last_delivery_issue_by_id', 'last_delivery_issue_by_username',
+                    'cancel_reason',
                 ]
             }
             customer_type_value = _normalize_customer_type(od.get('customer_type'))
@@ -9062,7 +9621,7 @@ def list_orders(
             except Exception:
                 pass
             try:
-                od = _attach_maps_url(od)
+                od = _normalize_order_response_payload(od)
             except Exception:
                 pass
             # log per-row diagnostics for debugging clarity
@@ -9462,7 +10021,9 @@ def admin_deliveries(
     for od in (orders or []):
         status_val = _normalize_order_status(od.get('status'))
         delivered_at = od.get('delivered_at')
-        if status_val != 'entregado' and not delivered_at:
+        issue_at = od.get('last_delivery_issue_at')
+        has_issue = bool(issue_at or od.get('last_delivery_issue_type') or (od.get('delivery_issues') or []))
+        if status_val != 'entregado' and not delivered_at and not has_issue:
             continue
         if driver_id or driver_username:
             did = str(od.get('delivered_by_id') or od.get('assigned_driver_id') or '').strip()
@@ -9473,7 +10034,7 @@ def admin_deliveries(
                 continue
         if df or dt:
             try:
-                dt_val = delivered_at or od.get('created_at')
+                dt_val = delivered_at or issue_at or od.get('created_at')
                 if isinstance(dt_val, str):
                     dt_val = _coerce_datetime(dt_val)
                 if isinstance(dt_val, datetime.datetime):
@@ -9487,7 +10048,13 @@ def admin_deliveries(
             if dt and date_key and date_key > dt:
                 continue
         out.append(od)
-    out.sort(key=lambda o: (o.get('delivered_at') is None, o.get('delivered_at') or o.get('created_at') or datetime.datetime.min), reverse=True)
+    out.sort(
+        key=lambda o: (
+            (o.get('delivered_at') or o.get('last_delivery_issue_at')) is None,
+            o.get('delivered_at') or o.get('last_delivery_issue_at') or o.get('created_at') or datetime.datetime.min,
+        ),
+        reverse=True,
+    )
     return out
 
 
@@ -10063,6 +10630,191 @@ if os.path.exists(CATALOG_DIR):
     app.mount("/catalogo", StaticFiles(directory=CATALOG_DIR), name="catalogo")
 
 
+@app.post('/orders/{order_id}/delivery-issue', response_model=schemas.OrderDeliveryIssueResponse)
+async def create_order_delivery_issue(
+    order_id: str,
+    payload: schemas.OrderDeliveryIssueCreate,
+    current_admin=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role not in ('owner', 'admin', 'repartidor'):
+        raise HTTPException(status_code=403, detail='No autorizado')
+
+    issue_type = _normalize_delivery_issue_type(getattr(payload, 'type', None))
+    if not issue_type:
+        raise HTTPException(status_code=400, detail='Tipo de incidencia inválido')
+
+    note = str(getattr(payload, 'note', '') or '').strip()
+    photo_url = str(getattr(payload, 'photo_url', '') or '').strip()
+    if issue_type == 'problema' and not note:
+        raise HTTPException(status_code=400, detail='Describí el problema')
+    if issue_type == 'negocio_cerrado' and not photo_url:
+        raise HTTPException(status_code=400, detail='La foto es obligatoria para marcar negocio cerrado')
+
+    try:
+        insp = inspect(engine)
+        existing_cols = {c['name'] for c in insp.get_columns('orders')}
+    except Exception:
+        existing_cols = set()
+
+    use_id_int = False
+    id_param: Any = order_id
+    try:
+        id_param = int(order_id)
+        use_id_int = True
+    except Exception:
+        id_param = str(order_id)
+        use_id_int = False
+
+    order_data = _fetch_order_snapshot(id_param, use_id_int=use_id_int, existing_cols=existing_cols)
+    if not order_data:
+        raise HTTPException(status_code=404, detail='Pedido no encontrado')
+
+    current_status = _normalize_order_status(order_data.get('status'))
+    if current_status in ('cancelado', 'entregado'):
+        raise HTTPException(status_code=409, detail='El pedido ya no admite incidencias')
+
+    assigned_id = order_data.get('assigned_driver_id')
+    assigned_username = str(order_data.get('assigned_driver_username') or '').strip()
+    if role == 'repartidor':
+        own_id = getattr(current_admin, 'id', None)
+        own_user = str(getattr(current_admin, 'username', '') or '').strip()
+        same_driver = (
+            (own_id is not None and str(assigned_id or '') == str(own_id)) or
+            (own_user and assigned_username == own_user)
+        )
+        if not same_driver:
+            raise HTTPException(status_code=403, detail='Este pedido no está asignado a tu ruta')
+
+    issues = _parse_delivery_issues(order_data.get('delivery_issues'))
+    closed_attempts = int(order_data.get('closed_attempts') or 0)
+    actor_id = getattr(current_admin, 'id', None)
+    actor_username = getattr(current_admin, 'username', None)
+    now_ts = datetime.datetime.now(datetime.timezone.utc)
+
+    action = 'logged'
+    next_status = current_status
+    next_closed_attempts = closed_attempts
+    cancel_reason = str(order_data.get('cancel_reason') or '').strip() or None
+    route_reset_sql = ''
+
+    if issue_type == 'negocio_cerrado':
+        next_closed_attempts = closed_attempts + 1
+        if next_closed_attempts >= 2:
+            action = 'cancelled'
+            next_status = 'cancelado'
+            cancel_reason = 'No pudimos llevar a cabo la entrega, ya que estaba cerrado.'
+            route_reset_sql = ", route_order = NULL, route_id = NULL"
+        else:
+            action = 'moved_to_end'
+            if _order_status_rank(current_status) < _order_status_rank('enviado'):
+                next_status = 'enviado'
+
+    issue = _build_delivery_issue_record(
+        issue_type=issue_type,
+        note=note,
+        photo_url=photo_url,
+        actor_id=actor_id,
+        actor_username=actor_username,
+        closed_attempt=next_closed_attempts if issue_type == 'negocio_cerrado' else None,
+        created_at=now_ts,
+    )
+    issues.append(issue)
+    issues_json = json.dumps(issues, ensure_ascii=False)
+
+    params = {
+        'status': next_status,
+        'delivery_issues': issues_json,
+        'closed_attempts': next_closed_attempts,
+        'last_delivery_issue_type': issue_type,
+        'last_delivery_issue_note': note or None,
+        'last_delivery_issue_photo_url': photo_url or None,
+        'last_delivery_issue_at': now_ts,
+        'last_delivery_issue_by_id': actor_id,
+        'last_delivery_issue_by_username': actor_username,
+        'cancel_reason': cancel_reason,
+        'id': id_param,
+    }
+
+    try:
+        with engine.begin() as conn:
+            if use_id_int:
+                conn.execute(
+                    text(
+                        "UPDATE orders SET status = :status, delivery_issues = :delivery_issues, closed_attempts = :closed_attempts, "
+                        "last_delivery_issue_type = :last_delivery_issue_type, last_delivery_issue_note = :last_delivery_issue_note, "
+                        "last_delivery_issue_photo_url = :last_delivery_issue_photo_url, last_delivery_issue_at = :last_delivery_issue_at, "
+                        "last_delivery_issue_by_id = :last_delivery_issue_by_id, last_delivery_issue_by_username = :last_delivery_issue_by_username, "
+                        f"cancel_reason = :cancel_reason{route_reset_sql} WHERE id = :id"
+                    ),
+                    params,
+                )
+            else:
+                conn.execute(
+                    text(
+                        "UPDATE orders SET status = :status, delivery_issues = :delivery_issues, closed_attempts = :closed_attempts, "
+                        "last_delivery_issue_type = :last_delivery_issue_type, last_delivery_issue_note = :last_delivery_issue_note, "
+                        "last_delivery_issue_photo_url = :last_delivery_issue_photo_url, last_delivery_issue_at = :last_delivery_issue_at, "
+                        "last_delivery_issue_by_id = :last_delivery_issue_by_id, last_delivery_issue_by_username = :last_delivery_issue_by_username, "
+                        f"cancel_reason = :cancel_reason{route_reset_sql} WHERE CAST(id AS TEXT) = :id"
+                    ),
+                    params,
+                )
+    except Exception as e:
+        logger.exception('create_order_delivery_issue failed: %s', e)
+        raise HTTPException(status_code=500, detail='No se pudo guardar la incidencia')
+
+    try:
+        if action == 'moved_to_end':
+            _reindex_driver_active_orders(
+                driver_id=assigned_id if assigned_id is not None else None,
+                driver_username=assigned_username or None,
+                move_order_id_to_end=order_data.get('id'),
+                db=db,
+            )
+        elif action == 'cancelled':
+            _reindex_driver_active_orders(
+                driver_id=assigned_id if assigned_id is not None else None,
+                driver_username=assigned_username or None,
+                db=db,
+            )
+    except Exception:
+        logger.exception('Could not reindex driver route after issue for order id=%s', order_data.get('id'))
+
+    updated_order = _fetch_order_snapshot(id_param, use_id_int=use_id_int, existing_cols=existing_cols) or _normalize_order_response_payload({
+        **order_data,
+        'status': next_status,
+        'delivery_issues': issues,
+        'closed_attempts': next_closed_attempts,
+        'last_delivery_issue_type': issue_type,
+        'last_delivery_issue_note': note or None,
+        'last_delivery_issue_photo_url': photo_url or None,
+        'last_delivery_issue_at': now_ts,
+        'last_delivery_issue_by_id': actor_id,
+        'last_delivery_issue_by_username': actor_username,
+        'cancel_reason': cancel_reason,
+    })
+
+    try:
+        await push_event({"action": "order_updated", "order": updated_order})
+    except Exception:
+        pass
+
+    if action == 'cancelled':
+        try:
+            await _send_order_closed_cancellation_email(updated_order)
+        except Exception:
+            logger.exception('Could not send closed-cancel email for order id=%s', id_param)
+
+    issue_out = _latest_delivery_issue(updated_order.get('delivery_issues')) or issue
+    return {
+        'action': action,
+        'order': updated_order,
+        'issue': issue_out,
+    }
+
+
 @app.patch('/orders/{order_id}/status')
 async def update_order_status(order_id: str, request: Request):
     """Update the `status` field for an order and broadcast the change via WS.
@@ -10331,79 +11083,26 @@ async def update_order_status(order_id: str, request: Request):
     except Exception:
         override_ok = False
 
-    # Fetch updated row safely (only request existing columns)
     try:
         insp = inspect(engine)
         existing = {c['name'] for c in insp.get_columns('orders')}
     except Exception:
         existing = set()
 
-    cols = ['id']
-    for c in ('items', 'total', 'created_at', 'status'):
-        if c in existing:
-            cols.append(c)
-    optional = [
-        'customer_type',
-        'user_id','user_full_name','user_email','user_barrio','user_calle','user_numeracion','user_postal_code','user_department',
-        '_token_received','_token_preview','source',
-        'payment_method','payment_status','payment_reference',
-        'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
-        'assigned_driver_id', 'assigned_driver_username', 'assigned_driver_name', 'assigned_driver_zone', 'assigned_at',
-        'sent_at',
-    ]
-    for c in optional:
-        if c in existing:
-            cols.append(c)
-
-    cols_sql = ', '.join(cols)
     try:
-        if use_id_int:
-            row = _safe_engine_fetchone(f"SELECT {cols_sql} FROM orders WHERE id = :id LIMIT 1", {'id': id_param})
-        else:
-            row = _safe_engine_fetchone(f"SELECT {cols_sql} FROM orders WHERE CAST(id AS TEXT) = :id LIMIT 1", {'id': id_param})
-        if row is None:
-            # treat as not found or as a DB failure depending on caller
-            pass
+        od = _fetch_order_snapshot(id_param, use_id_int=use_id_int, existing_cols=existing)
     except Exception as e:
         logger.exception('fetch updated order failed: %s', e)
         headers = _cors_headers_for_request(request)
         return JSONResponse(status_code=500, content={'error': str(e)}, headers=headers)
 
-    if not row:
+    if not od:
         # If update failed but we could persist override, return a minimal response.
         if override_ok:
             headers = _cors_headers_for_request(request)
             return JSONResponse(status_code=200, content=jsonable_encoder({'id': id_param, 'status': status_norm, 'status_fallback': True}), headers=headers)
         headers = _cors_headers_for_request(request)
         return JSONResponse(status_code=404, content={'error': 'not_found'}, headers=headers)
-
-    od = {k: row[idx] for idx, k in enumerate(cols)}
-    if 'items' not in od:
-        od['items'] = []
-    if 'total' not in od:
-        od['total'] = 0
-    if 'status' not in od:
-        od['status'] = status_norm
-    # parse items and token_preview if present
-    try:
-        if isinstance(od.get('items'), str):
-            import json as _json
-            od['items'] = _json.loads(od['items'])
-    except Exception:
-        od['items'] = []
-    try:
-        if isinstance(od.get('_token_preview'), str):
-            import json as _json
-            try:
-                od['_token_preview'] = _json.loads(od['_token_preview'])
-            except Exception:
-                pass
-    except Exception:
-        pass
-    try:
-        od = _attach_maps_url(od)
-    except Exception:
-        pass
 
     # Auto-assign prepared orders to a repartidor based on zone (if not assigned yet)
     try:
@@ -10414,52 +11113,9 @@ async def update_order_status(order_id: str, request: Request):
                 if driver:
                     all_orders = list_orders(skip=0, limit=2000, source=None, q=None, date=None, db=db_local)
                     _auto_assign_routes_for_driver(driver, all_orders, include_assigned=True, db=db_local)
-                    # re-fetch updated order to include assignment + route fields
-                    try:
-                        insp = inspect(engine)
-                        existing = {c['name'] for c in insp.get_columns('orders')}
-                    except Exception:
-                        existing = set()
-                    cols = ['id']
-                    for c in ('items', 'total', 'created_at', 'status'):
-                        if c in existing:
-                            cols.append(c)
-                    optional = [
-                        'customer_type',
-                        'user_id','user_full_name','user_email','user_barrio','user_calle','user_numeracion','user_postal_code','user_department',
-                        '_token_received','_token_preview','source',
-                        'payment_method','payment_status','payment_reference',
-                        'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
-                        'assigned_driver_id', 'assigned_driver_username', 'assigned_driver_name', 'assigned_driver_zone', 'assigned_at',
-                        'delivery_lat', 'delivery_lon',
-                        'route_id', 'route_order', 'route_generated_at',
-                        'sent_at',
-                        'delivered_at', 'delivered_by_id', 'delivered_by_username',
-                    ]
-                    for c in optional:
-                        if c in existing:
-                            cols.append(c)
-                    cols_sql = ', '.join(cols)
-                    if use_id_int:
-                        row2 = _safe_engine_fetchone(f"SELECT {cols_sql} FROM orders WHERE id = :id LIMIT 1", {'id': id_param})
-                    else:
-                        row2 = _safe_engine_fetchone(f"SELECT {cols_sql} FROM orders WHERE CAST(id AS TEXT) = :id LIMIT 1", {'id': id_param})
-                    if row2:
-                        od = {k: row2[idx] for idx, k in enumerate(cols)}
-                        try:
-                            if isinstance(od.get('items'), str):
-                                od['items'] = json.loads(od['items'])
-                        except Exception:
-                            od['items'] = []
-                        try:
-                            if isinstance(od.get('_token_preview'), str):
-                                od['_token_preview'] = json.loads(od['_token_preview'])
-                        except Exception:
-                            pass
-                        try:
-                            od = _attach_maps_url(od)
-                        except Exception:
-                            pass
+                    od_refetched = _fetch_order_snapshot(id_param, use_id_int=use_id_int)
+                    if od_refetched:
+                        od = od_refetched
             finally:
                 db_local.close()
     except Exception:

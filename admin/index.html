@@ -445,7 +445,7 @@
 
       <section id="deliveries" class="section hidden" data-role="owner,admin">
         <h2>Entregas</h2>
-        <p>Historial de entregas por repartidor.</p>
+        <p>Historial de entregas e incidencias reportadas por repartidor.</p>
         <div class="controls center">
           <select id="deliveriesDriverSelect"></select>
           <input id="deliveriesDateFrom" type="date" title="Desde" />
@@ -459,9 +459,12 @@
                 <th>Pedido</th>
                 <th>Repartidor</th>
                 <th>Zona</th>
-                <th>Entrega</th>
+                <th>Estado</th>
+                <th>Incidencia</th>
+                <th>Evento</th>
                 <th>Cliente</th>
                 <th>Dirección</th>
+                <th>Foto</th>
                 <th>Total</th>
               </tr>
             </thead>
@@ -527,6 +530,7 @@
                 <th>Usuario</th>
                 <th>Rol</th>
                 <th>Zona</th>
+                <th>Zona mañana</th>
                 <th>Creado</th>
                 <th>Acciones</th>
               </tr>

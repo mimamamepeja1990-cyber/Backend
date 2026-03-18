@@ -2746,6 +2746,10 @@ def get_orders(
         'route_id', 'route_order', 'route_generated_at',
         'sent_at',
         'delivered_at', 'delivered_by_id', 'delivered_by_username',
+        'delivery_issues', 'closed_attempts',
+        'last_delivery_issue_type', 'last_delivery_issue_note', 'last_delivery_issue_photo_url', 'last_delivery_issue_at',
+        'last_delivery_issue_by_id', 'last_delivery_issue_by_username',
+        'cancel_reason',
     ]
     for c in optional:
         if c in existing:
@@ -2867,6 +2871,14 @@ def get_orders(
                     objd['_token_preview'] = _json.loads(objd['_token_preview'])
                 except Exception:
                     pass
+        except Exception:
+            pass
+        try:
+            if isinstance(objd.get('delivery_issues'), str):
+                try:
+                    objd['delivery_issues'] = _json.loads(objd['delivery_issues'])
+                except Exception:
+                    objd['delivery_issues'] = []
         except Exception:
             pass
         result.append(objd)

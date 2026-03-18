@@ -227,6 +227,15 @@ class OrderCreate(BaseModel):
     delivery_timezone: Optional[str] = None
     delivery_cutoff_hour: Optional[int] = None
 
+class DeliveryIssue(BaseModel):
+    type: str
+    note: Optional[str] = None
+    photo_url: Optional[str] = None
+    created_at: Optional[datetime] = None
+    reported_by_id: Optional[int] = None
+    reported_by_username: Optional[str] = None
+    closed_attempt: Optional[int] = None
+
 class OrderResponse(BaseModel):
     id: int
     items: List[OrderItem]
@@ -268,6 +277,45 @@ class OrderResponse(BaseModel):
     delivered_at: Optional[datetime] = None
     delivered_by_id: Optional[int] = None
     delivered_by_username: Optional[str] = None
+    delivery_issues: List[DeliveryIssue] = Field(default_factory=list)
+    closed_attempts: Optional[int] = 0
+    last_delivery_issue_type: Optional[str] = None
+    last_delivery_issue_note: Optional[str] = None
+    last_delivery_issue_photo_url: Optional[str] = None
+    last_delivery_issue_at: Optional[datetime] = None
+    last_delivery_issue_by_id: Optional[int] = None
+    last_delivery_issue_by_username: Optional[str] = None
+    cancel_reason: Optional[str] = None
+
+
+class OrderDeliveryIssueCreate(BaseModel):
+    type: str
+    note: Optional[str] = None
+    photo_url: Optional[str] = None
+
+
+class OrderDeliveryIssueResponse(BaseModel):
+    action: str
+    order: OrderResponse
+    issue: DeliveryIssue
+
+
+class DriverNextZoneUpdate(BaseModel):
+    zone: Optional[str] = None
+
+
+class DriverNextZoneNoticeResponse(BaseModel):
+    driver_id: Optional[int] = None
+    driver_username: Optional[str] = None
+    zone: Optional[str] = None
+    delivery_date: Optional[str] = None
+    message: Optional[str] = None
+    updated_at: Optional[datetime] = None
+    updated_by: Optional[str] = None
+
+
+class ImageUploadResponse(BaseModel):
+    image_url: str
 
 
 class DriverLocationIn(BaseModel):

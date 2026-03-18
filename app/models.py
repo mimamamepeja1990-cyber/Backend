@@ -123,6 +123,15 @@ class Order(Base):
     delivered_at = Column(DateTime(timezone=True), nullable=True)
     delivered_by_id = Column(Integer, nullable=True)
     delivered_by_username = Column(String(80), nullable=True)
+    delivery_issues = Column(Text, nullable=True)
+    closed_attempts = Column(Integer, nullable=True, default=0)
+    last_delivery_issue_type = Column(String(50), nullable=True)
+    last_delivery_issue_note = Column(Text, nullable=True)
+    last_delivery_issue_photo_url = Column(String(500), nullable=True)
+    last_delivery_issue_at = Column(DateTime(timezone=True), nullable=True)
+    last_delivery_issue_by_id = Column(Integer, nullable=True)
+    last_delivery_issue_by_username = Column(String(80), nullable=True)
+    cancel_reason = Column(String(240), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

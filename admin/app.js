@@ -1325,6 +1325,7 @@ function formatUserDate(ts){
 }
 
 let adminUsersCache = [];
+let driverNextZonesCache = new Map();
 
 async function fetchAdminUsers(){
   try{
@@ -1336,11 +1337,37 @@ async function fetchAdminUsers(){
   return adminUsersCache;
 }
 
+async function fetchDriverNextZones(){
+  try{
+    const list = await safeFetch(`${API_BASE}/admin/driver-next-zones`).catch(() => []);
+    const next = new Map();
+    (Array.isArray(list) ? list : []).forEach((entry) => {
+      const key = String((entry && (entry.driver_id || entry.driver_username)) || '').trim();
+      if (key) next.set(key, entry);
+    });
+    driverNextZonesCache = next;
+  }catch(_){
+    driverNextZonesCache = new Map();
+  }
+  return driverNextZonesCache;
+}
+
+function formatNextZoneDate(value){
+  try{
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const dt = new Date(`${raw}T12:00:00`);
+    if (Number.isNaN(dt.getTime())) return raw;
+    return dt.toLocaleDateString('es-AR', { dateStyle: 'short' });
+  }catch(_){ return String(value || '').trim(); }
+}
+
 async function renderUsers(){
   if (!usersTableBody) return;
   if (!currentAdminUser || (currentAdminUser.role !== 'owner' && currentAdminUser.role !== 'admin')) return;
   updateUserFormAccess();
   const users = await fetchAdminUsers();
+  await fetchDriverNextZones();
   const roleOrder = { owner: 0, admin: 1, repartidor: 2 };
   users.sort((a, b) => {
     const ra = roleOrder[a.role] ?? 99;
@@ -1358,6 +1385,7 @@ async function renderUsers(){
     const tdRole = document.createElement('td');
     tdRole.textContent = formatRoleLabel(u.role);
     const tdZone = document.createElement('td');
+    const tdNextZone = document.createElement('td');
     const isRepartidor = String(u.role || '').toLowerCase() === 'repartidor';
     if (isRepartidor && canAssignZone){
       const select = document.createElement('select');
@@ -1410,8 +1438,72 @@ async function renderUsers(){
       wrap.appendChild(select);
       wrap.appendChild(saveBtn);
       tdZone.appendChild(wrap);
+
+      const nextZoneKey = String((u && (u.id || u.username)) || '').trim();
+      const nextZoneEntry = driverNextZonesCache.get(nextZoneKey) || driverNextZonesCache.get(String(u.username || '').trim()) || null;
+      const nextZoneSelect = document.createElement('select');
+      nextZoneSelect.className = 'user-zone-select';
+      const nextEmpty = document.createElement('option');
+      nextEmpty.value = '';
+      nextEmpty.textContent = 'Sin aviso';
+      nextZoneSelect.appendChild(nextEmpty);
+      zoneOptions
+        .filter(opt => String(opt.value || '').trim())
+        .forEach((opt) => {
+          const option = document.createElement('option');
+          option.value = opt.value;
+          option.textContent = opt.label || opt.value;
+          nextZoneSelect.appendChild(option);
+        });
+      const currentNextZone = String((nextZoneEntry && nextZoneEntry.zone) || '').trim();
+      nextZoneSelect.value = currentNextZone;
+      const nextZoneSaveBtn = document.createElement('button');
+      nextZoneSaveBtn.type = 'button';
+      nextZoneSaveBtn.className = 'btn small user-zone-save-btn';
+      nextZoneSaveBtn.textContent = currentNextZone ? 'Actualizar' : 'Avisar';
+      nextZoneSaveBtn.disabled = true;
+      nextZoneSelect.addEventListener('change', () => {
+        const changed = String(nextZoneSelect.value || '').trim() !== currentNextZone;
+        nextZoneSaveBtn.disabled = !changed;
+        nextZoneSaveBtn.textContent = String(nextZoneSelect.value || '').trim() ? (currentNextZone ? 'Actualizar' : 'Avisar') : 'Limpiar';
+      });
+      nextZoneSaveBtn.addEventListener('click', async () => {
+        const nextZone = String(nextZoneSelect.value || '').trim();
+        nextZoneSaveBtn.disabled = true;
+        const prevText = nextZoneSaveBtn.textContent;
+        nextZoneSaveBtn.textContent = nextZone ? 'Guardando...' : 'Limpiando...';
+        try{
+          await ensureApiBase();
+        }catch(_){ }
+        try{
+          await safeFetch(`${API_BASE}/admin/users/${encodeURIComponent(u.id)}/next-zone`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ zone: nextZone || null }),
+          });
+          showToast(nextZone ? 'Zona de mañana actualizada' : 'Zona de mañana limpiada');
+          await renderUsers();
+        }catch(e){
+          const msg = (e && e.payload && (e.payload.detail || e.payload.error)) ? String(e.payload.detail || e.payload.error) : 'No se pudo actualizar la zona de mañana.';
+          showToast(msg, 'error');
+          nextZoneSaveBtn.disabled = false;
+          nextZoneSaveBtn.textContent = prevText;
+        }
+      });
+      const nextWrap = document.createElement('div');
+      nextWrap.className = 'user-zone-control user-zone-control-next';
+      nextWrap.appendChild(nextZoneSelect);
+      nextWrap.appendChild(nextZoneSaveBtn);
+      const nextMeta = document.createElement('div');
+      nextMeta.className = 'user-next-zone-meta';
+      nextMeta.textContent = currentNextZone && nextZoneEntry && nextZoneEntry.delivery_date
+        ? `Para ${formatNextZoneDate(nextZoneEntry.delivery_date)}`
+        : 'Sin aviso cargado';
+      tdNextZone.appendChild(nextWrap);
+      tdNextZone.appendChild(nextMeta);
     } else {
       tdZone.textContent = u.zone ? String(u.zone) : '—';
+      tdNextZone.textContent = '—';
     }
     const tdCreated = document.createElement('td');
     tdCreated.textContent = formatUserDate(u.created_at || u.createdAt);
@@ -1429,6 +1521,7 @@ async function renderUsers(){
     tr.appendChild(tdUser);
     tr.appendChild(tdRole);
     tr.appendChild(tdZone);
+    tr.appendChild(tdNextZone);
     tr.appendChild(tdCreated);
     tr.appendChild(tdActions);
     usersTableBody.appendChild(tr);
@@ -5609,6 +5702,44 @@ const deliveriesDateTo = document.getElementById('deliveriesDateTo');
 const deliveriesRefreshBtn = document.getElementById('deliveriesRefreshBtn');
 const deliveriesTableBody = document.querySelector('#deliveriesTable tbody');
 
+function getLatestDeliveryIssue(order){
+  if (!order) return null;
+  const issues = Array.isArray(order.delivery_issues) ? order.delivery_issues : [];
+  if (issues.length) return issues[issues.length - 1];
+  const issueType = String(order.last_delivery_issue_type || '').trim();
+  if (!issueType) return null;
+  return {
+    type: issueType,
+    note: order.last_delivery_issue_note || '',
+    photo_url: order.last_delivery_issue_photo_url || '',
+    created_at: order.last_delivery_issue_at || null,
+    reported_by_id: order.last_delivery_issue_by_id || null,
+    reported_by_username: order.last_delivery_issue_by_username || '',
+    closed_attempt: order.closed_attempts || null,
+  };
+}
+
+function formatDeliveryIncidentLabel(issue, order){
+  if (!issue || !issue.type){
+    return normalizeOrderStatus(order && order.status) === 'entregado' ? 'Entrega completada' : '—';
+  }
+  const type = String(issue.type || '').trim();
+  if (type === 'negocio_cerrado'){
+    const attempts = Number(issue.closed_attempt || (order && order.closed_attempts) || 0);
+    return attempts >= 2 ? 'Negocio cerrado · cancelado' : 'Negocio cerrado · reprogramado';
+  }
+  if (type === 'problema'){
+    return 'Problema reportado';
+  }
+  return type;
+}
+
+function buildDeliveryPhotoHtml(rawUrl){
+  const src = buildImagePreviewSrc(rawUrl);
+  if (!src) return '<span class="cell-muted">—</span>';
+  return `<a class="delivery-photo-link" href="${escapeHtml(src)}" target="_blank" rel="noopener noreferrer"><img class="delivery-photo-thumb" src="${escapeHtml(src)}" alt="Foto del cierre" loading="lazy"></a>`;
+}
+
 function renderDeliveriesDriversSelect(drivers){
   if (!deliveriesDriverSelect) return;
   deliveriesDriverSelect.innerHTML = '';
@@ -5631,22 +5762,34 @@ function renderDeliveries(list){
   deliveriesTableBody.innerHTML = '';
   if (!rows.length){
     const tr = document.createElement('tr');
-    tr.innerHTML = '<td colspan="7" class="empty-note">Sin entregas en el período.</td>';
+    tr.innerHTML = '<td colspan="10" class="empty-note">Sin entregas ni incidencias en el período.</td>';
     deliveriesTableBody.appendChild(tr);
     return;
   }
   rows.forEach((o) => {
     const tr = document.createElement('tr');
-    const deliveredAt = o.delivered_at ? new Date(o.delivered_at).toLocaleString('es-AR', { dateStyle:'short', timeStyle:'short' }) : '—';
+    const latestIssue = getLatestDeliveryIssue(o);
+    const eventAtRaw = o.delivered_at || (latestIssue && latestIssue.created_at) || o.last_delivery_issue_at || null;
+    const deliveredAt = eventAtRaw ? new Date(eventAtRaw).toLocaleString('es-AR', { dateStyle:'short', timeStyle:'short' }) : '—';
     const driverName = o.delivered_by_username || o.assigned_driver_username || '—';
     const zone = o.assigned_driver_zone || '—';
+    const statusLabel = formatOrderStatusLabel(o.status);
+    const incidentLabel = formatDeliveryIncidentLabel(latestIssue, o);
+    const incidentNote = String((latestIssue && latestIssue.note) || o.cancel_reason || '').trim();
+    const photoHtml = buildDeliveryPhotoHtml((latestIssue && latestIssue.photo_url) || o.last_delivery_issue_photo_url || '');
     tr.innerHTML = `
       <td>#${escapeHtml(o.id)}</td>
       <td>${escapeHtml(driverName)}</td>
       <td>${escapeHtml(zone)}</td>
+      <td>${escapeHtml(statusLabel)}</td>
+      <td>
+        <div>${escapeHtml(incidentLabel)}</div>
+        ${incidentNote ? `<div class="delivery-incident-note">${escapeHtml(incidentNote)}</div>` : ''}
+      </td>
       <td>${escapeHtml(deliveredAt)}</td>
       <td>${escapeHtml(getOrderPrimaryName(o))}</td>
       <td>${escapeHtml(getOrderAddress(o))}</td>
+      <td>${photoHtml}</td>
       <td>$${Number(o.total || 0).toFixed(2)}</td>
     `;
     deliveriesTableBody.appendChild(tr);
@@ -5674,7 +5817,7 @@ async function refreshDeliveries(force){
   }catch(e){
     console.error('refreshDeliveries failed', e);
     if (deliveriesTableBody){
-      deliveriesTableBody.innerHTML = '<tr><td colspan="7" class="empty-note">No se pudieron cargar las entregas.</td></tr>';
+      deliveriesTableBody.innerHTML = '<tr><td colspan="10" class="empty-note">No se pudieron cargar las entregas.</td></tr>';
     }
   }
 }
@@ -5682,6 +5825,14 @@ async function refreshDeliveries(force){
 if (deliveriesRefreshBtn){
   deliveriesRefreshBtn.addEventListener('click', () => refreshDeliveries(true));
 }
+
+try{
+  setInterval(() => {
+    if (currentSectionId === 'deliveries') {
+      refreshDeliveries(false);
+    }
+  }, 20000);
+}catch(_){ }
 
 function orderRowFor(o){
   const itemsArr = safeParseItems(o.items || []);
