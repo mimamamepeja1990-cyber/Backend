@@ -4957,50 +4957,6 @@ async def set_product_categories(request: Request, db: Session = Depends(get_db)
         raise HTTPException(status_code=500, detail='Failed to save product categories')
 
 
-@app.post('/admin/products/auto-categorize')
-async def auto_categorize_catalog(
-    payload: Dict[str, Any] = Body(default=None),
-    current_admin=Depends(get_current_admin_user),
-):
-    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
-    if role not in ('owner', 'admin'):
-        raise HTTPException(status_code=403, detail='No autorizado')
-
-    payload = payload or {}
-    raw_ids = payload.get('ids') if isinstance(payload, dict) else None
-    ids: List[int] = []
-    if isinstance(raw_ids, list):
-        for item in raw_ids:
-            try:
-                ids.append(int(item))
-            except Exception:
-                continue
-    overwrite_category = bool(payload.get('overwrite_category')) if isinstance(payload, dict) else False
-
-    def task():
-        db = SessionLocal()
-        try:
-            return _auto_sync_catalog_categories(
-                db,
-                product_ids=ids or None,
-                overwrite_category=overwrite_category,
-            )
-        finally:
-            try:
-                db.close()
-            except Exception:
-                pass
-
-    result = await anyio.to_thread.run_sync(task)
-    try:
-        await anyio.to_thread.run_sync(write_catalog_snapshot)
-    except Exception:
-        pass
-    _invalidate_products_cache()
-    await _push_catalog_category_events(result)
-    return result
-
-
 def _run_add_user_columns() -> dict:
     """Run the same migration logic as `add_user_columns.py` and return a report dict."""
     results = { 'added': [], 'skipped': [], 'failed': [] }
@@ -6738,6 +6694,50 @@ async def admin_login_for_access_token(form_data: OAuth2PasswordRequestForm = De
 @app.get('/admin/auth/me', response_model=schemas.AdminUserResponse)
 def admin_auth_me(current_admin=Depends(get_current_admin_user)):
     return current_admin
+
+
+@app.post('/admin/products/auto-categorize')
+async def auto_categorize_catalog(
+    payload: Dict[str, Any] = Body(default=None),
+    current_admin=Depends(get_current_admin_user),
+):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role not in ('owner', 'admin'):
+        raise HTTPException(status_code=403, detail='No autorizado')
+
+    payload = payload or {}
+    raw_ids = payload.get('ids') if isinstance(payload, dict) else None
+    ids: List[int] = []
+    if isinstance(raw_ids, list):
+        for item in raw_ids:
+            try:
+                ids.append(int(item))
+            except Exception:
+                continue
+    overwrite_category = bool(payload.get('overwrite_category')) if isinstance(payload, dict) else False
+
+    def task():
+        db = SessionLocal()
+        try:
+            return _auto_sync_catalog_categories(
+                db,
+                product_ids=ids or None,
+                overwrite_category=overwrite_category,
+            )
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+    result = await anyio.to_thread.run_sync(task)
+    try:
+        await anyio.to_thread.run_sync(write_catalog_snapshot)
+    except Exception:
+        pass
+    _invalidate_products_cache()
+    await _push_catalog_category_events(result)
+    return result
 
 
 @app.get('/admin/users', response_model=List[schemas.AdminUserResponse])
