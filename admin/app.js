@@ -2000,7 +2000,47 @@ function normalizeDashboardStaticCopy(){
   setNodeText('.dashboard-action-card[data-dashboard-action="filters"] span:last-child', 'Ajusta como se clasifica y se muestra el surtido.');
 }
 
+function ensureSalesChartCardLayout(){
+  try{
+    const card = document.querySelector('.sales-chart-card');
+    if (!card || card.dataset.enhanced === '1') return;
+    const canvas = salesChartCanvas || card.querySelector('#salesChart');
+    if (!canvas) return;
+    card.dataset.enhanced = '1';
+    card.innerHTML = `
+      <div class="sales-chart-head">
+        <div class="sales-chart-copy">
+          <span class="sales-chart-kicker">Ventas</span>
+          <h4>Ritmo comercial de los ultimos 30 dias</h4>
+          <p class="sales-chart-subtitle">Facturacion y pedidos diarios en una lectura mas clara para detectar tendencia, picos y caidas sin perder tiempo.</p>
+        </div>
+        <div class="sales-chart-summary">
+          <article class="sales-chart-stat sales-chart-stat-primary">
+            <span class="sales-chart-stat-label">Mejor dia</span>
+            <strong id="salesChartBestDayValue" class="sales-chart-stat-value">-</strong>
+            <span id="salesChartBestDayMeta" class="sales-chart-stat-meta">Esperando datos reales</span>
+          </article>
+          <article class="sales-chart-stat">
+            <span class="sales-chart-stat-label">Ultimos 7 dias</span>
+            <strong id="salesChartLast7Value" class="sales-chart-stat-value">-</strong>
+            <span id="salesChartLast7Meta" class="sales-chart-stat-meta">Todavia sin movimiento</span>
+          </article>
+          <article class="sales-chart-stat">
+            <span class="sales-chart-stat-label">Promedio diario</span>
+            <strong id="salesChartAvgDailyValue" class="sales-chart-stat-value">-</strong>
+            <span id="salesChartAvgDailyMeta" class="sales-chart-stat-meta">Promedio de facturacion</span>
+          </article>
+        </div>
+      </div>
+      <div class="sales-chart-canvas-wrap"></div>
+    `;
+    const canvasWrap = card.querySelector('.sales-chart-canvas-wrap');
+    if (canvasWrap) canvasWrap.appendChild(canvas);
+  }catch(_){ }
+}
+
 normalizeDashboardStaticCopy();
+ensureSalesChartCardLayout();
 
 function shouldLiveRefreshOrders(){
   return ['dashboard', 'orders', 'preparations', 'routes', 'deliveries'].includes(String(currentSectionId || ''));
@@ -2553,6 +2593,12 @@ function formatMoney(value){
   return isInt ? moneyFmt0.format(n) : moneyFmt2.format(n);
 }
 
+function formatMoneyRounded(value){
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '-';
+  return moneyFmt0.format(Math.round(n));
+}
+
 function formatNumber(value, { digits = 0 } = {}){
   const n = Number(value);
   if (!Number.isFinite(n)) return '—';
@@ -2574,6 +2620,18 @@ function formatShortDateLabel(iso){
     if (parts.length === 3) return `${parts[2]}/${parts[1]}`;
     return raw;
   }catch(_){ return String(iso || ''); }
+}
+
+function formatSalesSummaryDate(iso){
+  try{
+    const raw = String(iso || '').trim();
+    const parts = raw.split('-');
+    if (parts.length !== 3) return raw || '-';
+    const months = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+    const dayNum = Number(parts[2]);
+    const monthIdx = Math.max(1, Math.min(12, Number(parts[1]) || 1)) - 1;
+    return `${Number.isFinite(dayNum) ? dayNum : parts[2]} ${months[monthIdx] || parts[1]}`;
+  }catch(_){ return String(iso || '-'); }
 }
 
 function setDashboardActionButton(btn, label, action){
@@ -2747,9 +2805,61 @@ function renderSalesStats(stats){
   // Chart (by_day)
   if (!salesChartCanvas || typeof Chart === 'undefined') return;
   const series = (st && Array.isArray(st.by_day)) ? st.by_day : [];
-  const labels = series.map(x => formatShortDateLabel(x && x.date));
-  const revenue = series.map(x => Number(x && x.revenue || 0));
-  const orders = series.map(x => Number(x && x.orders || 0));
+  const activeIndexes = series.reduce((acc, entry, index) => {
+    const entryRevenue = Number(entry && entry.revenue || 0);
+    const entryOrders = Number(entry && entry.orders || 0);
+    if (entryRevenue > 0 || entryOrders > 0) acc.push(index);
+    return acc;
+  }, []);
+  let chartSeries = series.slice();
+  if (series.length > 10) {
+    if (!activeIndexes.length) {
+      chartSeries = series.slice(-7);
+    } else if (activeIndexes.length <= 2) {
+      const start = Math.max(0, activeIndexes[0] - 2);
+      const end = Math.min(series.length, activeIndexes[activeIndexes.length - 1] + 3);
+      chartSeries = series.slice(start, end);
+    } else if (activeIndexes.length <= 6) {
+      const start = Math.max(0, activeIndexes[0] - 1);
+      const end = Math.min(series.length, activeIndexes[activeIndexes.length - 1] + 2);
+      chartSeries = series.slice(start, end);
+    }
+  }
+  if (!chartSeries.length) chartSeries = series.slice(-7);
+  const labels = chartSeries.map(x => formatShortDateLabel(x && x.date));
+  const revenue = chartSeries.map(x => Number(x && x.revenue || 0));
+  const orders = chartSeries.map(x => Number(x && x.orders || 0));
+  const bestDayValueEl = document.getElementById('salesChartBestDayValue');
+  const bestDayMetaEl = document.getElementById('salesChartBestDayMeta');
+  const last7ValueEl = document.getElementById('salesChartLast7Value');
+  const last7MetaEl = document.getElementById('salesChartLast7Meta');
+  const avgDailyValueEl = document.getElementById('salesChartAvgDailyValue');
+  const avgDailyMetaEl = document.getElementById('salesChartAvgDailyMeta');
+  const salesSubtitleEl = document.querySelector('.sales-chart-subtitle');
+  const bestEntry = series.reduce((best, entry) => {
+    const bestRevenue = best ? Number(best.revenue || 0) : -1;
+    const entryRevenue = Number(entry && entry.revenue || 0);
+    return entryRevenue > bestRevenue ? entry : best;
+  }, null);
+  const last7Series = series.slice(-7);
+  const last7Revenue = last7Series.reduce((sum, entry) => sum + Number(entry && entry.revenue || 0), 0);
+  const last7Orders = last7Series.reduce((sum, entry) => sum + Number(entry && entry.orders || 0), 0);
+  const avgDailyRevenue = series.length ? series.reduce((sum, entry) => sum + Number(entry && entry.revenue || 0), 0) / series.length : 0;
+  const avgDailyOrders = series.length ? series.reduce((sum, entry) => sum + Number(entry && entry.orders || 0), 0) / series.length : 0;
+
+  try{
+    if (bestDayValueEl) bestDayValueEl.textContent = bestEntry ? formatMoneyRounded(bestEntry.revenue || 0) : '-';
+    if (bestDayMetaEl) bestDayMetaEl.textContent = bestEntry ? `${formatSalesSummaryDate(bestEntry.date)} - ${formatNumber(bestEntry.orders || 0)} pedidos` : 'Sin picos registrados';
+    if (last7ValueEl) last7ValueEl.textContent = last7Series.length ? formatMoneyRounded(last7Revenue) : '-';
+    if (last7MetaEl) last7MetaEl.textContent = last7Series.length ? `${formatNumber(last7Orders)} pedidos en la ultima semana` : 'Todavia sin ventas recientes';
+    if (avgDailyValueEl) avgDailyValueEl.textContent = series.length ? formatMoneyRounded(avgDailyRevenue) : '-';
+    if (avgDailyMetaEl) avgDailyMetaEl.textContent = series.length ? `${formatNumber(avgDailyOrders)} pedidos promedio por dia` : 'Promedio diario no disponible';
+    if (salesSubtitleEl) {
+      salesSubtitleEl.textContent = chartSeries.length < series.length
+        ? 'Vista enfocada en los dias con movimiento reciente para evitar un grafico vacio y hacer mas legible la tendencia.'
+        : 'Facturacion y pedidos diarios en una lectura mas clara para detectar tendencia, picos y caidas sin perder tiempo.';
+    }
+  }catch(_){ }
 
   try{
     if (window.salesChart && typeof window.salesChart.destroy === 'function') {
@@ -2761,6 +2871,14 @@ function renderSalesStats(stats){
 
   try{
     const ctx = salesChartCanvas.getContext ? salesChartCanvas.getContext('2d') : salesChartCanvas;
+    const linePointRadius = chartSeries.length <= 2 ? 4 : 0;
+    const gradient = ctx && typeof ctx.createLinearGradient === 'function'
+      ? ctx.createLinearGradient(0, 0, 0, 320)
+      : null;
+    if (gradient) {
+      gradient.addColorStop(0, 'rgba(10,34,64,0.30)');
+      gradient.addColorStop(1, 'rgba(10,34,64,0.02)');
+    }
     window.salesChart = new Chart(ctx, {
       data: {
         labels,
@@ -2770,11 +2888,14 @@ function renderSalesStats(stats){
             label: 'Pedidos',
             data: orders,
             yAxisID: 'y1',
-            backgroundColor: 'rgba(242,107,56,0.28)',
-            borderColor: 'rgba(242,107,56,0.45)',
+            backgroundColor: 'rgba(242,107,56,0.18)',
+            borderColor: 'rgba(242,107,56,0.30)',
             borderWidth: 1,
-            borderRadius: 8,
-            maxBarThickness: 18,
+            borderRadius: 999,
+            maxBarThickness: 16,
+            categoryPercentage: 0.72,
+            barPercentage: 0.9,
+            order: 2,
           },
           {
             type: 'line',
@@ -2782,26 +2903,41 @@ function renderSalesStats(stats){
             data: revenue,
             yAxisID: 'y',
             borderColor: '#0a2240',
-            backgroundColor: 'rgba(10,34,64,0.14)',
-            pointRadius: 2,
-            pointHoverRadius: 4,
-            tension: 0.35,
+            backgroundColor: gradient || 'rgba(10,34,64,0.14)',
+            pointRadius: linePointRadius,
+            pointHoverRadius: 5,
+            pointHitRadius: 16,
+            pointBackgroundColor: '#ffffff',
+            pointBorderColor: '#0a2240',
+            pointBorderWidth: 2,
+            borderWidth: 3,
+            tension: 0.38,
             fill: true,
+            order: 1,
           },
         ]
       },
       options: {
         responsive: true,
         maintainAspectRatio: false,
+        layout: { padding: { top: 8, right: 8, bottom: 0, left: 4 } },
         interaction: { mode: 'index', intersect: false },
         plugins: {
-          legend: { position: 'bottom', labels: { boxWidth: 10, boxHeight: 10 } },
+          legend: { display: false },
           tooltip: {
+            backgroundColor: 'rgba(15,23,42,0.96)',
+            titleColor: '#f8fafc',
+            bodyColor: '#e2e8f0',
+            borderColor: 'rgba(148,163,184,0.28)',
+            borderWidth: 1,
+            cornerRadius: 14,
+            padding: 12,
+            displayColors: false,
             callbacks: {
               title: (items) => {
                 try{
                   const idx = items && items[0] ? items[0].dataIndex : null;
-                  const iso = (idx != null && series[idx]) ? series[idx].date : '';
+                  const iso = (idx != null && chartSeries[idx]) ? chartSeries[idx].date : '';
                   if (!iso) return '—';
                   const parts = String(iso).split('-');
                   return parts.length === 3 ? `${parts[2]}/${parts[1]}/${parts[0]}` : String(iso);
@@ -2818,25 +2954,46 @@ function renderSalesStats(stats){
         },
         scales: {
           x: {
-            grid: { display: false },
-            ticks: { maxRotation: 0, autoSkip: true }
+            grid: { display: false, drawBorder: false },
+            border: { display: false },
+            ticks: {
+              maxRotation: 0,
+              autoSkip: true,
+              autoSkipPadding: 14,
+              padding: 10,
+              color: 'rgba(71,85,105,0.78)',
+              font: { size: 11, weight: '700' },
+            }
           },
           y: {
             position: 'left',
             beginAtZero: true,
+            grid: {
+              color: 'rgba(148,163,184,0.18)',
+              drawBorder: false,
+              tickLength: 0,
+            },
+            border: { display: false },
             ticks: {
               callback: (v) => formatMoney(v),
               maxTicksLimit: 6,
+              padding: 12,
+              color: 'rgba(71,85,105,0.82)',
+              font: { size: 11, weight: '700' },
             }
           },
           y1: {
             position: 'right',
             beginAtZero: true,
-            grid: { drawOnChartArea: false },
+            grid: { drawOnChartArea: false, drawBorder: false },
+            border: { display: false },
             ticks: {
               callback: (v) => formatNumber(v),
               precision: 0,
               maxTicksLimit: 6,
+              padding: 12,
+              color: 'rgba(154,52,18,0.78)',
+              font: { size: 11, weight: '700' },
             }
           }
         }
