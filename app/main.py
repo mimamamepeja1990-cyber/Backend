@@ -229,6 +229,10 @@ OSRM_ROUTE_BASE = str(os.environ.get('OSRM_ROUTE_BASE') or 'https://router.proje
 OSRM_ROUTE_TIMEOUT_SEC = float(os.environ.get('OSRM_ROUTE_TIMEOUT_SEC') or 8)
 OSRM_ROUTE_MAX_WAYPOINTS = max(2, min(int(float(os.environ.get('OSRM_ROUTE_MAX_WAYPOINTS') or 20)), 25))
 OSRM_TRACE_MAX_POINTS = max(2, min(int(float(os.environ.get('OSRM_TRACE_MAX_POINTS') or 24)), 40))
+TRACKING_STOP_MIN_MINUTES = max(0, int(float(os.environ.get('TRACKING_STOP_MIN_MINUTES') or 5)))
+TRACKING_STOP_MAX_MINUTES = max(TRACKING_STOP_MIN_MINUTES, int(float(os.environ.get('TRACKING_STOP_MAX_MINUTES') or 10)))
+TRACKING_LIVE_MAX_AGE_MINUTES = max(1, int(float(os.environ.get('TRACKING_LIVE_MAX_AGE_MINUTES') or 25)))
+TRACKING_FALLBACK_SPEED_KMH = max(10.0, float(os.environ.get('TRACKING_FALLBACK_SPEED_KMH') or 26.0))
 
 _GEOCODE_CACHE: Dict[str, Dict[str, Any]] = {}
 _GEOCODE_CACHE_LOCK = threading.Lock()
@@ -3399,6 +3403,79 @@ async def _send_order_prepared_notification_email(order_data: Optional[Dict[str,
         resend_id,
     )
     return True
+
+
+async def _run_order_status_notification_email(
+    status_effective: str,
+    order_data: Optional[Dict[str, Any]],
+) -> None:
+    try:
+        status_key = _normalize_order_status(status_effective)
+        payload = _enrich_order_contact_fields(order_data if isinstance(order_data, dict) else {})
+        if status_key == 'visto':
+            await _send_order_seen_notification_email(payload)
+        elif status_key == 'preparado':
+            await _send_order_prepared_notification_email(payload)
+    except Exception:
+        logger.exception(
+            'Could not send status notification email in background for order id=%s status=%s',
+            (order_data or {}).get('id') if isinstance(order_data, dict) else None,
+            status_effective,
+        )
+
+
+async def _run_prepared_order_auto_assignment(
+    order_id_value: Any,
+    use_id_int: bool,
+) -> None:
+    def _task() -> Optional[Dict[str, Any]]:
+        db_local = SessionLocal()
+        try:
+            order_snapshot = _fetch_order_snapshot(order_id_value, use_id_int=use_id_int)
+            if not order_snapshot:
+                return None
+            if _normalize_order_status(order_snapshot.get('status')) != 'preparado':
+                return None
+            if order_snapshot.get('assigned_driver_id') or order_snapshot.get('assigned_driver_username'):
+                return None
+            driver = _select_driver_for_order(order_snapshot, db_local)
+            if not driver:
+                return None
+            all_orders = list_orders(skip=0, limit=2000, source=None, q=None, date=None, db=db_local)
+            _auto_assign_routes_for_driver(driver, all_orders, include_assigned=True, db=db_local)
+            return _fetch_order_snapshot(order_id_value, use_id_int=use_id_int)
+        finally:
+            try:
+                db_local.close()
+            except Exception:
+                pass
+
+    try:
+        updated_order = await anyio.to_thread.run_sync(_task)
+        if updated_order:
+            await push_event({"action": "order_updated", "order": updated_order})
+    except Exception:
+        logger.exception('Prepared order auto-assignment failed in background for order id=%s', order_id_value)
+
+
+async def _run_order_status_followups(
+    order_id_value: Any,
+    use_id_int: bool,
+    status_effective: str,
+    order_data: Optional[Dict[str, Any]],
+) -> None:
+    tasks = []
+    status_key = _normalize_order_status(status_effective)
+    if status_key in ('visto', 'preparado'):
+        tasks.append(_run_order_status_notification_email(status_key, order_data))
+    if status_key == 'preparado':
+        tasks.append(_run_prepared_order_auto_assignment(order_id_value, use_id_int))
+    if not tasks:
+        return
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for result in results:
+        if isinstance(result, Exception):
+            logger.exception('Order status follow-up failed for order id=%s: %s', order_id_value, result)
 
 
 def _build_order_closed_cancel_subject(order_data: Optional[Dict[str, Any]]) -> str:
@@ -12072,6 +12149,252 @@ def _build_driver_insights_payload(driver: Any, db: Session) -> Dict[str, Any]:
     }
 
 
+def _customer_tracking_status_label(status_value: Any) -> str:
+    status_key = _normalize_order_status(status_value)
+    labels = {
+        'recibido': 'Recibido',
+        'visto': 'Visto',
+        'preparado': 'Preparado',
+        'enviado': 'Enviado',
+        'entregado': 'Entregado',
+        'cancelado': 'Cancelado',
+    }
+    return labels.get(status_key, 'Recibido')
+
+
+def _customer_tracking_status_message(status_value: Any) -> str:
+    status_key = _normalize_order_status(status_value)
+    messages = {
+        'recibido': 'Estamos armando tu pedido.',
+        'visto': 'Ya revisamos tu pedido y lo estamos preparando.',
+        'preparado': 'Tu pedido ya esta listo.',
+        'enviado': 'Ya va en camino.',
+        'entregado': 'Tu pedido ya fue entregado.',
+        'cancelado': 'Tu pedido fue cancelado.',
+    }
+    return messages.get(status_key, 'Estamos armando tu pedido.')
+
+
+def _estimate_route_drive_minutes_fallback(nodes: List[Tuple[float, float]]) -> Optional[int]:
+    cleaned: List[Tuple[float, float]] = []
+    for lat, lon in (nodes or []):
+        if not _is_mendoza_point(lat, lon):
+            continue
+        cleaned.append((float(lat), float(lon)))
+    if len(cleaned) < 2:
+        return 0 if cleaned else None
+    total_km = 0.0
+    for idx in range(1, len(cleaned)):
+        total_km += _haversine_km(cleaned[idx - 1][0], cleaned[idx - 1][1], cleaned[idx][0], cleaned[idx][1])
+    if total_km <= 0:
+        return 0
+    minutes = (total_km / TRACKING_FALLBACK_SPEED_KMH) * 60.0
+    return max(1, int(round(minutes)))
+
+
+def _estimate_route_drive_minutes(nodes: List[Tuple[float, float]]) -> Optional[int]:
+    cleaned: List[Tuple[float, float]] = []
+    for lat, lon in (nodes or []):
+        if not _is_mendoza_point(lat, lon):
+            continue
+        cleaned.append((float(lat), float(lon)))
+    if len(cleaned) < 2:
+        return 0 if cleaned else None
+    if not OSRM_ROUTE_BASE:
+        return _estimate_route_drive_minutes_fallback(cleaned)
+
+    total_minutes = 0.0
+    try:
+        with httpx.Client(timeout=OSRM_ROUTE_TIMEOUT_SEC) as client:
+            cursor = 0
+            while cursor < len(cleaned) - 1:
+                chunk = cleaned[cursor:min(len(cleaned), cursor + OSRM_ROUTE_MAX_WAYPOINTS)]
+                if len(chunk) < 2:
+                    break
+                coords = ';'.join([
+                    f"{lon:.6f},{lat:.6f}"
+                    for lat, lon in chunk
+                ])
+                resp = client.get(
+                    f"{OSRM_ROUTE_BASE}/route/v1/driving/{coords}",
+                    params={'overview': 'false', 'steps': 'false'},
+                )
+                resp.raise_for_status()
+                payload = resp.json() if resp.content else {}
+                if str(payload.get('code') or '') != 'Ok':
+                    return _estimate_route_drive_minutes_fallback(cleaned)
+                route = (payload.get('routes') or [{}])[0] or {}
+                duration_sec = float(route.get('duration') or 0.0)
+                if duration_sec <= 0:
+                    return _estimate_route_drive_minutes_fallback(cleaned)
+                total_minutes += duration_sec / 60.0
+                cursor += max(1, len(chunk) - 1)
+    except Exception as e:
+        logger.warning('OSRM eta route failed: %s', e)
+        return _estimate_route_drive_minutes_fallback(cleaned)
+
+    if total_minutes <= 0:
+        return 0
+    return max(1, int(round(total_minutes)))
+
+
+def _driver_assignment_cache_key(driver_id: Any, driver_username: Any) -> Tuple[str, str]:
+    return (
+        str(driver_id or '').strip(),
+        str(driver_username or '').strip().lower(),
+    )
+
+
+def _build_active_orders_by_driver_cache(orders: List[Dict[str, Any]]) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
+    grouped: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
+    for order_data in (orders or []):
+        if not isinstance(order_data, dict):
+            continue
+        status_val = _normalize_order_status(order_data.get('status'))
+        if status_val not in ('preparado', 'enviado'):
+            continue
+        driver_key = _driver_assignment_cache_key(order_data.get('assigned_driver_id'), order_data.get('assigned_driver_username'))
+        if not driver_key[0] and not driver_key[1]:
+            continue
+        grouped.setdefault(driver_key, []).append(order_data)
+    for driver_key, active_orders in grouped.items():
+        grouped[driver_key] = sorted(
+            active_orders,
+            key=lambda o: (o.get('route_order') is None, int(o.get('route_order') or 0), str(o.get('id') or '')),
+        )
+    return grouped
+
+
+def _format_customer_eta_text(
+    now_utc: datetime.datetime,
+    tzinfo: datetime.tzinfo,
+    eta_min_minutes: int,
+    eta_max_minutes: int,
+) -> str:
+    now_local = now_utc.astimezone(tzinfo)
+    min_dt = now_local + datetime.timedelta(minutes=max(0, int(eta_min_minutes or 0)))
+    max_dt = now_local + datetime.timedelta(minutes=max(0, int(eta_max_minutes or 0)))
+    return f"Llega aproximadamente entre {min_dt.strftime('%H:%M')} y {max_dt.strftime('%H:%M')}"
+
+
+def _build_customer_order_tracking_payload(
+    order_data: Dict[str, Any],
+    active_orders: List[Dict[str, Any]],
+    live_payload: Optional[Dict[str, Any]],
+    tzinfo: datetime.tzinfo,
+    tz_name: str,
+    db: Optional[Session] = None,
+) -> Dict[str, Any]:
+    status_key = _normalize_order_status(order_data.get('status'))
+    route_order_raw = order_data.get('route_order')
+    try:
+        route_order = int(route_order_raw) if route_order_raw is not None else None
+    except Exception:
+        route_order = None
+    driver_name = str(order_data.get('assigned_driver_name') or order_data.get('assigned_driver_username') or '').strip() or None
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    payload: Dict[str, Any] = {
+        'order_id': int(order_data.get('id')),
+        'status_key': status_key,
+        'status_label': _customer_tracking_status_label(status_key),
+        'status_message': _customer_tracking_status_message(status_key),
+        'eta_available': False,
+        'eta_text': None,
+        'eta_detail': None,
+        'eta_min_minutes': None,
+        'eta_max_minutes': None,
+        'driver_name': driver_name,
+        'route_order': route_order,
+        'stops_ahead': 0,
+        'live_tracking': False,
+        'updated_at': now_utc,
+    }
+    if status_key in ('recibido', 'visto', 'entregado', 'cancelado'):
+        return payload
+
+    ordered_active = list(active_orders or [])
+    target_id = str(order_data.get('id') or '').strip()
+    target_index = next((idx for idx, item in enumerate(ordered_active) if str(item.get('id') or '').strip() == target_id), -1)
+    if target_index < 0:
+        payload['eta_detail'] = 'Te mostraremos la hora estimada cuando el pedido quede dentro de una ruta activa.'
+        return payload
+
+    en_route_indexes = [
+        idx for idx, item in enumerate(ordered_active)
+        if _normalize_order_status(item.get('status')) == 'enviado'
+    ]
+    has_live_route = bool(en_route_indexes)
+    route_start_index = min(en_route_indexes) if en_route_indexes else 0
+    route_start_index = max(0, min(route_start_index, target_index))
+
+    origin: Optional[Tuple[float, float]] = None
+    route_nodes_start_index = route_start_index
+    source_label = 'Ruta asignada'
+    live_dt = _parse_datetime_utc(live_payload.get('recorded_at')) if isinstance(live_payload, dict) else None
+    if isinstance(live_payload, dict):
+        live_lat = _coerce_coord(live_payload.get('lat'))
+        live_lon = _coerce_coord(live_payload.get('lon'))
+        age_sec = (now_utc - live_dt).total_seconds() if live_dt is not None else None
+        if _is_mendoza_point(live_lat, live_lon) and (age_sec is None or age_sec <= TRACKING_LIVE_MAX_AGE_MINUTES * 60):
+            origin = (float(live_lat), float(live_lon))
+            source_label = 'Ubicacion en vivo del repartidor'
+            payload['live_tracking'] = True
+
+    if origin is None and has_live_route and status_key == 'enviado' and target_index == route_start_index:
+        payload['eta_detail'] = 'Te mostraremos la hora estimada cuando tengamos la ubicacion en vivo del repartidor.'
+        return payload
+
+    if origin is None and has_live_route and route_start_index < len(ordered_active):
+        current_point = _extract_driver_order_point(ordered_active[route_start_index])
+        if current_point:
+            origin = (float(current_point['lat']), float(current_point['lon']))
+            route_nodes_start_index = min(target_index + 1, route_start_index + 1)
+            source_label = 'Ruta planificada del repartidor'
+
+    if origin is None:
+        depot_lat, depot_lon = _get_route_start_point(db)
+        if _is_mendoza_point(depot_lat, depot_lon):
+            origin = (float(depot_lat), float(depot_lon))
+            route_nodes_start_index = 0
+            source_label = 'Salida estimada desde el deposito'
+
+    if origin is None:
+        payload['eta_detail'] = 'No hay suficientes coordenadas para calcular la hora estimada.'
+        return payload
+
+    route_nodes: List[Tuple[float, float]] = [origin]
+    for item in ordered_active[route_nodes_start_index:target_index + 1]:
+        point = _extract_driver_order_point(item)
+        if not point:
+            continue
+        lat = _coerce_coord(point.get('lat'))
+        lon = _coerce_coord(point.get('lon'))
+        if lat is None or lon is None or not _is_mendoza_point(lat, lon):
+            continue
+        route_nodes.append((float(lat), float(lon)))
+
+    drive_minutes = _estimate_route_drive_minutes(route_nodes)
+    if drive_minutes is None:
+        payload['eta_detail'] = 'No pudimos calcular la ruta en este momento.'
+        return payload
+
+    stops_ahead = max(0, target_index - route_start_index)
+    eta_min = max(0, int(drive_minutes) + (stops_ahead * TRACKING_STOP_MIN_MINUTES))
+    eta_max = max(eta_min, int(drive_minutes) + (stops_ahead * TRACKING_STOP_MAX_MINUTES))
+    stop_label = 'sin paradas antes de tu entrega' if stops_ahead == 0 else f"{stops_ahead} parada{'s' if stops_ahead != 1 else ''} antes de tu entrega"
+
+    payload.update({
+        'eta_available': True,
+        'eta_text': _format_customer_eta_text(now_utc, tzinfo, eta_min, eta_max),
+        'eta_detail': f"{source_label} - {stop_label}.",
+        'eta_min_minutes': eta_min,
+        'eta_max_minutes': eta_max,
+        'stops_ahead': stops_ahead,
+        'updated_at': now_utc,
+    })
+    return payload
+
+
 @app.get('/admin/deliveries', response_model=List[schemas.OrderResponse])
 def admin_deliveries(
     skip: int = 0,
@@ -12919,6 +13242,107 @@ async def create_order_delivery_issue(
     }
 
 
+@app.post('/orders/tracking', response_model=List[schemas.OrderTrackingResponse])
+async def customer_orders_tracking(
+    payload: schemas.OrderTrackingBatchRequest,
+    current_user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        _run_add_user_columns()
+    except Exception:
+        logger.exception('customer_orders_tracking: could not run orders optional-columns migration')
+
+    try:
+        insp = inspect(engine)
+        existing_cols = {c['name'] for c in insp.get_columns('orders')}
+    except Exception:
+        existing_cols = set()
+
+    requested_ids = []
+    for raw_id in (getattr(payload, 'order_ids', None) or []):
+        oid = str(raw_id or '').strip()
+        if not oid or oid in requested_ids:
+            continue
+        requested_ids.append(oid)
+    if not requested_ids:
+        return []
+
+    tzinfo, tz_name = _resolve_dashboard_tzinfo()
+    current_user_id = getattr(current_user, 'id', None)
+    current_email = _normalize_email(getattr(current_user, 'email', None))
+    all_orders = list_orders(skip=0, limit=2500, source=None, q=None, date=None, db=db)
+    active_by_driver = _build_active_orders_by_driver_cache(all_orders or [])
+    live_cache: Dict[Tuple[str, str], Optional[Dict[str, Any]]] = {}
+    out: List[Dict[str, Any]] = []
+
+    for order_id in requested_ids[:60]:
+        use_id_int = False
+        id_param: Any = order_id
+        try:
+            id_param = int(order_id)
+            use_id_int = True
+        except Exception:
+            id_param = str(order_id)
+
+        order_data = _fetch_order_snapshot(id_param, use_id_int=use_id_int, existing_cols=existing_cols)
+        if not order_data:
+            continue
+
+        order_payload = _enrich_order_contact_fields(order_data)
+        order_user_id = order_payload.get('user_id')
+        order_email = _extract_customer_email_for_order(order_payload, order_payload, {'email': current_email, 'sub': current_email})
+
+        owns_order = False
+        if current_user_id is not None and order_user_id is not None and str(order_user_id) == str(current_user_id):
+            owns_order = True
+        if not owns_order and current_email and order_email and current_email == order_email:
+            owns_order = True
+        if not owns_order:
+            continue
+
+        driver_key = _driver_assignment_cache_key(order_payload.get('assigned_driver_id'), order_payload.get('assigned_driver_username'))
+        active_orders = active_by_driver.get(driver_key, [])
+        live_payload = None
+        if driver_key[0] or driver_key[1]:
+            if driver_key not in live_cache:
+                driver_id_val = order_payload.get('assigned_driver_id')
+                driver_user_val = order_payload.get('assigned_driver_username')
+                live_cache[driver_key] = _get_driver_live_location_payload(driver_id_val, driver_user_val, db)
+            live_payload = live_cache.get(driver_key)
+
+        try:
+            tracking_payload = _build_customer_order_tracking_payload(
+                order_payload,
+                active_orders,
+                live_payload,
+                tzinfo,
+                tz_name,
+                db=db,
+            )
+            out.append(tracking_payload)
+        except Exception:
+            logger.exception('customer_orders_tracking: failed to build tracking for order id=%s', order_id)
+            out.append({
+                'order_id': int(order_payload.get('id')),
+                'status_key': _normalize_order_status(order_payload.get('status')),
+                'status_label': _customer_tracking_status_label(order_payload.get('status')),
+                'status_message': _customer_tracking_status_message(order_payload.get('status')),
+                'eta_available': False,
+                'eta_text': None,
+                'eta_detail': 'No pudimos calcular la hora estimada en este momento.',
+                'eta_min_minutes': None,
+                'eta_max_minutes': None,
+                'driver_name': str(order_payload.get('assigned_driver_name') or order_payload.get('assigned_driver_username') or '').strip() or None,
+                'route_order': order_payload.get('route_order'),
+                'stops_ahead': 0,
+                'live_tracking': False,
+                'updated_at': datetime.datetime.now(datetime.timezone.utc),
+            })
+
+    return out
+
+
 @app.post('/orders/{order_id}/cancel', response_model=schemas.OrderCustomerCancelResponse)
 async def cancel_customer_order(
     order_id: str,
@@ -13140,7 +13564,7 @@ async def cancel_customer_order(
 
 
 @app.patch('/orders/{order_id}/status')
-async def update_order_status(order_id: str, request: Request):
+async def update_order_status(order_id: str, request: Request, background_tasks: BackgroundTasks):
     """Update the `status` field for an order and broadcast the change via WS.
     Accepts numeric or non-numeric IDs (debug events may use string IDs)."""
     def _ensure_status_column():
@@ -13428,23 +13852,6 @@ async def update_order_status(order_id: str, request: Request):
         headers = _cors_headers_for_request(request)
         return JSONResponse(status_code=404, content={'error': 'not_found'}, headers=headers)
 
-    # Auto-assign prepared orders to a repartidor based on zone (if not assigned yet)
-    try:
-        if status_norm == 'preparado' and not od.get('assigned_driver_id') and not od.get('assigned_driver_username'):
-            db_local = SessionLocal()
-            try:
-                driver = _select_driver_for_order(od, db_local)
-                if driver:
-                    all_orders = list_orders(skip=0, limit=2000, source=None, q=None, date=None, db=db_local)
-                    _auto_assign_routes_for_driver(driver, all_orders, include_assigned=True, db=db_local)
-                    od_refetched = _fetch_order_snapshot(id_param, use_id_int=use_id_int)
-                    if od_refetched:
-                        od = od_refetched
-            finally:
-                db_local.close()
-    except Exception:
-        pass
-
     # Broadcast the updated order to connected admin clients
     try:
         await push_event({"action": "order_updated", "order": od})
@@ -13557,29 +13964,18 @@ async def update_order_status(order_id: str, request: Request):
     except Exception:
         pass
 
-    # Notify customer when order status changes to user-facing milestones.
     try:
         status_effective = _normalize_order_status(od.get('status') or status_norm)
-        if status_effective == 'visto':
-            payload_for_seen = _enrich_order_contact_fields(
-                dict(od) if isinstance(od, dict) else {'id': id_param, 'status': status_effective}
+        if status_effective in ('visto', 'preparado'):
+            background_tasks.add_task(
+                _run_order_status_followups,
+                id_param,
+                use_id_int,
+                status_effective,
+                dict(od) if isinstance(od, dict) else {'id': id_param, 'status': status_effective},
             )
-            send_ok = await _send_order_seen_notification_email(payload_for_seen)
-            try:
-                od['_seen_email_sent'] = bool(send_ok)
-            except Exception:
-                pass
-        elif status_effective == 'preparado':
-            payload_for_prepared = _enrich_order_contact_fields(
-                dict(od) if isinstance(od, dict) else {'id': id_param, 'status': status_effective}
-            )
-            send_ok = await _send_order_prepared_notification_email(payload_for_prepared)
-            try:
-                od['_prepared_email_sent'] = bool(send_ok)
-            except Exception:
-                pass
     except Exception:
-        logger.exception('Could not schedule status notification email for order id=%s', id_param)
+        logger.exception('Could not schedule status follow-ups for order id=%s', id_param)
 
     headers = _cors_headers_for_request(request)
     return JSONResponse(status_code=200, content=jsonable_encoder(od), headers=headers)

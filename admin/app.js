@@ -5567,8 +5567,7 @@ async function runBulkOrderStatusUpdate(ids, targetStatus, button, options){
         console.error('bulk status patch failed', { orderId: orderIds[index], targetStatus, err });
       }
     }
-    try{ await refreshOrders('web'); }catch(_){ }
-    try{ await refreshPreparations(true); }catch(_){ }
+    try{ scheduleOperationsRefresh('order:bulk_status_update', 180); }catch(_){ }
     if (failedCount){
       showToast('Listo: ' + successCount + '/' + total + ' ' + successSuffix + '. ' + failedCount + ' fallaron.', failedCount === total ? 'error' : 'warning');
     } else {
@@ -6299,7 +6298,7 @@ function renderOrders(list, source, dateFilter){
         lastPreparationsBase = (lastPreparationsBase || []).map((entry) => String(entry && entry.id) === uid ? mergeOrderRecord(entry, updated) : entry);
         if (isPreparationsSectionActive()) renderPreparations(lastPreparationsBase);
       }catch(_){ }
-      try{ await refreshOrders('web'); }catch(_){ }
+      try{ scheduleOperationsRefresh('order:mark_seen', 120); }catch(_){ }
       if (String((updated && updated.status) || targetStatus).toLowerCase() === 'visto') showToast('Pedido marcado como visto y movido a Preparaciones');
       else showToast('Pedido actualizado');
     }catch(e){
@@ -6377,7 +6376,7 @@ function renderOrders(list, source, dateFilter){
         }
         if (isPreparationsSectionActive()) renderPreparations(lastPreparationsBase);
       }catch(_){ }
-      try{ await refreshOrders('web'); }catch(_){ }
+      try{ scheduleOperationsRefresh('order:mark_prepared', 120); }catch(_){ }
       if (String((updated && updated.status) || targetStatus).toLowerCase() === 'preparado') showToast('Pedido marcado como preparado');
       else showToast('Pedido actualizado');
     }catch(e){
@@ -7259,7 +7258,7 @@ function renderPreparations(list){
             }
           }
         }catch(_){ }
-        try{ await refreshOrders('web'); }catch(_){ }
+        try{ scheduleOperationsRefresh('order:prep_list_mark_prepared', 120); }catch(_){ }
         renderPreparations(lastPreparationsBase);
         showToast('Pedido marcado como preparado');
       }catch(e){
@@ -7932,7 +7931,7 @@ function showOrderDetail(order){
         markBtn.classList.add('updating');
         const updated = await safeFetch(API_BASE + '/orders/' + encodeURIComponent(order.id) + '/status', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: targetStatus }) });
         showOrderDetail(updated);
-        try{ await refreshOrders('web'); }catch(_){ }
+        try{ scheduleOperationsRefresh('order:modal_status_change', 120); }catch(_){ }
         const updatedStatus = String((updated && updated.status) || targetStatus).toLowerCase();
         if (updatedStatus === 'visto') showToast('Pedido marcado como visto y movido a Preparaciones');
         else if (updatedStatus === 'preparado') showToast('Pedido marcado como preparado');

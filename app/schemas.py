@@ -322,6 +322,27 @@ class OrderCustomerCancelResponse(BaseModel):
     message: Optional[str] = None
 
 
+class OrderTrackingBatchRequest(BaseModel):
+    order_ids: List[str] = Field(default_factory=list)
+
+
+class OrderTrackingResponse(BaseModel):
+    order_id: int
+    status_key: str
+    status_label: Optional[str] = None
+    status_message: Optional[str] = None
+    eta_available: bool = False
+    eta_text: Optional[str] = None
+    eta_detail: Optional[str] = None
+    eta_min_minutes: Optional[int] = None
+    eta_max_minutes: Optional[int] = None
+    driver_name: Optional[str] = None
+    route_order: Optional[int] = None
+    stops_ahead: int = 0
+    live_tracking: bool = False
+    updated_at: Optional[datetime] = None
+
+
 class DriverNextZoneUpdate(BaseModel):
     zone: Optional[str] = None
 
