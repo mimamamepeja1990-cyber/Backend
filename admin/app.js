@@ -1902,6 +1902,7 @@ const dashboardHeroTitleEl = document.getElementById('dashboardHeroTitle');
 const dashboardHeroValueEl = document.getElementById('dashboardHeroValue');
 const dashboardHeroLabelEl = document.getElementById('dashboardHeroLabel');
 const dashboardHeroMetaEl = document.getElementById('dashboardHeroMeta');
+const dashboardHeroInsightsEl = document.getElementById('dashboardHeroInsights');
 const dashboardHeroPrimaryBtn = document.getElementById('dashboardHeroPrimaryBtn');
 const dashboardHeroSecondaryBtn = document.getElementById('dashboardHeroSecondaryBtn');
 const dashboardAlertLowStockEl = document.getElementById('dashboardAlertLowStock');
@@ -1917,8 +1918,17 @@ const dashboardCategoryCoverageMetaEl = document.getElementById('dashboardCatego
 const dashboardActionNodes = Array.from(document.querySelectorAll('[data-dashboard-action]'));
 const dashboardState = {
   unseen: 0,
+  unseenAmount: 0,
   unprepared: 0,
+  unpreparedAmount: 0,
+  pendingImpact: 0,
+  criticalOrders: [],
   lowStock: 0,
+  lowStockBrands: [],
+  lowStockProducts: [],
+  lowStockPotentialLoss: 0,
+  lowStockRestockEstimate: 0,
+  lowStockAffectedOrders: 0,
   totalActive: 0,
   avgPrice: 0,
   salesOrders30: 0,
@@ -2678,17 +2688,94 @@ function runDashboardAction(action){
   }
 }
 
-function setDashboardPriorityCard(el, label, count){
+function setDashboardPriorityCard(el, label, count, options = {}){
   if (!el) return;
   const num = Number(count);
   const safeCount = Number.isFinite(num) ? Math.max(0, num) : 0;
   const valueEl = el.querySelector('.dashboard-priority-value');
   const labelEl = el.querySelector('.dashboard-priority-label');
+  const metaEl = el.querySelector('.dashboard-priority-meta');
+  const metaText = typeof options.meta === 'string' ? options.meta : '';
   if (valueEl) valueEl.textContent = formatNumber(safeCount);
   if (labelEl) labelEl.textContent = cleanDashboardText(label);
+  if (metaEl && metaText) metaEl.textContent = cleanDashboardText(metaText);
   el.dataset.count = String(safeCount);
   el.classList.toggle('is-clear', safeCount === 0);
-  el.setAttribute('aria-label', `${label}: ${safeCount}`);
+  if (options.title){
+    el.title = cleanDashboardText(options.title);
+  } else {
+    el.removeAttribute('title');
+  }
+  const ariaParts = [`${label}: ${safeCount}`];
+  if (metaText) ariaParts.push(cleanDashboardText(metaText));
+  el.setAttribute('aria-label', ariaParts.join('. '));
+}
+
+function renderDashboardHeroInsights(items){
+  if (!dashboardHeroInsightsEl) return;
+  dashboardHeroInsightsEl.innerHTML = '';
+  const list = (Array.isArray(items) ? items : [])
+    .map((item) => cleanDashboardText(item))
+    .filter(Boolean)
+    .slice(0, 3);
+  dashboardHeroInsightsEl.hidden = list.length === 0;
+  list.forEach((text) => {
+    const li = document.createElement('li');
+    li.textContent = text;
+    dashboardHeroInsightsEl.appendChild(li);
+  });
+}
+
+function getDashboardFallbackTicket(seedOrders = []){
+  const list = Array.isArray(seedOrders) ? seedOrders : [];
+  const positiveTotals = list
+    .map((order) => getOrderTotalValue(order))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (positiveTotals.length){
+    return positiveTotals.reduce((sum, value) => sum + value, 0) / positiveTotals.length;
+  }
+  const salesAvgTicket = Number(dashboardState.salesAvgTicket30 || 0);
+  if (Number.isFinite(salesAvgTicket) && salesAvgTicket > 0) return salesAvgTicket;
+  const unprepared = Number(dashboardState.unprepared || 0);
+  const unpreparedAmount = Number(dashboardState.unpreparedAmount || 0);
+  if (unprepared > 0 && Number.isFinite(unpreparedAmount) && unpreparedAmount > 0){
+    return unpreparedAmount / unprepared;
+  }
+  return 0;
+}
+
+function buildCriticalOrderEntry(order, fallbackTicket = 0){
+  const status = normalizeOrderStatus(order && order.status);
+  if (status !== 'recibido' && status !== 'visto') return null;
+  const total = Math.max(0, Number(getOrderTotalValue(order) || 0));
+  const baseValue = total > 0 ? total : Math.max(0, Number(fallbackTicket || 0));
+  const createdTs = getOrderCreatedTimestamp(order);
+  const ageHours = createdTs > 0 ? Math.max(0, (Date.now() - createdTs) / 3600000) : 0;
+  const statusWeight = status === 'recibido' ? 1.22 : 1;
+  const ageWeight = 1 + Math.min(0.35, ageHours / 72);
+  return {
+    id: String((order && order.id) || '').trim(),
+    customer: cleanDashboardText(getOrderPrimaryName(order)),
+    status,
+    statusLabel: status === 'recibido' ? 'sin ver' : 'sin preparar',
+    amount: total > 0 ? total : baseValue,
+    createdTs,
+    ageHours,
+    score: baseValue * statusWeight * ageWeight,
+  };
+}
+
+function buildCriticalOrderSummary(entry){
+  if (!entry) return '';
+  const idPart = entry.id ? `#${entry.id}` : 'Pedido';
+  return `${idPart} ${entry.statusLabel} ${formatMoneyRounded(entry.amount)}`;
+}
+
+function formatDashboardStockGap(value, unit){
+  const normalizedUnit = normalizeSaleUnit(unit || 'unit');
+  const digits = normalizedUnit === 'kg' ? 3 : 0;
+  const formatted = formatNumber(value, { digits });
+  return normalizedUnit === 'kg' ? `${formatted} kg` : `${formatted} u`;
 }
 
 function getDashboardHeroConfig(){
@@ -2735,6 +2822,127 @@ function getDashboardHeroConfig(){
   };
 }
 
+function getDashboardHeroImpactConfig(){
+  const unseen = Number(dashboardState.unseen || 0);
+  const unseenAmount = Number(dashboardState.unseenAmount || 0);
+  const unprepared = Number(dashboardState.unprepared || 0);
+  const unpreparedAmount = Number(dashboardState.unpreparedAmount || 0);
+  const pendingImpact = Number(dashboardState.pendingImpact || 0);
+  const lowStock = Number(dashboardState.lowStock || 0);
+  const lowStockPotentialLoss = Number(dashboardState.lowStockPotentialLoss || 0);
+  const lowStockRestockEstimate = Number(dashboardState.lowStockRestockEstimate || 0);
+  const lowStockAffectedOrders = Number(dashboardState.lowStockAffectedOrders || 0);
+  const lowStockBrands = Array.isArray(dashboardState.lowStockBrands) ? dashboardState.lowStockBrands : [];
+  const lowStockProducts = Array.isArray(dashboardState.lowStockProducts) ? dashboardState.lowStockProducts : [];
+  const criticalOrders = Array.isArray(dashboardState.criticalOrders) ? dashboardState.criticalOrders : [];
+  const fallbackTicket = getDashboardFallbackTicket();
+  const criticalSummary = criticalOrders.slice(0, 3).map(buildCriticalOrderSummary).filter(Boolean).join(', ');
+  const topCritical = criticalOrders[0] || null;
+  const lowStockBrandList = lowStockBrands.slice(0, 3).map((entry) => entry && entry.label).filter(Boolean).join(', ');
+  const lowStockActionList = lowStockProducts
+    .slice(0, 3)
+    .map((entry) => `${entry.label} (+${formatDashboardStockGap(entry.restockGap, entry.unit)})`)
+    .join(', ');
+  const candidates = [];
+
+  if (unseen > 0){
+    const score = unseenAmount > 0 ? unseenAmount : (fallbackTicket > 0 ? unseen * fallbackTicket * 1.18 : unseen);
+    const insights = [];
+    if (criticalSummary) insights.push(`Top 3 pedidos criticos: ${criticalSummary}.`);
+    if (pendingImpact > 0) insights.push(`Perdida potencial abierta: ${formatMoneyRounded(pendingImpact)} entre pedidos nuevos y sin preparar.`);
+    if (topCritical && topCritical.status === 'recibido' && topCritical.amount > 0){
+      insights.push(unseen === 1
+        ? `Ese pedido sin ver ya mueve ${formatMoneyRounded(topCritical.amount)} por si solo.`
+        : `El pedido nuevo mas sensible hoy es ${buildCriticalOrderSummary(topCritical)}.`);
+    }
+    candidates.push({
+      key: 'unseen',
+      name: 'pedidos sin ver',
+      score,
+      moneyImpact: unseenAmount,
+      priorityRank: 3,
+      title: 'Primero destraba pedidos sin ver',
+      value: unseenAmount > 0 ? formatMoneyRounded(unseenAmount) : formatNumber(unseen),
+      label: unseenAmount > 0 ? 'impacto sin revisar' : (unseen === 1 ? 'pedido sin ver' : 'pedidos sin ver'),
+      defaultMeta: 'Cada pedido nuevo sin revisar sigue frenando lo que viene detras.',
+      primary: { label: 'Ver pedidos', action: 'orders' },
+      secondary: unprepared > 0 ? { label: 'Ver preparaciones', action: 'preparations' } : { label: 'Ir a catalogo', action: 'catalog' },
+      insights,
+    });
+  }
+
+  if (unprepared > 0){
+    const score = unpreparedAmount > 0 ? unpreparedAmount : (fallbackTicket > 0 ? unprepared * fallbackTicket : unprepared);
+    const insights = [];
+    if (criticalSummary) insights.push(`Top 3 pedidos criticos: ${criticalSummary}.`);
+    if (unpreparedAmount > 0) insights.push(`Hay ${formatMoneyRounded(unpreparedAmount)} frenados en pedidos ya revisados.`);
+    if (topCritical && topCritical.amount > 0){
+      insights.push(`Arranca por ${buildCriticalOrderSummary(topCritical)} para destrabar mas rapido.`);
+    }
+    candidates.push({
+      key: 'unprepared',
+      name: 'pedidos sin preparar',
+      score,
+      moneyImpact: unpreparedAmount,
+      priorityRank: 2,
+      title: 'Primero libera pedidos sin preparar',
+      value: unpreparedAmount > 0 ? formatMoneyRounded(unpreparedAmount) : formatNumber(unprepared),
+      label: unpreparedAmount > 0 ? 'plata frenada' : (unprepared === 1 ? 'pedido sin preparar' : 'pedidos sin preparar'),
+      defaultMeta: 'Aca no falta revisar: falta sacar pedidos a preparacion y reparto.',
+      primary: { label: 'Ver preparaciones', action: 'preparations' },
+      secondary: unseen > 0 ? { label: 'Ver pedidos', action: 'orders' } : { label: 'Ir a catalogo', action: 'catalog' },
+      insights,
+    });
+  }
+
+  if (lowStock > 0){
+    const moneyImpact = lowStockPotentialLoss > 0 ? lowStockPotentialLoss : lowStockRestockEstimate;
+    const score = moneyImpact > 0 ? moneyImpact : lowStock;
+    const insights = [];
+    if (lowStockActionList) insights.push(`Reponer ya: ${lowStockActionList}.`);
+    if (lowStockBrandList) insights.push(`Marca/proveedor sugerido para mover reposicion: ${lowStockBrandList}.`);
+    if (lowStockRestockEstimate > 0 || lowStockPotentialLoss > 0){
+      insights.push(`Cobertura sugerida: ${formatMoneyRounded(lowStockRestockEstimate)} para proteger ${formatMoneyRounded(lowStockPotentialLoss || moneyImpact)}.`);
+    } else if (lowStockAffectedOrders > 0){
+      insights.push(`Ya toca ${formatNumber(lowStockAffectedOrders)} pedido${lowStockAffectedOrders === 1 ? '' : 's'} abiertos.`);
+    }
+    candidates.push({
+      key: 'low-stock',
+      name: 'stock bajo',
+      score,
+      moneyImpact,
+      priorityRank: 1,
+      title: 'Primero repone stock critico',
+      value: moneyImpact > 0 ? formatMoneyRounded(moneyImpact) : formatNumber(lowStock),
+      label: lowStockPotentialLoss > 0 ? 'venta en riesgo' : (moneyImpact > 0 ? 'reposicion sugerida' : (lowStock === 1 ? 'producto critico' : 'productos criticos')),
+      defaultMeta: 'Aca conviene actuar antes de que falten productos en pedidos o catalogo.',
+      primary: { label: 'Revisar catalogo', action: 'catalog' },
+      secondary: lowStockAffectedOrders > 0 ? { label: 'Ver pedidos', action: 'orders' } : { label: 'Ir a filtros', action: 'filters' },
+      insights,
+    });
+  }
+
+  if (candidates.length){
+    const sorted = candidates.slice().sort((a, b) => {
+      const scoreDiff = Number(b.score || 0) - Number(a.score || 0);
+      if (Math.abs(scoreDiff) > 0.0001) return scoreDiff;
+      return Number(b.priorityRank || 0) - Number(a.priorityRank || 0);
+    });
+    const primary = { ...sorted[0] };
+    const runnerUp = sorted[1] || null;
+    primary.meta = runnerUp && primary.moneyImpact > 0 && Number(runnerUp.moneyImpact || 0) > 0
+      ? `Hoy pesa mas que ${runnerUp.name}: ${formatMoneyRounded(primary.moneyImpact)} contra ${formatMoneyRounded(runnerUp.moneyImpact)}.`
+      : primary.defaultMeta;
+    return primary;
+  }
+
+  const fallbackHero = getDashboardHeroConfig();
+  return {
+    ...fallbackHero,
+    insights: [],
+  };
+}
+
 function syncDashboardSummary(){
   const totalActive = Number(dashboardState.totalActive || 0);
   const categoryCoverage = Number(dashboardState.categoryCoverage || 0);
@@ -2753,11 +2961,12 @@ function syncDashboardSummary(){
       dashboardCategoryCoverageMetaEl.textContent = `${formatNumber(activeCategories)} categorÃ­as activas · cobertura completa`;
     }
   }
-  const hero = getDashboardHeroConfig();
+  const hero = getDashboardHeroImpactConfig();
   if (dashboardHeroTitleEl) dashboardHeroTitleEl.textContent = hero.title;
   if (dashboardHeroValueEl) dashboardHeroValueEl.textContent = hero.value;
   if (dashboardHeroLabelEl) dashboardHeroLabelEl.textContent = hero.label;
   if (dashboardHeroMetaEl) dashboardHeroMetaEl.textContent = hero.meta;
+  renderDashboardHeroInsights(hero.insights);
   if (dashboardCategoryCoverageMetaEl) dashboardCategoryCoverageMetaEl.textContent = cleanDashboardText(dashboardCategoryCoverageMetaEl.textContent);
   if (dashboardHeroTitleEl) dashboardHeroTitleEl.textContent = cleanDashboardText(dashboardHeroTitleEl.textContent);
   if (dashboardHeroValueEl) dashboardHeroValueEl.textContent = cleanDashboardText(dashboardHeroValueEl.textContent);
@@ -4460,12 +4669,175 @@ function isProductLowStock(p){
   return stockVal <= LOW_STOCK_FALLBACK;
 }
 
-function updateLowStockAlert(products){
+function getLowStockThresholdValue(product){
+  const minStock = Number(product && product.min_stock);
+  if (Number.isFinite(minStock) && minStock > 0) return minStock;
+  return LOW_STOCK_FALLBACK;
+}
+
+function getLowStockRestockGap(product){
+  const unit = normalizeSaleUnit(product && (product.sale_unit || product.unit || 'unit'));
+  const currentStock = getProductStockValue(product);
+  const threshold = getLowStockThresholdValue(product);
+  const minStep = unit === 'kg' ? 0.25 : 1;
+  const gap = threshold - currentStock;
+  if (!Number.isFinite(gap)) return minStep;
+  return gap > 0 ? gap : minStep;
+}
+
+function getProductRevenuePerStockUnit(product){
+  const price = Number(product && product.price);
+  if (!Number.isFinite(price) || price <= 0) return 0;
+  const unit = normalizeSaleUnit(product && (product.sale_unit || product.unit || 'unit'));
+  if (unit === 'kg'){
+    const kgPerUnit = getProductKgPerUnit(product);
+    return kgPerUnit > 0 ? (price / kgPerUnit) : price;
+  }
+  return price;
+}
+
+function getProductCostPerStockUnit(product){
+  const cost = Number(product && product.cost);
+  if (!Number.isFinite(cost) || cost <= 0) return 0;
+  const unit = normalizeSaleUnit(product && (product.sale_unit || product.unit || 'unit'));
+  if (unit === 'kg'){
+    const kgPerUnit = getProductKgPerUnit(product);
+    return kgPerUnit > 0 ? (cost / kgPerUnit) : cost;
+  }
+  return cost;
+}
+
+function getDashboardProductLabel(product){
+  const name = String((product && (product.name || product.nombre)) || '').trim() || 'Producto';
+  const code = normalizeProductCode(product && (product.code || product.codigo));
+  return code ? `[${code}] ${name}` : name;
+}
+
+function summarizeLowStockBrands(products, orders = []){
+  const counts = new Map();
+  const productEntries = [];
+  (Array.isArray(products) ? products : []).forEach((product) => {
+    if (!isProductLowStock(product)) return;
+    const brand = String(product && (product.brand || product.marca || '') || '').trim() || 'Sin marca';
+    const unit = normalizeSaleUnit(product && (product.sale_unit || product.unit || 'unit'));
+    const restockGap = getLowStockRestockGap(product);
+    counts.set(brand, (counts.get(brand) || 0) + 1);
+    productEntries.push({
+      id: String((product && (product.id ?? product._id)) || '').trim(),
+      code: normalizeProductCode(product && (product.code || product.codigo)),
+      label: getDashboardProductLabel(product),
+      brand,
+      unit,
+      stock: getProductStockValue(product),
+      threshold: getLowStockThresholdValue(product),
+      restockGap,
+      revenueAtRisk: Math.max(0, restockGap * getProductRevenuePerStockUnit(product)),
+      restockCost: Math.max(0, restockGap * getProductCostPerStockUnit(product)),
+      pendingOrders: new Set(),
+      pendingRevenue: 0,
+    });
+  });
+  const byId = new Map();
+  const byCode = new Map();
+  productEntries.forEach((entry) => {
+    if (entry.id) byId.set(entry.id, entry);
+    if (entry.code) byCode.set(entry.code, entry);
+  });
+  const affectedOrders = new Map();
+  (Array.isArray(orders) ? orders : []).forEach((order) => {
+    const status = normalizeOrderStatus(order && order.status);
+    if (status !== 'recibido' && status !== 'visto') return;
+    const items = safeParseItems(order && order.items ? order.items : []);
+    if (!Array.isArray(items) || !items.length) return;
+    const orderKey = String((order && order.id) || '').trim() || `pending-${affectedOrders.size + 1}`;
+    const orderTotal = Math.max(0, Number(getOrderTotalValue(order) || 0));
+    const matched = new Set();
+    items.forEach((item) => {
+      const itemId = String((item && item.id) || '').trim();
+      const code = getOrderItemCode(item);
+      const entry = (itemId && byId.get(itemId)) || (code && byCode.get(code)) || null;
+      if (!entry) return;
+      const matchKey = entry.id || entry.code || entry.label;
+      if (matched.has(matchKey)) return;
+      matched.add(matchKey);
+      entry.pendingOrders.add(orderKey);
+      if (orderTotal > 0) entry.pendingRevenue += orderTotal;
+    });
+    if (matched.size){
+      affectedOrders.set(orderKey, orderTotal);
+    }
+  });
+  productEntries.forEach((entry) => {
+    entry.pendingOrdersCount = entry.pendingOrders.size;
+    delete entry.pendingOrders;
+  });
+  productEntries.sort((a, b) => {
+    const pendingRevenueDiff = Number(b.pendingRevenue || 0) - Number(a.pendingRevenue || 0);
+    if (Math.abs(pendingRevenueDiff) > 0.0001) return pendingRevenueDiff;
+    const pendingOrdersDiff = Number(b.pendingOrdersCount || 0) - Number(a.pendingOrdersCount || 0);
+    if (pendingOrdersDiff) return pendingOrdersDiff;
+    const revenueDiff = Number(b.revenueAtRisk || 0) - Number(a.revenueAtRisk || 0);
+    if (Math.abs(revenueDiff) > 0.0001) return revenueDiff;
+    const gapDiff = Number(b.restockGap || 0) - Number(a.restockGap || 0);
+    if (Math.abs(gapDiff) > 0.0001) return gapDiff;
+    return String(a.label || '').localeCompare(String(b.label || ''), 'es', { sensitivity: 'base' });
+  });
+  const entries = Array.from(counts.entries())
+    .map(([label, count]) => ({ label, count: Number(count || 0) }))
+    .sort((a, b) => (b.count - a.count) || a.label.localeCompare(b.label, 'es', { sensitivity: 'base' }));
+  const potentialLossFromStock = productEntries.reduce((sum, entry) => sum + Math.max(0, Number(entry.revenueAtRisk || 0)), 0);
+  const affectedOrdersValue = Array.from(affectedOrders.values()).reduce((sum, value) => sum + Math.max(0, Number(value || 0)), 0);
+  const restockEstimate = productEntries.reduce((sum, entry) => sum + Math.max(0, Number(entry.restockCost || 0)), 0);
+  if (!entries.length){
+    return {
+      entries: [],
+      products: [],
+      summary: 'Sin marcas en rojo.',
+      title: '',
+      potentialLoss: 0,
+      restockEstimate: 0,
+      affectedOrders: 0,
+    };
+  }
+  const topLabels = entries.slice(0, 3).map((entry) => entry.label);
+  const extra = entries.length - topLabels.length;
+  const summary = `Reponer por marca: ${topLabels.join(', ')}${extra > 0 ? ` +${extra}` : ''}`;
+  const title = productEntries
+    .slice(0, 8)
+    .map((entry) => `${entry.brand}: ${entry.label} (+${formatDashboardStockGap(entry.restockGap, entry.unit)})`)
+    .join(' | ');
+  return {
+    entries,
+    products: productEntries,
+    summary,
+    title,
+    potentialLoss: Math.max(potentialLossFromStock, affectedOrdersValue),
+    restockEstimate,
+    affectedOrders: affectedOrders.size,
+  };
+}
+
+function updateLowStockAlert(products, orders = lastOrdersBaseWeb){
   const list = Array.isArray(products) ? products : [];
-  const lowCount = list.filter(isProductLowStock).length;
+  const lowStockBrands = summarizeLowStockBrands(list, orders);
+  const lowCount = Array.isArray(lowStockBrands.products) ? lowStockBrands.products.length : 0;
   dashboardState.lowStock = lowCount;
+  dashboardState.lowStockBrands = lowStockBrands.entries;
+  dashboardState.lowStockProducts = lowStockBrands.products;
+  dashboardState.lowStockPotentialLoss = Number(lowStockBrands.potentialLoss || 0);
+  dashboardState.lowStockRestockEstimate = Number(lowStockBrands.restockEstimate || 0);
+  dashboardState.lowStockAffectedOrders = Number(lowStockBrands.affectedOrders || 0);
   updateAlertItem(alertLowStockEl, 'Productos con stock bajo', lowCount);
-  setDashboardPriorityCard(dashboardAlertLowStockEl, 'Stock bajo', lowCount);
+  const metaParts = [lowStockBrands.summary];
+  if (lowStockBrands.potentialLoss > 0){
+    metaParts.push(`Riesgo ${formatMoney(lowStockBrands.potentialLoss)}`);
+  } else if (lowStockBrands.restockEstimate > 0){
+    metaParts.push(`Reposicion ${formatMoney(lowStockBrands.restockEstimate)}`);
+  }
+  setDashboardPriorityCard(dashboardAlertLowStockEl, 'Stock bajo', lowCount, {
+    meta: metaParts.filter(Boolean).join('. '),
+    title: lowStockBrands.title,
+  });
   updateDashboardAlertsVisibility();
   syncDashboardSummary();
   return lowCount;
@@ -4474,20 +4846,54 @@ function updateLowStockAlert(products){
 function updateOrderAlertCounts(orders){
   const list = Array.isArray(orders) ? orders : [];
   let unseen = 0;
+  let unseenAmount = 0;
   let unprepared = 0;
+  let unpreparedAmount = 0;
+  const unresolved = [];
   list.forEach((o) => {
     const st = normalizeOrderStatus(o && o.status);
-    if (st === 'recibido') unseen += 1;
-    else if (st === 'visto') unprepared += 1;
+    if (st === 'recibido'){
+      unseen += 1;
+      unseenAmount += getOrderTotalValue(o);
+      unresolved.push(o);
+    } else if (st === 'visto'){
+      unprepared += 1;
+      unpreparedAmount += getOrderTotalValue(o);
+      unresolved.push(o);
+    }
   });
+  const fallbackTicket = getDashboardFallbackTicket(unresolved);
+  const criticalOrders = unresolved
+    .map((order) => buildCriticalOrderEntry(order, fallbackTicket))
+    .filter(Boolean)
+    .sort((a, b) => {
+      const scoreDiff = Number(b.score || 0) - Number(a.score || 0);
+      if (Math.abs(scoreDiff) > 0.0001) return scoreDiff;
+      const amountDiff = Number(b.amount || 0) - Number(a.amount || 0);
+      if (Math.abs(amountDiff) > 0.0001) return amountDiff;
+      return Number(a.createdTs || 0) - Number(b.createdTs || 0);
+    })
+    .slice(0, 3);
   dashboardState.unseen = unseen;
+  dashboardState.unseenAmount = unseenAmount;
   dashboardState.unprepared = unprepared;
+  dashboardState.unpreparedAmount = unpreparedAmount;
+  dashboardState.pendingImpact = unseenAmount + unpreparedAmount;
+  dashboardState.criticalOrders = criticalOrders;
   updateAlertItem(alertOrdersUnseenEl, 'Pedidos sin ver', unseen);
   updateAlertItem(alertOrdersUnpreparedEl, 'Pedidos sin preparar', unprepared);
   setDashboardPriorityCard(dashboardAlertUnseenEl, 'Pedidos sin ver', unseen);
-  setDashboardPriorityCard(dashboardAlertUnpreparedEl, 'Pedidos sin preparar', unprepared);
-  updateDashboardAlertsVisibility();
-  syncDashboardSummary();
+  setDashboardPriorityCard(dashboardAlertUnpreparedEl, 'Pedidos sin preparar', unprepared, {
+    meta: unprepared > 0
+      ? `Equivale a ${formatMoney(unpreparedAmount)} frenados.`
+      : 'No hay plata frenada.',
+  });
+  if (Array.isArray(allProductsCache) && allProductsCache.length){
+    updateLowStockAlert(allProductsCache, list);
+  } else {
+    updateDashboardAlertsVisibility();
+    syncDashboardSummary();
+  }
   return { unseen, unprepared };
 }
 
@@ -6397,7 +6803,19 @@ function getOrderTotalValue(order){
   try{
     const raw = order && (order.total ?? order.total_amount ?? order.amount ?? order.price_total);
     const num = Number(raw);
-    return Number.isFinite(num) ? num : 0;
+    if (Number.isFinite(num)) return num;
+    const items = safeParseItems(order && order.items ? order.items : []);
+    if (!Array.isArray(items) || !items.length) return 0;
+    return items.reduce((sum, item) => {
+      const meta = (item && typeof item === 'object' && item.meta && typeof item.meta === 'object') ? item.meta : {};
+      const subtotalRaw = item && (item.subtotal ?? item.total ?? meta.subtotal ?? meta.total);
+      const subtotal = Number(subtotalRaw);
+      if (Number.isFinite(subtotal)) return sum + subtotal;
+      const priceRaw = item && (item.price ?? item.unit_price ?? meta.price ?? meta.unit_price);
+      const price = Number(priceRaw);
+      const qty = getOrderItemQtyNumber(item);
+      return sum + (Number.isFinite(price) ? (price * qty) : 0);
+    }, 0);
   }catch(_){ return 0; }
 }
 

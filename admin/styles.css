@@ -484,6 +484,23 @@ th.col-select input, td.col-select input{width:16px; height:16px}
   line-height:1.55;
   color:rgba(255,255,255,0.78);
 }
+.dashboard-hero-insights{
+  list-style:none;
+  margin:16px 0 0;
+  padding:0;
+  display:grid;
+  gap:10px;
+  max-width:56ch;
+}
+.dashboard-hero-insights li{
+  padding:10px 12px;
+  border-radius:14px;
+  background:rgba(255,255,255,0.10);
+  border:1px solid rgba(255,255,255,0.12);
+  font-size:13px;
+  line-height:1.45;
+  color:rgba(255,255,255,0.92);
+}
 .dashboard-hero-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:22px}
 .dashboard-hero-actions .btn{min-height:46px;padding:0 16px}
 .dashboard-ghost-btn{
