@@ -2093,6 +2093,9 @@ function scheduleOperationsRefresh(reason = 'ws', delayMs = WS_OPERATIONS_REFRES
     wsOperationsRefreshTimer = null;
     if (!shouldLiveRefreshOrders()) return;
     try{ await refreshOrders('web'); }catch(e){ console.warn('scheduled orders refresh failed', reason, e); }
+    if (currentSectionId === 'preparations'){
+      try{ await refreshPreparations(true); }catch(e){ console.warn('scheduled preparations refresh failed', reason, e); }
+    }
     if (currentSectionId === 'routes'){
       try{ await refreshRoutes(false); }catch(e){ console.warn('scheduled routes refresh failed', reason, e); }
     }
@@ -5795,6 +5798,28 @@ async function fetchOrders(q = '', date = '', source = '', limit = 0){
   }catch(e){ console.warn('fetchOrders failed', e); return null; }
 }
 
+async function fetchPreparationsOrders(){
+  try{
+    await ensureApiBase();
+  }catch(_){ }
+  try{
+    const data = await safeFetch(`${API_BASE}/admin/orders?status=visto,preparado`, { cache: 'no-store' }).catch((err) => {
+      console.warn('fetchPreparationsOrders failed', err);
+      return null;
+    });
+    if (data === null) return null;
+    if (Array.isArray(data)) return data;
+    if (data && Array.isArray(data.orders)) return data.orders;
+    if (data && Array.isArray(data.data)) return data.data;
+    if (data && Array.isArray(data.results)) return data.results;
+    console.warn('fetchPreparationsOrders: unexpected payload shape', data);
+    return null;
+  }catch(e){
+    console.warn('fetchPreparationsOrders failed', e);
+    return null;
+  }
+}
+
 function sleep(ms){ return new Promise(resolve => setTimeout(resolve, ms)); }
 
 async function verifyServerHasOrder(id, attempts = 6, interval = 2000){
@@ -7096,7 +7121,6 @@ function syncPreparationsSnapshot(list){
     const seen = new Set();
     const deduped = [];
     rows.forEach((order) => {
-      if (!isWebOrderEntry(order)) return;
       const id = String((order && order.id) || '').trim();
       if (!id || seen.has(id)) return;
       seen.add(id);
@@ -7115,7 +7139,6 @@ function renderPreparations(list){
   const dateFilter = normalizeIsoDateKey(preparationsDate && preparationsDate.value ? preparationsDate.value : '');
   const filtered = [];
   rows.forEach((order) => {
-    if (!isWebOrderEntry(order)) return;
     const statusNorm = normalizeOrderStatus(order && order.status);
     if (statusNorm !== 'visto' && statusNorm !== 'preparado') return;
     const scheduleInfo = resolveOrderScheduleInfo(order);
@@ -7275,9 +7298,9 @@ function renderPreparations(list){
 
 async function refreshPreparations(forceFetch){
   try{
-    const shouldFetch = !!forceFetch || !Array.isArray(lastPreparationsBase) || lastPreparationsBase.length === 0;
+    const shouldFetch = !!forceFetch || currentSectionId === 'preparations' || !Array.isArray(lastPreparationsBase) || lastPreparationsBase.length === 0;
     if (shouldFetch){
-      const fetched = await fetchOrders('', '', 'web');
+      const fetched = await fetchPreparationsOrders();
       if (fetched === null){
         showToast('No se pudo actualizar preparaciones (se mantiene la vista actual)', 'warning');
       } else {
@@ -7971,7 +7994,6 @@ async function refreshOrders(source){
       return;
     }
     if (!q && !date) updateOrderAlertCounts(list);
-    syncPreparationsSnapshot(list);
     const dateFilter = date || '';
     let toRender = list;
     if(dateFilter){ try{ toRender = (list || []).filter(o => { try{ return (o.created_at || '').slice(0,10) === dateFilter; }catch(_){ return false; } }); }catch(e){ toRender = list; } }
@@ -7979,7 +8001,6 @@ async function refreshOrders(source){
     updateOrdersCustomerTypeBadges(lastOrdersBaseWeb);
     applyOrdersCustomerTypeTabState();
     renderOrders(toRender, source, date);
-    if (isPreparationsSectionActive()) renderPreparations(lastPreparationsBase);
   }catch(e){ console.error('refreshOrders failed', e); showToast('Error al cargar pedidos', 'error'); }
 }
 
