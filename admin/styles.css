@@ -491,7 +491,7 @@ th.col-select input, td.col-select input{width:16px; height:16px}
   padding:0;
   display:grid;
   gap:10px;
-  max-width:56ch;
+  max-width:100%;
 }
 .dashboard-hero-insights li{
   padding:10px 12px;
@@ -501,6 +501,94 @@ th.col-select input, td.col-select input{width:16px; height:16px}
   font-size:13px;
   line-height:1.45;
   color:rgba(255,255,255,0.92);
+}
+.dashboard-hero-insight-card{
+  display:grid;
+  gap:8px;
+}
+.dashboard-hero-insight-card.is-accent{
+  background:rgba(255,244,207,0.14);
+  border-color:rgba(255,244,207,0.22);
+}
+.dashboard-hero-insight-title{
+  display:block;
+  font-size:12px;
+  font-weight:900;
+  letter-spacing:0.08em;
+  text-transform:uppercase;
+  color:rgba(255,255,255,0.8);
+}
+.dashboard-hero-insight-text{
+  margin:0;
+  font-size:13px;
+  line-height:1.5;
+  color:rgba(255,255,255,0.96);
+}
+.dashboard-hero-stock-list{
+  list-style:none;
+  margin:0;
+  padding:0 4px 0 0;
+  display:grid;
+  gap:8px;
+  max-height:280px;
+  overflow:auto;
+}
+.dashboard-hero-stock-item{
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:12px;
+  padding:10px 12px;
+  border-radius:12px;
+  background:rgba(5,16,31,0.22);
+  border:1px solid rgba(255,255,255,0.08);
+}
+.dashboard-hero-stock-copy{
+  min-width:0;
+  display:grid;
+  gap:4px;
+  flex:1 1 auto;
+}
+.dashboard-hero-stock-name{
+  font-size:13px;
+  line-height:1.35;
+  font-weight:800;
+  color:#ffffff;
+}
+.dashboard-hero-stock-meta{
+  font-size:12px;
+  line-height:1.45;
+  color:rgba(255,255,255,0.72);
+}
+.dashboard-hero-stock-tags{
+  display:flex;
+  flex-wrap:wrap;
+  justify-content:flex-end;
+  gap:6px;
+  flex:0 0 auto;
+}
+.dashboard-hero-stock-tag{
+  display:inline-flex;
+  align-items:center;
+  min-height:26px;
+  padding:0 10px;
+  border-radius:999px;
+  background:rgba(255,255,255,0.12);
+  border:1px solid rgba(255,255,255,0.12);
+  font-size:11px;
+  font-weight:800;
+  letter-spacing:0.04em;
+  color:#f8fafc;
+  white-space:nowrap;
+}
+.dashboard-hero-stock-tag.is-urgent{
+  background:rgba(249,115,22,0.18);
+  border-color:rgba(249,115,22,0.32);
+  color:#fff4cf;
+}
+.dashboard-hero-stock-tag.is-brand{
+  background:rgba(96,165,250,0.14);
+  border-color:rgba(96,165,250,0.28);
 }
 .dashboard-hero-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:22px}
 .dashboard-hero-actions .btn{min-height:46px;padding:0 16px}
@@ -867,6 +955,7 @@ th.col-select input, td.col-select input{width:16px; height:16px}
   .dashboard-hero-copy{padding:24px}
   .dashboard-hero-title{font-size:34px}
   .dashboard-hero-value{font-size:58px}
+  .dashboard-hero-stock-list{max-height:240px}
   .dashboard-priority-grid{grid-template-columns:1fr}
   .dashboard-kpi-grid{grid-template-columns:1fr}
 }
@@ -889,6 +978,9 @@ th.col-select input, td.col-select input{width:16px; height:16px}
   .dashboard-hero-focus{gap:10px}
   .dashboard-hero-value{font-size:48px}
   .dashboard-hero-label{margin-bottom:6px}
+  .dashboard-hero-stock-item{flex-direction:column;align-items:flex-start}
+  .dashboard-hero-stock-tags{justify-content:flex-start}
+  .dashboard-hero-stock-list{max-height:none}
   .dashboard-action-rail{grid-template-columns:1fr}
 }
 @media (max-width:1100px){.driver-metrics-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}

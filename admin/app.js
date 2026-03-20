@@ -2880,15 +2880,115 @@ function renderDashboardHeroInsights(items){
   if (!dashboardHeroInsightsEl) return;
   dashboardHeroInsightsEl.innerHTML = '';
   const list = (Array.isArray(items) ? items : [])
-    .map((item) => cleanDashboardText(item))
+    .map((item) => {
+      if (item && typeof item === 'object') return item;
+      const text = cleanDashboardText(item);
+      return text ? { type: 'text', text } : null;
+    })
     .filter(Boolean)
     .slice(0, 3);
   dashboardHeroInsightsEl.hidden = list.length === 0;
-  list.forEach((text) => {
+  list.forEach((item) => {
     const li = document.createElement('li');
-    li.textContent = text;
+    if (item.type === 'product-list'){
+      li.className = 'dashboard-hero-insight-card is-product-list';
+      const title = cleanDashboardText(item.title || 'Reponer ya mismo');
+      const titleEl = document.createElement('strong');
+      titleEl.className = 'dashboard-hero-insight-title';
+      titleEl.textContent = title;
+      li.appendChild(titleEl);
+      const listEl = document.createElement('ul');
+      listEl.className = 'dashboard-hero-stock-list';
+      (Array.isArray(item.items) ? item.items : []).forEach((entry) => {
+        const row = document.createElement('li');
+        row.className = 'dashboard-hero-stock-item';
+        const copy = document.createElement('div');
+        copy.className = 'dashboard-hero-stock-copy';
+        const nameEl = document.createElement('strong');
+        nameEl.className = 'dashboard-hero-stock-name';
+        nameEl.textContent = cleanDashboardText(entry && entry.label ? entry.label : 'Producto');
+        copy.appendChild(nameEl);
+        const meta = cleanDashboardText(entry && entry.meta ? entry.meta : '');
+        if (meta){
+          const metaEl = document.createElement('span');
+          metaEl.className = 'dashboard-hero-stock-meta';
+          metaEl.textContent = meta;
+          copy.appendChild(metaEl);
+        }
+        row.appendChild(copy);
+        const tags = Array.isArray(entry && entry.tags) ? entry.tags : [];
+        if (tags.length){
+          const tagsWrap = document.createElement('div');
+          tagsWrap.className = 'dashboard-hero-stock-tags';
+          tags.forEach((tag) => {
+            const text = cleanDashboardText(tag && tag.text ? tag.text : '');
+            if (!text) return;
+            const tagEl = document.createElement('span');
+            tagEl.className = 'dashboard-hero-stock-tag';
+            if (tag && tag.tone) tagEl.classList.add(`is-${cleanDashboardText(tag.tone)}`);
+            tagEl.textContent = text;
+            tagsWrap.appendChild(tagEl);
+          });
+          row.appendChild(tagsWrap);
+        }
+        listEl.appendChild(row);
+      });
+      li.appendChild(listEl);
+    } else if (item.type === 'note'){
+      li.className = 'dashboard-hero-insight-card';
+      if (item.tone) li.classList.add(`is-${cleanDashboardText(item.tone)}`);
+      const title = cleanDashboardText(item.title || '');
+      const text = cleanDashboardText(item.text || '');
+      if (title){
+        const titleEl = document.createElement('strong');
+        titleEl.className = 'dashboard-hero-insight-title';
+        titleEl.textContent = title;
+        li.appendChild(titleEl);
+      }
+      if (text){
+        const textEl = document.createElement('p');
+        textEl.className = 'dashboard-hero-insight-text';
+        textEl.textContent = text;
+        li.appendChild(textEl);
+      }
+    } else {
+      li.textContent = cleanDashboardText(item.text || '');
+    }
     dashboardHeroInsightsEl.appendChild(li);
   });
+}
+
+function buildDashboardLowStockActionItems(products){
+  return (Array.isArray(products) ? products : [])
+    .map((entry) => {
+      const label = cleanDashboardText(entry && entry.label ? entry.label : '');
+      if (!label) return null;
+      const gap = formatDashboardStockGap(entry && entry.restockGap, entry && entry.unit);
+      const brand = cleanDashboardText(entry && entry.brand ? entry.brand : '');
+      const pendingOrders = Math.max(0, Number(entry && entry.pendingOrdersCount || 0));
+      const pendingRevenue = Math.max(0, Number(entry && entry.pendingRevenue || 0));
+      const restockCost = Math.max(0, Number(entry && entry.restockCost || 0));
+      const revenueAtRisk = Math.max(0, Number(entry && entry.revenueAtRisk || 0));
+      let meta = 'Mover ahora para no cortar venta.';
+      if (pendingOrders > 0 && pendingRevenue > 0){
+        meta = `${formatNumber(pendingOrders)} pedido${pendingOrders === 1 ? '' : 's'} abiertos · ${formatMoneyRounded(pendingRevenue)} comprometidos.`;
+      } else if (pendingOrders > 0){
+        meta = `${formatNumber(pendingOrders)} pedido${pendingOrders === 1 ? '' : 's'} ya dependen de esto.`;
+      } else if (revenueAtRisk > 0){
+        meta = `Venta en riesgo ${formatMoneyRounded(revenueAtRisk)}.`;
+      } else if (restockCost > 0){
+        meta = `Reposicion sugerida ${formatMoneyRounded(restockCost)}.`;
+      }
+      const tags = [];
+      if (gap && gap !== '0'){
+        tags.push({ text: `Faltan ${gap}`, tone: 'urgent' });
+      }
+      if (brand){
+        tags.push({ text: brand, tone: 'brand' });
+      }
+      return { label, meta, tags };
+    })
+    .filter(Boolean);
 }
 
 function getDashboardFallbackTicket(seedOrders = []){
@@ -3004,10 +3104,7 @@ function getDashboardHeroImpactConfig(){
   const criticalSummary = criticalOrders.slice(0, 3).map(buildCriticalOrderSummary).filter(Boolean).join(', ');
   const topCritical = criticalOrders[0] || null;
   const lowStockBrandList = lowStockBrands.slice(0, 3).map((entry) => entry && entry.label).filter(Boolean).join(', ');
-  const lowStockActionList = lowStockProducts
-    .slice(0, 3)
-    .map((entry) => `${entry.label} (+${formatDashboardStockGap(entry.restockGap, entry.unit)})`)
-    .join(', ');
+  const lowStockActionItems = buildDashboardLowStockActionItems(lowStockProducts);
   const candidates = [];
 
   if (unseen > 0){
@@ -3064,12 +3161,33 @@ function getDashboardHeroImpactConfig(){
     const moneyImpact = lowStockPotentialLoss > 0 ? lowStockPotentialLoss : lowStockRestockEstimate;
     const score = moneyImpact > 0 ? moneyImpact : lowStock;
     const insights = [];
-    if (lowStockActionList) insights.push(`Reponer ya: ${lowStockActionList}.`);
-    if (lowStockBrandList) insights.push(`Marca/proveedor sugerido para mover reposicion: ${lowStockBrandList}.`);
+    if (lowStockActionItems.length){
+      insights.push({
+        type: 'product-list',
+        title: `Reponer ya mismo (${formatNumber(lowStockActionItems.length)})`,
+        items: lowStockActionItems,
+      });
+    }
+    if (lowStockBrandList){
+      insights.push({
+        type: 'note',
+        title: 'Marca/proveedor sugerido',
+        text: lowStockBrandList,
+        tone: 'accent',
+      });
+    }
     if (lowStockRestockEstimate > 0 || lowStockPotentialLoss > 0){
-      insights.push(`Cobertura sugerida: ${formatMoneyRounded(lowStockRestockEstimate)} para proteger ${formatMoneyRounded(lowStockPotentialLoss || moneyImpact)}.`);
+      insights.push({
+        type: 'note',
+        title: 'Cobertura sugerida',
+        text: `${formatMoneyRounded(lowStockRestockEstimate)} para proteger ${formatMoneyRounded(lowStockPotentialLoss || moneyImpact)}.`,
+      });
     } else if (lowStockAffectedOrders > 0){
-      insights.push(`Ya toca ${formatNumber(lowStockAffectedOrders)} pedido${lowStockAffectedOrders === 1 ? '' : 's'} abiertos.`);
+      insights.push({
+        type: 'note',
+        title: 'Impacto directo',
+        text: `Ya toca ${formatNumber(lowStockAffectedOrders)} pedido${lowStockAffectedOrders === 1 ? '' : 's'} abiertos.`,
+      });
     }
     candidates.push({
       key: 'low-stock',
