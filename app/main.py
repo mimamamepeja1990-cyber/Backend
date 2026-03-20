@@ -7600,6 +7600,48 @@ def _admin_stress_mark_order_delivered(
         return False
 
 
+def _shift_driver_route_after_delivery(order_data: Optional[Dict[str, Any]]) -> None:
+    payload = order_data if isinstance(order_data, dict) else {}
+    order_id = payload.get('id')
+    route_order = payload.get('route_order')
+    assign_id = payload.get('assigned_driver_id')
+    assign_user = str(payload.get('assigned_driver_username') or '').strip() or None
+    try:
+        route_order_int = int(route_order) if route_order is not None else None
+    except Exception:
+        route_order_int = None
+    if route_order_int is None or (assign_id is None and not assign_user):
+        return
+    params: Dict[str, Any] = {
+        'route_order': int(route_order_int),
+    }
+    clauses = []
+    if assign_id is not None:
+        try:
+            params['driver_id'] = int(assign_id)
+            clauses.append('assigned_driver_id = :driver_id')
+        except Exception:
+            pass
+    if assign_user:
+        params['driver_username'] = assign_user
+        clauses.append('assigned_driver_username = :driver_username')
+    if not clauses:
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE orders SET route_order = route_order - 1 "
+                    f"WHERE ({' OR '.join(clauses)}) "
+                    "AND LOWER(COALESCE(status, 'recibido')) IN ('preparado', 'enviado') "
+                    "AND route_order IS NOT NULL AND route_order > :route_order"
+                ),
+                params,
+            )
+    except Exception:
+        logger.exception('Could not shift driver route after delivery for order id=%s', order_id)
+
+
 def _admin_stress_build_segment_points(
     start_lat: float,
     start_lon: float,
@@ -15080,32 +15122,10 @@ async def update_order_status(order_id: str, request: Request, background_tasks:
     except Exception:
         pass
 
-    # Recompute route order for the driver after a delivery
+    # Keep the remaining route tight without recalculating the entire zone.
     try:
         if status_norm == 'entregado':
-            assign_id = od.get('assigned_driver_id')
-            assign_user = od.get('assigned_driver_username')
-            if assign_id or assign_user:
-                db_local = SessionLocal()
-                try:
-                    driver = None
-                    if assign_id is not None:
-                        try:
-                            driver = crud.get_admin_user_by_id(db_local, int(assign_id))
-                        except Exception:
-                            driver = None
-                    if not driver and assign_user:
-                        driver = crud.get_admin_user_by_username(db_local, str(assign_user))
-                    if driver:
-                        driver_role = str(getattr(driver, 'role', '') or '').strip().lower()
-                        if driver_role == 'repartidor':
-                            all_orders = list_orders(skip=0, limit=2000, source=None, q=None, date=None, db=db_local)
-                            _auto_assign_routes_for_driver(driver, all_orders, include_assigned=True, db=db_local)
-                finally:
-                    try:
-                        db_local.close()
-                    except Exception:
-                        pass
+            _shift_driver_route_after_delivery(od)
     except Exception:
         pass
 
