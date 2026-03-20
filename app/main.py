@@ -12144,9 +12144,6 @@ def admin_list_orders(
         # Default: show delivery-stage orders once prepared.
         status_values = ['preparado', 'enviado']
 
-    if status_values:
-        orders = [o for o in (orders or []) if _normalize_order_status(o.get('status')) in status_values]
-
     # Assignment filter
     target_driver_id = None
     target_driver_username = None
