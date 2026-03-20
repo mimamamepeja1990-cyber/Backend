@@ -2722,6 +2722,8 @@ def get_orders(
     source: Optional[str] = None,
     q: Optional[str] = None,
     date: Optional[str] = None,
+    assigned_driver_id: Optional[int] = None,
+    assigned_driver_username: Optional[str] = None,
 ):
     """Return recent orders using a safe raw SELECT that only requests
     columns present in the `orders` table. This avoids ProgrammingError
@@ -2811,6 +2813,20 @@ def get_orders(
             if search_parts:
                 where.append('(' + ' OR '.join(search_parts) + ')')
 
+        driver_clauses = []
+        if assigned_driver_id is not None and 'assigned_driver_id' in existing:
+            try:
+                params['assigned_driver_id'] = int(assigned_driver_id)
+                driver_clauses.append('assigned_driver_id = :assigned_driver_id')
+            except Exception:
+                pass
+        assigned_username = str(assigned_driver_username or '').strip()
+        if assigned_username and 'assigned_driver_username' in existing:
+            params['assigned_driver_username'] = assigned_username
+            driver_clauses.append('assigned_driver_username = :assigned_driver_username')
+        if driver_clauses:
+            where.append('(' + ' OR '.join(driver_clauses) + ')')
+
         where_clause = (' WHERE ' + ' AND '.join(where)) if where else ''
         limit_clause = ''
         if limit_value is not None:
@@ -2828,6 +2844,17 @@ def get_orders(
             query = db.query(models.Order)
             if source and hasattr(models.Order, 'source'):
                 query = query.filter(models.Order.source == source)
+            driver_filters = []
+            if assigned_driver_id is not None and hasattr(models.Order, 'assigned_driver_id'):
+                try:
+                    driver_filters.append(models.Order.assigned_driver_id == int(assigned_driver_id))
+                except Exception:
+                    pass
+            assigned_username = str(assigned_driver_username or '').strip()
+            if assigned_username and hasattr(models.Order, 'assigned_driver_username'):
+                driver_filters.append(models.Order.assigned_driver_username == assigned_username)
+            if driver_filters:
+                query = query.filter(or_(*driver_filters))
             query = query.order_by(models.Order.created_at.desc()).offset(max(0, int(skip or 0)))
             if limit_value is not None:
                 query = query.limit(limit_value)

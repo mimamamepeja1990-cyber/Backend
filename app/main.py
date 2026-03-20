@@ -11784,10 +11784,21 @@ def list_orders(
     q: Optional[str] = None,
     date: Optional[str] = None,
     db: Session = Depends(get_db),
+    assigned_driver_id: Optional[int] = None,
+    assigned_driver_username: Optional[str] = None,
 ):
     # Fetch recent orders (safe select in CRUD). Then merge any cached pushed payloads
     # (which may contain token preview) to surface user info when DB lacks columns.
-    rows = crud.get_orders(db, skip, limit, source=source, q=q, date=date)
+    rows = crud.get_orders(
+        db,
+        skip,
+        limit,
+        source=source,
+        q=q,
+        date=date,
+        assigned_driver_id=assigned_driver_id,
+        assigned_driver_username=assigned_driver_username,
+    )
     try:
         _prune_order_cache()
     except Exception:
@@ -12118,8 +12129,6 @@ def admin_list_orders(
     current_admin=Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ):
-    # Reuse existing list_orders logic, then apply role-based filters.
-    orders = list_orders(skip=skip, limit=limit, source=source, q=q, date=date, db=db)
     role = str(getattr(current_admin, 'role', '') or '').strip().lower()
     admin_id = getattr(current_admin, 'id', None)
     admin_username = getattr(current_admin, 'username', None)
@@ -12158,14 +12167,52 @@ def admin_list_orders(
         auto_flag = str(auto).strip().lower() not in ('0', 'false', 'no', 'off')
 
     if role == 'repartidor':
-        # Auto-assign prepared orders in zone when requested (default true).
-        if auto_flag:
+        # Fast path: fetch only this driver's assigned orders first.
+        orders = list_orders(
+            skip=skip,
+            limit=limit,
+            source=source,
+            q=q,
+            date=date,
+            db=db,
+            assigned_driver_id=admin_id,
+            assigned_driver_username=admin_username,
+        )
+        if status_values:
+            orders = [o for o in (orders or []) if _normalize_order_status(o.get('status')) in status_values]
+        if not orders and auto_flag:
             try:
-                _auto_assign_routes_for_driver(current_admin, orders, include_assigned=True, db=db)
-                # refresh list after auto-assign
-                orders = list_orders(skip=skip, limit=limit, source=source, q=q, date=date, db=db)
+                # Only scan a bounded slice when we truly need auto-assignment.
+                scan_limit = max(250, min(int(limit or 250), 600))
+            except Exception:
+                scan_limit = 250
+            try:
+                candidate_orders = list_orders(
+                    skip=0,
+                    limit=scan_limit,
+                    source=source,
+                    q=q,
+                    date=date,
+                    db=db,
+                )
+                _auto_assign_routes_for_driver(current_admin, candidate_orders, include_assigned=True, db=db)
+                orders = list_orders(
+                    skip=skip,
+                    limit=limit,
+                    source=source,
+                    q=q,
+                    date=date,
+                    db=db,
+                    assigned_driver_id=admin_id,
+                    assigned_driver_username=admin_username,
+                )
+                if status_values:
+                    orders = [o for o in (orders or []) if _normalize_order_status(o.get('status')) in status_values]
             except Exception:
                 logger.exception('auto-assign for repartidor failed')
+    else:
+        # Reuse existing list_orders logic for admins/owners.
+        orders = list_orders(skip=skip, limit=limit, source=source, q=q, date=date, db=db)
 
     if target_driver_id is not None or target_driver_username:
         orders = [
