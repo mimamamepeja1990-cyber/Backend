@@ -49,7 +49,8 @@ function syncDriverAppInstall(){
   try{
     if (driverAppInstallBtn){
       const base = String(API_BASE || REMOTE_API_BASE || '').replace(/\/$/, '');
-      driverAppInstallBtn.href = `${base}/admin/repartidor-app.apk`;
+      const version = Date.now();
+      driverAppInstallBtn.href = `${base}/admin/repartidor-app.apk?v=${version}`;
     }
   }catch(_){ }
 }

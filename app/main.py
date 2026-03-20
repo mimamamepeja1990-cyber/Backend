@@ -14154,6 +14154,11 @@ if os.path.exists(FRONTEND_DIR):
             apk_path,
             media_type='application/vnd.android.package-archive',
             filename='repartidor-app.apk',
+            headers={
+                'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+                'Pragma': 'no-cache',
+                'Expires': '0',
+            },
         )
 
     app.mount("/admin", StaticFiles(directory=FRONTEND_DIR), name="admin")
