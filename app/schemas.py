@@ -250,6 +250,7 @@ class OrderResponse(BaseModel):
     user_numeracion: Optional[str] = None
     user_postal_code: Optional[str] = None
     user_department: Optional[str] = None
+    user_address_notes: Optional[str] = None
     maps_url: Optional[str] = None
     created_at: Optional[datetime] = None
     # Optional token preview fields (added so GET /orders can return token previews)

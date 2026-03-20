@@ -1231,6 +1231,28 @@ def _order_select_columns(existing_cols: Optional[set] = None) -> List[str]:
     return cols
 
 
+def _extract_order_address_notes(order_data: Optional[Dict[str, Any]]) -> Optional[str]:
+    payload = order_data if isinstance(order_data, dict) else {}
+    token_preview = payload.get('_token_preview') if isinstance(payload.get('_token_preview'), dict) else {}
+    nested_address = token_preview.get('address') if isinstance(token_preview.get('address'), dict) else {}
+    for value in (
+        payload.get('user_address_notes'),
+        payload.get('delivery_notes'),
+        payload.get('notes'),
+        token_preview.get('delivery_notes'),
+        token_preview.get('notes'),
+        token_preview.get('instructions'),
+        token_preview.get('delivery_instructions'),
+        nested_address.get('notes'),
+        nested_address.get('instructions'),
+        nested_address.get('delivery_instructions'),
+    ):
+        text = str(value or '').strip()
+        if text:
+            return text
+    return None
+
+
 def _normalize_order_response_payload(order_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     od = dict(order_data or {})
     if 'items' not in od:
@@ -1249,6 +1271,7 @@ def _normalize_order_response_payload(order_data: Optional[Dict[str, Any]]) -> D
             od['_token_preview'] = json.loads(od['_token_preview'])
     except Exception:
         pass
+    od['user_address_notes'] = _extract_order_address_notes(od)
     try:
         od['delivery_issues'] = _parse_delivery_issues(od.get('delivery_issues'))
     except Exception:
@@ -12114,6 +12137,21 @@ def list_orders(
                             status_updates.append((int(oid), str(effective_status)))
                 except Exception:
                     pass
+            except Exception:
+                pass
+            try:
+                if (assigned_driver_id is not None or assigned_driver_username) and not isinstance(od.get('_token_preview'), dict) and od.get('id'):
+                    row = _safe_engine_fetchone(
+                        'SELECT token_preview, token_received FROM order_token_previews WHERE order_id = :id ORDER BY created_at DESC LIMIT 1',
+                        {'id': str(od.get('id'))},
+                    )
+                    if row:
+                        tp_raw = row[0]
+                        tr_flag = row[1] if len(row) > 1 else False
+                        tp = json.loads(tp_raw) if isinstance(tp_raw, str) and tp_raw else (tp_raw if isinstance(tp_raw, dict) else {})
+                        if isinstance(tp, dict) and tp:
+                            od['_token_preview'] = tp
+                            od['_token_received'] = bool(tr_flag)
             except Exception:
                 pass
             try:
