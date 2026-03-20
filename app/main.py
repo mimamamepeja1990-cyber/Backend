@@ -14130,26 +14130,30 @@ if os.path.exists(FRONTEND_DIR):
 
     @app.get("/admin/repartidor-app.apk")
     async def admin_repartidor_apk():
-        apk_path = os.path.abspath(
-            os.path.join(
-                os.path.dirname(__file__),
-                '..',
-                '..',
-                'android',
-                'app',
-                'build',
-                'outputs',
-                'apk',
-                'debug',
-                'app-debug.apk',
-            )
-        )
-        if not os.path.exists(apk_path):
+        apk_candidates = [
+            os.path.join(FRONTEND_DIR, 'repartidor-app.apk'),
+            os.path.abspath(
+                os.path.join(
+                    os.path.dirname(__file__),
+                    '..',
+                    '..',
+                    'android',
+                    'app',
+                    'build',
+                    'outputs',
+                    'apk',
+                    'debug',
+                    'app-debug.apk',
+                )
+            ),
+        ]
+        apk_path = next((path for path in apk_candidates if os.path.exists(path)), None)
+        if not apk_path:
             raise HTTPException(status_code=404, detail='APK not found')
         return FileResponse(
             apk_path,
             media_type='application/vnd.android.package-archive',
-            filename='app-debug.apk',
+            filename='repartidor-app.apk',
         )
 
     app.mount("/admin", StaticFiles(directory=FRONTEND_DIR), name="admin")
