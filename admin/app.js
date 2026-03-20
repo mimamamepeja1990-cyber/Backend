@@ -2092,7 +2092,11 @@ const dashboardState = {
 };
 const WS_CATALOG_REFRESH_DEBOUNCE_MS = 1600;
 const WS_OPERATIONS_REFRESH_DEBOUNCE_MS = 900;
-const ORDERS_POLL_INTERVAL_MS = 15000;
+const ORDERS_POLL_INTERVAL_MS = 30000;
+const AUTO_IMAGE_POLL_INTERVAL_MS = 15000;
+const TOKEN_PREVIEW_CACHE_MS = 30000;
+let tokenPreviewIndexCache = null;
+let tokenPreviewIndexCacheTs = 0;
 let wsCatalogRefreshTimer = null;
 let wsOperationsRefreshTimer = null;
 let catalogRefreshPending = false;
@@ -2208,6 +2212,10 @@ function shouldLiveRefreshOrders(){
   return ['dashboard', 'orders', 'preparations', 'routes', 'deliveries'].includes(String(currentSectionId || ''));
 }
 
+function shouldRefreshOrdersTable(){
+  return ['dashboard', 'orders', 'preparations'].includes(String(currentSectionId || ''));
+}
+
 function shouldLiveRefreshCatalog(){
   return ['dashboard', 'catalog', 'retail-prices', 'filters'].includes(String(currentSectionId || ''));
 }
@@ -2244,7 +2252,9 @@ function scheduleOperationsRefresh(reason = 'ws', delayMs = WS_OPERATIONS_REFRES
   wsOperationsRefreshTimer = setTimeout(async () => {
     wsOperationsRefreshTimer = null;
     if (!shouldLiveRefreshOrders()) return;
-    try{ await refreshOrders('web'); }catch(e){ console.warn('scheduled orders refresh failed', reason, e); }
+    if (shouldRefreshOrdersTable()){
+      try{ await refreshOrders('web'); }catch(e){ console.warn('scheduled orders refresh failed', reason, e); }
+    }
     if (currentSectionId === 'preparations'){
       try{ await refreshPreparations(true); }catch(e){ console.warn('scheduled preparations refresh failed', reason, e); }
     }
@@ -3713,6 +3723,7 @@ function renderAutoImageProgress(state){
 
 async function fetchAutoImageProgress(){
   if (!autoImageProgress) return;
+  if (!shouldLiveRefreshCatalog()) return;
   try{
     const state = await safeFetch(`${API_BASE}/products/auto-image/status`, { cache: 'no-store' });
     renderAutoImageProgress(state);
@@ -3723,7 +3734,7 @@ async function fetchAutoImageProgress(){
 
 function startAutoImageProgressPolling(){
   if (!autoImageProgress || autoImagePollTimer) return;
-  autoImagePollTimer = setInterval(()=>{ fetchAutoImageProgress(); }, 2500);
+  autoImagePollTimer = setInterval(()=>{ fetchAutoImageProgress(); }, AUTO_IMAGE_POLL_INTERVAL_MS);
   fetchAutoImageProgress();
 }
 
@@ -5955,41 +5966,55 @@ async function fetchOrders(q = '', date = '', source = '', limit = 0, fetchOptio
     else if(data && Array.isArray(data.results)) arr = data.results;
     else { console.warn('fetchOrders: unexpected payload shape', data); return null; }
     try{ console.debug('[admin] fetchOrders returned ids', arr.slice(0,20).map(x=>x.id)); }catch(_){ }
-    // If some orders lack user info, try fetching persisted token previews
-    // from the server and merge them so admins always see contact info.
-    try{
-      const tpList = await safeFetch(API_BASE + '/debug/token-previews', fetchOptions && fetchOptions.signal ? { signal: fetchOptions.signal } : undefined).catch((err) => {
-        if (err && (err.name === 'AbortError' || String(err.message || '').toLowerCase().includes('abort'))) throw err;
-        return null;
-      });
-      if(Array.isArray(tpList) && tpList.length){
-        const tpMap = {};
-        tpList.forEach(t => { try{ if(t && t.order_id) tpMap[String(t.order_id)] = t.token_preview || null; }catch(_){ } });
+    const needsTokenPreviewMerge = (arr || []).some((o) => {
+      try{ return !o.user_full_name && !o.user_email; }catch(_){ return false; }
+    });
+    if (needsTokenPreviewMerge){
+      try{
+        const now = Date.now();
+        let tpMap = tokenPreviewIndexCache;
+        if (!tpMap || (now - tokenPreviewIndexCacheTs) > TOKEN_PREVIEW_CACHE_MS){
+          const tpList = await safeFetch(
+            API_BASE + '/debug/token-previews',
+            Object.assign({ cache: 'no-store' }, (fetchOptions && fetchOptions.signal) ? { signal: fetchOptions.signal } : {})
+          ).catch((err) => {
+            if (err && (err.name === 'AbortError' || String(err.message || '').toLowerCase().includes('abort'))) throw err;
+            return null;
+          });
+          tpMap = {};
+          if (Array.isArray(tpList) && tpList.length){
+            tpList.forEach((t) => {
+              try{
+                if (t && t.order_id) tpMap[String(t.order_id)] = t.token_preview || null;
+              }catch(_){ }
+            });
+          }
+          tokenPreviewIndexCache = tpMap;
+          tokenPreviewIndexCacheTs = now;
+        }
         for(const o of (arr || [])){
           try{
-            if((!o.user_full_name && !o.user_email) || !o._token_preview){
-              const tp = tpMap[String(o.id)];
-              if(tp){
-                // prefer explicit fields if present in preview
-                if(!o.user_full_name && (tp.name || tp.full_name)) o.user_full_name = tp.name || tp.full_name;
-                if(!o.user_email && (tp.email || tp.sub)) o.user_email = tp.email || tp.sub;
-                if(!o.user_barrio && tp.barrio) o.user_barrio = tp.barrio;
-                if(!o.user_calle && tp.calle) o.user_calle = tp.calle;
-                if(!o.user_numeracion && tp.numeracion) o.user_numeracion = tp.numeracion;
-                if(!o.user_postal_code) o.user_postal_code = tp.postal_code || tp.user_postal_code || (tp.address && (tp.address.postal_code || tp.address.postcode)) || '';
-                if(!o.user_department) o.user_department = tp.department || tp.user_department || (tp.address && tp.address.department) || '';
-                const ctExisting = String(o.customer_type || '').trim().toLowerCase();
-                if((ctExisting !== 'mayorista' && ctExisting !== 'minorista') && tp.customer_type){
-                  const ctPreview = String(tp.customer_type || '').trim().toLowerCase();
-                  if(ctPreview === 'mayorista' || ctPreview === 'minorista') o.customer_type = ctPreview;
-                }
-                if(!o._token_preview) o._token_preview = tp;
+            if(o.user_full_name || o.user_email) continue;
+            const tp = tpMap && tpMap[String(o.id)];
+            if(tp){
+              if(!o.user_full_name && (tp.name || tp.full_name)) o.user_full_name = tp.name || tp.full_name;
+              if(!o.user_email && (tp.email || tp.sub)) o.user_email = tp.email || tp.sub;
+              if(!o.user_barrio && tp.barrio) o.user_barrio = tp.barrio;
+              if(!o.user_calle && tp.calle) o.user_calle = tp.calle;
+              if(!o.user_numeracion && tp.numeracion) o.user_numeracion = tp.numeracion;
+              if(!o.user_postal_code) o.user_postal_code = tp.postal_code || tp.user_postal_code || (tp.address && (tp.address.postal_code || tp.address.postcode)) || '';
+              if(!o.user_department) o.user_department = tp.department || tp.user_department || (tp.address && tp.address.department) || '';
+              const ctExisting = String(o.customer_type || '').trim().toLowerCase();
+              if((ctExisting !== 'mayorista' && ctExisting !== 'minorista') && tp.customer_type){
+                const ctPreview = String(tp.customer_type || '').trim().toLowerCase();
+                if(ctPreview === 'mayorista' || ctPreview === 'minorista') o.customer_type = ctPreview;
               }
+              if(!o._token_preview) o._token_preview = tp;
             }
           }catch(_){ }
         }
-      }
-    }catch(e){ console.warn('Failed to fetch/merge token previews', e); }
+      }catch(e){ console.warn('Failed to fetch/merge token previews', e); }
+    }
     return dedupeOrdersSnapshot(arr);
   }catch(e){ console.warn('fetchOrders failed', e); return null; }
 }
@@ -8907,8 +8932,16 @@ function regroupOrdersForTable(source){
 // Add periodic polling as a fallback so the orders table refreshes even if WS fails
 try{
   setInterval(()=>{
-    if (shouldLiveRefreshOrders()){
+    const section = String(currentSectionId || '');
+    if (['dashboard', 'orders', 'preparations'].includes(section)){
       refreshOrders('web');
+    }
+    if (section === 'preparations'){
+      refreshPreparations(true);
+    } else if (section === 'routes'){
+      refreshRoutes(false);
+    } else if (section === 'deliveries'){
+      refreshDeliveries(false);
     }
   }, ORDERS_POLL_INTERVAL_MS);
 }catch(e){ console.warn('orders polling setup failed', e); }
