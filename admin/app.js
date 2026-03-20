@@ -1755,8 +1755,12 @@ const adminConsoleState = {
   log: null,
   input: null,
   form: null,
-  openedOnce: false,
+  help: null,
   ready: false,
+  prompt: null,
+  stressPollTimer: null,
+  stressLastEventSeq: 0,
+  stressLastPhase: '',
 };
 
 function logAdminConsole(message, tone){
@@ -1772,13 +1776,108 @@ function logAdminConsole(message, tone){
   }catch(_){ }
 }
 
+function getAdminConsoleErrorMessage(err, fallback = 'Error'){
+  try{
+    const detail = err && err.payload && (err.payload.detail || err.payload.error);
+    const raw = String(detail || err?.message || fallback || 'Error').trim();
+    const normalized = raw.toLowerCase();
+    if (normalized === 'count_invalid') return 'Elegi un numero entre 1 y 2000.';
+    if (normalized === 'stress_test_already_running') return 'Ya hay un stress test ejecutandose.';
+    if (normalized === 'stress_test_not_waiting_ready') return 'Todavia no hay una corrida esperando .ready.';
+    if (normalized === 'stress_test_session_missing') return 'No encontre una sesion QA activa.';
+    if (normalized === 'stress_test_session_changed') return 'La sesion QA cambio mientras intentabamos arrancarla.';
+    if (normalized === 'stress_test_no_ready_orders') return 'Todavia no hay pedidos QA preparados para arrancar.';
+    return raw || fallback || 'Error';
+  }catch(_){
+    return fallback || 'Error';
+  }
+}
+
+async function pollAdminStressStatus(options = {}){
+  const { silent = true, resetSeq = false, logSummary = false } = options || {};
+  try{
+    await ensureApiBase();
+    const snapshot = await safeFetch(`${API_BASE}/admin/stress-test/status`, { cache: 'no-store' });
+    const events = Array.isArray(snapshot?.events) ? snapshot.events : [];
+    if (resetSeq) {
+      adminConsoleState.stressLastEventSeq = 0;
+    }
+    const newEvents = events.filter((item) => Number(item?.seq || 0) > Number(adminConsoleState.stressLastEventSeq || 0));
+    newEvents.forEach((item) => {
+      logAdminConsole(String(item?.message || ''), String(item?.tone || 'note'));
+    });
+    if (events.length){
+      adminConsoleState.stressLastEventSeq = Math.max(...events.map((item) => Number(item?.seq || 0)), Number(adminConsoleState.stressLastEventSeq || 0));
+    }
+    const phase = String(snapshot?.phase || '').trim().toLowerCase();
+    if (logSummary || (phase && phase !== adminConsoleState.stressLastPhase && !newEvents.length)) {
+      const summary = [
+        `fase=${phase || 'idle'}`,
+        `creados=${Number(snapshot?.created_count || 0)}`,
+        `listos=${Number(snapshot?.ready_count || 0)}`,
+        `asignados=${Number(snapshot?.assigned_count || 0)}`,
+        `enviados=${Number(snapshot?.sent_count || 0)}`,
+        `entregados=${Number(snapshot?.delivered_count || 0)}`,
+      ];
+      if (snapshot?.prefix) summary.push(`prefijo=${snapshot.prefix}`);
+      logAdminConsole(summary.join(' | '), 'note');
+      if (snapshot?.message) logAdminConsole(String(snapshot.message), phase === 'error' ? 'err' : (phase === 'completed' ? 'ok' : 'note'));
+    }
+    adminConsoleState.stressLastPhase = phase;
+    return snapshot;
+  }catch(err){
+    if (!silent){
+      logAdminConsole(getAdminConsoleErrorMessage(err, 'No pude consultar el stress test.'), 'err');
+    }
+    return null;
+  }
+}
+
+function ensureAdminStressPolling(){
+  if (adminConsoleState.stressPollTimer) return;
+  adminConsoleState.stressPollTimer = setInterval(() => {
+    try{
+      if (!adminConsoleState.section || adminConsoleState.section.classList.contains('hidden')) return;
+      pollAdminStressStatus({ silent: true });
+    }catch(_){ }
+  }, 2500);
+}
+
+async function runAdminStressStart(count){
+  await ensureApiBase();
+  logAdminConsole(`Largando stress test QA de ${count} pedidos...`, 'note');
+  const resp = await safeFetch(`${API_BASE}/admin/stress-test/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ count }),
+  });
+  adminConsoleState.prompt = null;
+  adminConsoleState.stressLastEventSeq = 0;
+  adminConsoleState.stressLastPhase = '';
+  if (resp?.prefix) logAdminConsole(`Prefijo QA: ${resp.prefix}`, 'note');
+  await pollAdminStressStatus({ silent: false, resetSeq: true, logSummary: true });
+}
+
+async function runAdminStressReady(){
+  await ensureApiBase();
+  logAdminConsole('Arrancando simulacion de repartidores QA...', 'note');
+  await safeFetch(`${API_BASE}/admin/stress-test/ready`, { method: 'POST' });
+  await pollAdminStressStatus({ silent: false, logSummary: true });
+}
+
 function ensureAdminConsole(){
   if (adminConsoleState.ready) return adminConsoleState;
   adminConsoleState.section = document.getElementById('admin-console');
   adminConsoleState.log = document.getElementById('adminConsoleLog');
   adminConsoleState.input = document.getElementById('adminConsoleInput');
   adminConsoleState.form = document.getElementById('adminConsoleForm');
+  adminConsoleState.help = adminConsoleState.section ? adminConsoleState.section.querySelector('.admin-console-help') : null;
   adminConsoleState.ready = true;
+  if (adminConsoleState.help) {
+    adminConsoleState.help.innerHTML = 'Comandos: <code>/stresstest</code>, <code>.ready</code>, <code>/stressstatus</code>, <code>/clear @1</code>, <code>/clear @2</code>, <code>/clear @3</code>, <code>/clear @4</code>, <code>/clear @5</code>. <code>/help</code> para ayuda.';
+  }
+  ensureAdminStressPolling();
+  try{ pollAdminStressStatus({ silent: true }); }catch(_){ }
 
   if (adminConsoleState.form) {
     adminConsoleState.form.addEventListener('submit', async (ev) => {
@@ -1791,6 +1890,37 @@ function ensureAdminConsole(){
   }
 
   return adminConsoleState;
+}
+
+function clearAdminConsolePrompt(){
+  adminConsoleState.prompt = null;
+}
+
+async function handleAdminConsolePrompt(raw){
+  const pending = adminConsoleState.prompt;
+  if (!pending) return false;
+  const text = String(raw || '').trim();
+  if (!text) return true;
+  if (text.toLowerCase() === '/cancel' || text.toLowerCase() === 'cancel'){
+    clearAdminConsolePrompt();
+    logAdminConsole('Cancelado.', 'note');
+    return true;
+  }
+  if (pending.type === 'stress-count'){
+    const count = Number.parseInt(text, 10);
+    if (!Number.isFinite(count) || count <= 0){
+      logAdminConsole('Escribi solo un numero entero. Ej: 600', 'err');
+      return true;
+    }
+    clearAdminConsolePrompt();
+    try{
+      await runAdminStressStart(count);
+    }catch(err){
+      logAdminConsole(getAdminConsoleErrorMessage(err, 'No pude iniciar el stress test.'), 'err');
+    }
+    return true;
+  }
+  return false;
 }
 
 function clearLocalOrderCache(){
@@ -1860,13 +1990,35 @@ async function handleAdminConsoleCommand(raw){
   const cmd = String(raw || '').trim();
   if (!cmd) return;
   logAdminConsole('> ' + cmd, 'cmd');
+  if (await handleAdminConsolePrompt(cmd)) return;
   if (cmd === '/help' || cmd === 'help' || cmd === '/?'){
     logAdminConsole('Comandos disponibles:', 'note');
+    logAdminConsole('/stresstest inicia una corrida QA y te pide la cantidad.', 'note');
+    logAdminConsole('.ready arranca repartidores y entregas sobre los QA preparados.', 'note');
+    logAdminConsole('/stressstatus muestra el estado actual de la corrida QA.', 'note');
     logAdminConsole('/clear @1 Catalogo', 'note');
     logAdminConsole('/clear @2 Filtros', 'note');
     logAdminConsole('/clear @3 Pedidos', 'note');
     logAdminConsole('/clear @4 Clientes', 'note');
     logAdminConsole('/clear @5 Preparaciones', 'note');
+    return;
+  }
+  if (cmd === '/stresstest'){
+    adminConsoleState.prompt = { type: 'stress-count' };
+    logAdminConsole('Cuantos pedidos QA queres simular?', 'note');
+    logAdminConsole('Responde solo con un numero. Ej: 600. Usa /cancel para salir.', 'note');
+    return;
+  }
+  if (cmd === '.ready'){
+    try{
+      await runAdminStressReady();
+    }catch(err){
+      logAdminConsole(getAdminConsoleErrorMessage(err, 'No pude arrancar la simulacion QA.'), 'err');
+    }
+    return;
+  }
+  if (cmd === '/stressstatus'){
+    await pollAdminStressStatus({ silent: false, logSummary: true });
     return;
   }
   const match = cmd.match(/^\/clear\s+@?(\d+)\s*$/i);
@@ -4847,7 +4999,7 @@ function updateLowStockAlert(products, orders = lastOrdersBaseWeb){
 }
 
 function updateOrderAlertCounts(orders){
-  const list = Array.isArray(orders) ? orders : [];
+  const list = dedupeOrdersSnapshot(orders);
   let unseen = 0;
   let unseenAmount = 0;
   let unprepared = 0;
@@ -5483,6 +5635,39 @@ const preparationsList = document.getElementById('preparationsList');
 let currentOrderCustomerType = 'mayorista';
 let lastOrdersBaseWeb = [];
 let lastPreparationsBase = [];
+let ordersRefreshRequestSeq = 0;
+let activeOrdersRefreshController = null;
+
+function dedupeOrdersSnapshot(list){
+  const rows = Array.isArray(list) ? list : [];
+  const seen = new Set();
+  const deduped = [];
+  rows.forEach((order, index) => {
+    const id = String((order && order.id) || '').trim();
+    const key = id || `__idx__${index}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    deduped.push(order);
+  });
+  return deduped;
+}
+
+function hasActiveOrdersSnapshotFilters(){
+  try{
+    const q = orderSearch_web && orderSearch_web.value ? String(orderSearch_web.value).trim() : '';
+    const date = orderDate_web && orderDate_web.value ? String(orderDate_web.value).trim() : '';
+    return !!(q || date);
+  }catch(_){
+    return false;
+  }
+}
+
+function syncDashboardOrdersFromCache(){
+  try{
+    if (hasActiveOrdersSnapshotFilters()) return;
+    updateOrderAlertCounts(dedupeOrdersSnapshot(lastOrdersBaseWeb));
+  }catch(_){ }
+}
 
 function mergePatchedOrderIntoCaches(updated, fallbackId){
   const uid = String((updated && updated.id) || fallbackId || '').trim();
@@ -5499,6 +5684,7 @@ function mergePatchedOrderIntoCaches(updated, fallbackId){
   if (!replacedInPreparations){
     lastPreparationsBase = [updated, ...(lastPreparationsBase || [])];
   }
+  lastPreparationsBase = dedupeOrdersSnapshot(lastPreparationsBase);
 
   let replacedInOrders = false;
   lastOrdersBaseWeb = (lastOrdersBaseWeb || []).map((entry) => {
@@ -5511,6 +5697,8 @@ function mergePatchedOrderIntoCaches(updated, fallbackId){
   if (!replacedInOrders){
     lastOrdersBaseWeb = [updated, ...(lastOrdersBaseWeb || [])];
   }
+  lastOrdersBaseWeb = dedupeOrdersSnapshot(lastOrdersBaseWeb);
+  syncDashboardOrdersFromCache();
 }
 
 async function patchOrderStatus(orderId, targetStatus){
@@ -5743,7 +5931,7 @@ const importFiltersBtn = document.getElementById('importFiltersBtn');
 const autoCategorizeCatalogBtn = document.getElementById('autoCategorizeCatalogBtn');
 const filtersTableBody = document.querySelector('#filtersTable tbody');
 
-async function fetchOrders(q = '', date = '', source = '', limit = 0){
+async function fetchOrders(q = '', date = '', source = '', limit = 0, fetchOptions = null){
   const params = new URLSearchParams();
   if(q) params.append('q', q);
   if(date) params.append('date', date);
@@ -5752,7 +5940,12 @@ async function fetchOrders(q = '', date = '', source = '', limit = 0){
   const url = `${API_BASE}/orders` + (params.toString() ? ('?'+params.toString()) : '');
   try{
     // Prevent browser caching (304) from returning stale snapshots for orders
-    const data = await safeFetch(url, { cache: 'no-store' }).catch(err => { console.warn('fetchOrders failed', err); return null; });
+    const requestOptions = Object.assign({ cache: 'no-store' }, fetchOptions || {});
+    const data = await safeFetch(url, requestOptions).catch(err => {
+      if (err && (err.name === 'AbortError' || String(err.message || '').toLowerCase().includes('abort'))) throw err;
+      console.warn('fetchOrders failed', err);
+      return null;
+    });
     if(data === null) return null;
     // Accept several payload shapes: array, { orders: [] }, { data: [] }
     let arr = null;
@@ -5765,7 +5958,10 @@ async function fetchOrders(q = '', date = '', source = '', limit = 0){
     // If some orders lack user info, try fetching persisted token previews
     // from the server and merge them so admins always see contact info.
     try{
-      const tpList = await safeFetch(API_BASE + '/debug/token-previews').catch(()=>null);
+      const tpList = await safeFetch(API_BASE + '/debug/token-previews', fetchOptions && fetchOptions.signal ? { signal: fetchOptions.signal } : undefined).catch((err) => {
+        if (err && (err.name === 'AbortError' || String(err.message || '').toLowerCase().includes('abort'))) throw err;
+        return null;
+      });
       if(Array.isArray(tpList) && tpList.length){
         const tpMap = {};
         tpList.forEach(t => { try{ if(t && t.order_id) tpMap[String(t.order_id)] = t.token_preview || null; }catch(_){ } });
@@ -5794,7 +5990,7 @@ async function fetchOrders(q = '', date = '', source = '', limit = 0){
         }
       }
     }catch(e){ console.warn('Failed to fetch/merge token previews', e); }
-    return arr;
+    return dedupeOrdersSnapshot(arr);
   }catch(e){ console.warn('fetchOrders failed', e); return null; }
 }
 
@@ -7117,16 +7313,7 @@ function buildPreparationsSearchIndex(order){
 
 function syncPreparationsSnapshot(list){
   try{
-    const rows = Array.isArray(list) ? list : [];
-    const seen = new Set();
-    const deduped = [];
-    rows.forEach((order) => {
-      const id = String((order && order.id) || '').trim();
-      if (!id || seen.has(id)) return;
-      seen.add(id);
-      deduped.push(order);
-    });
-    lastPreparationsBase = deduped;
+    lastPreparationsBase = dedupeOrdersSnapshot(list);
   }catch(_){
     lastPreparationsBase = Array.isArray(list) ? list.slice() : [];
   }
@@ -7835,10 +8022,11 @@ function insertOrderAtTop(o, source){
     try{
       const incoming = Object.assign({}, o, { source: 'web', customer_type: normalizedCustomerType });
       const prev = Array.isArray(lastOrdersBaseWeb) ? lastOrdersBaseWeb.filter(x => String((x && x.id) || '') !== oid) : [];
-      lastOrdersBaseWeb = [incoming, ...prev];
+      lastOrdersBaseWeb = dedupeOrdersSnapshot([incoming, ...prev]);
       updateOrdersCustomerTypeBadges(lastOrdersBaseWeb);
       const prepPrev = Array.isArray(lastPreparationsBase) ? lastPreparationsBase.filter(x => String((x && x.id) || '') !== oid) : [];
-      lastPreparationsBase = [incoming, ...prepPrev];
+      lastPreparationsBase = dedupeOrdersSnapshot([incoming, ...prepPrev]);
+      syncDashboardOrdersFromCache();
       if (isPreparationsSectionActive()) renderPreparations(lastPreparationsBase);
     }catch(_){ }
 
@@ -7983,11 +8171,20 @@ function showOrderDetail(order){
 const orderModalClose = document.getElementById('orderModalClose'); if(orderModalClose) orderModalClose.onclick = () => { const m = document.getElementById('orderModal'); if(m){ m.classList.add('hidden'); m.setAttribute('aria-hidden','true'); } };
 
 async function refreshOrders(source){
+  let requestSeq = 0;
+  let controller = null;
   try{
     source = 'web';
     const q = (orderSearch_web && orderSearch_web.value) ? orderSearch_web.value.trim() : '';
     const date = (orderDate_web && orderDate_web.value) ? orderDate_web.value : '';
-    const list = await fetchOrders(q, date, source);
+    requestSeq = ++ordersRefreshRequestSeq;
+    try{
+      if (activeOrdersRefreshController) activeOrdersRefreshController.abort();
+    }catch(_){ }
+    controller = new AbortController();
+    activeOrdersRefreshController = controller;
+    const list = await fetchOrders(q, date, source, 0, { signal: controller.signal });
+    if (requestSeq !== ordersRefreshRequestSeq) return;
     if (list === null){
       console.warn('refreshOrders: fetch failed; preserving existing orders table');
       showToast('No se pudo actualizar pedidos (conservando la vista actual)', 'warning');
@@ -7997,11 +8194,21 @@ async function refreshOrders(source){
     const dateFilter = date || '';
     let toRender = list;
     if(dateFilter){ try{ toRender = (list || []).filter(o => { try{ return (o.created_at || '').slice(0,10) === dateFilter; }catch(_){ return false; } }); }catch(e){ toRender = list; } }
-    lastOrdersBaseWeb = Array.isArray(toRender) ? toRender.slice() : [];
+    lastOrdersBaseWeb = dedupeOrdersSnapshot(Array.isArray(toRender) ? toRender.slice() : []);
     updateOrdersCustomerTypeBadges(lastOrdersBaseWeb);
     applyOrdersCustomerTypeTabState();
     renderOrders(toRender, source, date);
-  }catch(e){ console.error('refreshOrders failed', e); showToast('Error al cargar pedidos', 'error'); }
+  }catch(e){
+    const aborted = !!(e && (e.name === 'AbortError' || String(e.message || '').toLowerCase().includes('abort')));
+    if (aborted) return;
+    if (requestSeq && requestSeq !== ordersRefreshRequestSeq) return;
+    console.error('refreshOrders failed', e);
+    showToast('Error al cargar pedidos', 'error');
+  } finally {
+    if (controller && activeOrdersRefreshController === controller){
+      activeOrdersRefreshController = null;
+    }
+  }
 }
 
 // Wire refresh buttons per-section and add a single test push button

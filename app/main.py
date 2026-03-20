@@ -22,7 +22,9 @@ import re
 import time
 import datetime
 import math
+import random
 import unicodedata
+import uuid
 from io import StringIO, BytesIO
 from html import escape as html_escape
 from urllib.parse import quote_plus
@@ -246,6 +248,31 @@ _GEOCODE_CACHE_DIRTY = False
 _ROUTE_START_CACHE: Dict[str, Any] = {}
 DRIVER_LOCATIONS: Dict[str, Dict[str, Any]] = {}
 DRIVER_LOCATIONS_LOCK = threading.Lock()
+ADMIN_STRESS_TEST_LOCK = threading.Lock()
+ADMIN_STRESS_TEST_STATE: Dict[str, Any] = {
+    'session_id': None,
+    'phase': 'idle',
+    'message': None,
+    'prefix': None,
+    'payment_reference': None,
+    'requested_count': 0,
+    'created_count': 0,
+    'failed_count': 0,
+    'pending_count': 0,
+    'ready_count': 0,
+    'assigned_count': 0,
+    'sent_count': 0,
+    'delivered_count': 0,
+    'drivers_total': 0,
+    'drivers_active': 0,
+    'zone_counts': {},
+    'order_ids': [],
+    'events': [],
+    'event_seq': 0,
+    'started_at': None,
+    'updated_at': None,
+    'last_error': None,
+}
 
 
 def _running_on_render() -> bool:
@@ -3427,6 +3454,12 @@ async def _run_order_status_notification_email(
         )
 
 
+def _is_stress_test_order_payload(order_data: Optional[Dict[str, Any]]) -> bool:
+    payload = _enrich_order_contact_fields(order_data if isinstance(order_data, dict) else {})
+    payment_reference = str(payload.get('payment_reference') or '').strip().lower()
+    return payment_reference.startswith('stress:')
+
+
 async def _run_prepared_order_auto_assignment(
     order_id_value: Any,
     use_id_int: bool,
@@ -3469,9 +3502,10 @@ async def _run_order_status_followups(
 ) -> None:
     tasks = []
     status_key = _normalize_order_status(status_effective)
-    if status_key in ('visto', 'preparado'):
+    is_stress_test_order = _is_stress_test_order_payload(order_data)
+    if status_key in ('visto', 'preparado') and not is_stress_test_order:
         tasks.append(_run_order_status_notification_email(status_key, order_data))
-    if status_key == 'preparado':
+    if status_key == 'preparado' and not is_stress_test_order:
         tasks.append(_run_prepared_order_auto_assignment(order_id_value, use_id_int))
     if not tasks:
         return
@@ -6982,6 +7016,944 @@ async def admin_login_for_access_token(form_data: OAuth2PasswordRequestForm = De
 @app.get('/admin/auth/me', response_model=schemas.AdminUserResponse)
 def admin_auth_me(current_admin=Depends(get_current_admin_user)):
     return current_admin
+
+
+def _admin_stress_now_utc() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _admin_stress_touch_locked() -> None:
+    ADMIN_STRESS_TEST_STATE['updated_at'] = _admin_stress_now_utc()
+
+
+def _admin_stress_session_matches(session_id: Optional[str]) -> bool:
+    with ADMIN_STRESS_TEST_LOCK:
+        current_id = str(ADMIN_STRESS_TEST_STATE.get('session_id') or '').strip()
+    return bool(current_id) and current_id == str(session_id or '').strip()
+
+
+def _admin_stress_append_event(message: str, tone: str = 'note') -> None:
+    text_value = str(message or '').strip()
+    if not text_value:
+        return
+    with ADMIN_STRESS_TEST_LOCK:
+        seq = int(ADMIN_STRESS_TEST_STATE.get('event_seq') or 0) + 1
+        ADMIN_STRESS_TEST_STATE['event_seq'] = seq
+        events = list(ADMIN_STRESS_TEST_STATE.get('events') or [])
+        events.append({
+            'seq': seq,
+            'tone': str(tone or 'note'),
+            'message': text_value,
+            'at': _admin_stress_now_utc(),
+        })
+        if len(events) > 120:
+            events = events[-120:]
+        ADMIN_STRESS_TEST_STATE['events'] = events
+        _admin_stress_touch_locked()
+
+
+def _admin_stress_snapshot(include_order_ids: bool = False) -> Dict[str, Any]:
+    with ADMIN_STRESS_TEST_LOCK:
+        snapshot = {
+            key: value
+            for key, value in ADMIN_STRESS_TEST_STATE.items()
+            if include_order_ids or key != 'order_ids'
+        }
+        snapshot['zone_counts'] = dict(ADMIN_STRESS_TEST_STATE.get('zone_counts') or {})
+        snapshot['events'] = [dict(event) for event in (ADMIN_STRESS_TEST_STATE.get('events') or [])]
+        if include_order_ids:
+            snapshot['order_ids'] = list(ADMIN_STRESS_TEST_STATE.get('order_ids') or [])
+        snapshot['order_count'] = len(ADMIN_STRESS_TEST_STATE.get('order_ids') or [])
+        return snapshot
+
+
+def _admin_stress_reset_session(session_id: str, prefix: str, payment_reference: str, requested_count: int) -> None:
+    with ADMIN_STRESS_TEST_LOCK:
+        ADMIN_STRESS_TEST_STATE.clear()
+        ADMIN_STRESS_TEST_STATE.update({
+            'session_id': session_id,
+            'phase': 'creating',
+            'message': 'Creando pedidos QA sin mail.',
+            'prefix': prefix,
+            'payment_reference': payment_reference,
+            'requested_count': int(requested_count or 0),
+            'created_count': 0,
+            'failed_count': 0,
+            'pending_count': 0,
+            'ready_count': 0,
+            'assigned_count': 0,
+            'sent_count': 0,
+            'delivered_count': 0,
+            'drivers_total': 0,
+            'drivers_active': 0,
+            'zone_counts': {},
+            'order_ids': [],
+            'events': [],
+            'event_seq': 0,
+            'started_at': _admin_stress_now_utc(),
+            'updated_at': _admin_stress_now_utc(),
+            'last_error': None,
+        })
+
+
+def _admin_stress_set_error(session_id: Optional[str], message: str) -> None:
+    with ADMIN_STRESS_TEST_LOCK:
+        if session_id and str(ADMIN_STRESS_TEST_STATE.get('session_id') or '').strip() != str(session_id).strip():
+            return
+        ADMIN_STRESS_TEST_STATE['phase'] = 'error'
+        ADMIN_STRESS_TEST_STATE['message'] = str(message or 'Error en stress test.')
+        ADMIN_STRESS_TEST_STATE['last_error'] = str(message or 'error')
+        _admin_stress_touch_locked()
+    _admin_stress_append_event(str(message or 'Error en stress test.'), 'err')
+
+
+def _admin_stress_counter_snapshot(payment_reference: Optional[str]) -> Dict[str, int]:
+    empty = {
+        'created_count': 0,
+        'pending_count': 0,
+        'ready_count': 0,
+        'assigned_count': 0,
+        'sent_count': 0,
+        'delivered_count': 0,
+    }
+    payment_ref = str(payment_reference or '').strip()
+    if not payment_ref:
+        return empty
+
+    try:
+        rows = _safe_engine_fetchall(
+            "SELECT COALESCE(LOWER(status), 'recibido') AS status_key, COUNT(*) "
+            "FROM orders WHERE payment_reference = :payment_reference "
+            "GROUP BY COALESCE(LOWER(status), 'recibido')",
+            {'payment_reference': payment_ref},
+        ) or []
+        total = 0
+        ready_count = 0
+        sent_count = 0
+        delivered_count = 0
+        for row in rows:
+            try:
+                status_key = _normalize_order_status(row[0])
+                count_value = int(row[1] or 0)
+            except Exception:
+                continue
+            total += count_value
+            if status_key in ('preparado', 'enviado', 'entregado'):
+                ready_count += count_value
+            if status_key == 'enviado':
+                sent_count += count_value
+            if status_key == 'entregado':
+                delivered_count += count_value
+
+        assigned_row = _safe_engine_fetchone(
+            "SELECT COUNT(*) FROM orders "
+            "WHERE payment_reference = :payment_reference "
+            "AND (assigned_driver_id IS NOT NULL OR COALESCE(assigned_driver_username, '') <> '')",
+            {'payment_reference': payment_ref},
+        )
+        assigned_count = int(assigned_row[0] or 0) if assigned_row else 0
+        return {
+            'created_count': total,
+            'pending_count': max(0, total - ready_count),
+            'ready_count': ready_count,
+            'assigned_count': assigned_count,
+            'sent_count': sent_count,
+            'delivered_count': delivered_count,
+        }
+    except Exception:
+        logger.exception('admin stress counter snapshot failed')
+        return empty
+
+
+def _admin_stress_refresh_counts_from_db(payment_reference: Optional[str]) -> Dict[str, int]:
+    counts = _admin_stress_counter_snapshot(payment_reference)
+    with ADMIN_STRESS_TEST_LOCK:
+        for key, value in counts.items():
+            ADMIN_STRESS_TEST_STATE[key] = int(value or 0)
+        _admin_stress_touch_locked()
+    return counts
+
+
+def _admin_stress_order_matches_session(order_data: Optional[Dict[str, Any]], payment_reference: Optional[str]) -> bool:
+    if not isinstance(order_data, dict):
+        return False
+    return str(order_data.get('payment_reference') or '').strip() == str(payment_reference or '').strip()
+
+
+def _admin_stress_load_orders(payment_reference: Optional[str], db: Session) -> List[Dict[str, Any]]:
+    payment_ref = str(payment_reference or '').strip()
+    if not payment_ref:
+        return []
+    rows = list_orders(skip=0, limit=5000, source=None, q=None, date=None, db=db) or []
+    out: List[Dict[str, Any]] = []
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if not _admin_stress_order_matches_session(row, payment_ref):
+            continue
+        order_id = str(row.get('id') or '').strip()
+        if not order_id or order_id in seen:
+            continue
+        seen.add(order_id)
+        out.append(row)
+    return out
+
+
+def _admin_stress_product_pool(db: Session, limit: int = 12) -> List[Dict[str, Any]]:
+    try:
+        products = db.query(models.Product).all()
+    except Exception:
+        products = []
+    pool: List[Dict[str, Any]] = []
+    for product in (products or []):
+        try:
+            active = bool(getattr(product, 'active', True))
+            sale_unit = str(getattr(product, 'sale_unit', '') or '').strip().lower()
+            stock_value = float(getattr(product, 'stock', 0) or 0)
+            if not active or sale_unit == 'kg' or stock_value <= 0:
+                continue
+            pool.append({
+                'id': getattr(product, 'id', None),
+                'name': str(getattr(product, 'name', '') or '').strip() or f"Producto {getattr(product, 'id', '')}",
+                'price': float(getattr(product, 'price', 0) or 0),
+                'stock': stock_value,
+            })
+        except Exception:
+            continue
+    pool.sort(key=lambda item: float(item.get('stock') or 0), reverse=True)
+    return pool[: max(1, int(limit or 12))]
+
+
+def _admin_stress_zones() -> List[Dict[str, Any]]:
+    return [
+        {
+            'department': 'Capital',
+            'postal': '5500',
+            'center': {'lat': -32.8895, 'lon': -68.8458},
+            'neighborhoods': ['Centro', 'Quinta Seccion', 'Bombal', 'Sexta Seccion'],
+            'streets': ['Av San Martin', 'Aristides Villanueva', 'Belgrano', 'Pedro Molina', 'Sarmiento', '9 de Julio'],
+        },
+        {
+            'department': 'Godoy Cruz',
+            'postal': '5501',
+            'center': {'lat': -32.9253, 'lon': -68.8446},
+            'neighborhoods': ['Villa Hipodromo', 'Bombal Sur', 'Benegas', 'Trapiche'],
+            'streets': ['San Martin Sur', 'Perito Moreno', 'Lavalle', 'Cervantes', 'Azcuenaga', 'Paso de los Andes'],
+        },
+        {
+            'department': 'Las Heras',
+            'postal': '5539',
+            'center': {'lat': -32.8527, 'lon': -68.8285},
+            'neighborhoods': ['Centro', 'El Challao', 'Panquehua', 'Cementista'],
+            'streets': ['San Martin', 'Independencia', 'Roca', 'Boulogne Sur Mer', 'Olascoaga', 'Almirante Brown'],
+        },
+        {
+            'department': 'Maipu',
+            'postal': '5515',
+            'center': {'lat': -32.9774, 'lon': -68.7804},
+            'neighborhoods': ['Centro', 'Russell', 'Gutierrez', 'Coquimbito'],
+            'streets': ['Ozamis', 'Maza', 'J J Paso', 'Sarmiento', 'Urquiza', 'Pescara'],
+        },
+    ]
+
+
+def _admin_stress_random_address(index: int, prefix: str) -> Dict[str, Any]:
+    first_names = ['Lucia', 'Mateo', 'Valentina', 'Tomas', 'Malena', 'Joaquin', 'Mora', 'Agustin', 'Julieta', 'Franco', 'Camila', 'Santino']
+    last_names = ['Lopez', 'Gimenez', 'Sosa', 'Rodriguez', 'Pereyra', 'Diaz', 'Luna', 'Garcia', 'Sanchez', 'Morales', 'Fernandez', 'Vega']
+    zone = random.choice(_admin_stress_zones())
+    street = random.choice(zone['streets'])
+    neighborhood = random.choice(zone['neighborhoods'])
+    number = random.randint(40, 3999)
+    lat = round(float(zone['center']['lat']) + (random.randint(-1800, 1800) / 100000.0), 6)
+    lon = round(float(zone['center']['lon']) + (random.randint(-1800, 1800) / 100000.0), 6)
+    full_name = f"QA Stress {random.choice(first_names)} {random.choice(last_names)}"
+    email = f"{prefix}.{int(index):04d}@example.com"
+    return {
+        'user_full_name': full_name,
+        'user_email': email,
+        'user_barrio': neighborhood,
+        'user_calle': street,
+        'user_numeracion': str(number),
+        'user_postal_code': zone['postal'],
+        'user_department': zone['department'],
+        'user_address': f"{street} {number}, {neighborhood}, {zone['department']}, Mendoza",
+        'delivery_lat': lat,
+        'delivery_lon': lon,
+        'department': zone['department'],
+    }
+
+
+def _admin_stress_build_order_payload(
+    index: int,
+    prefix: str,
+    payment_reference: str,
+    product_pool: List[Dict[str, Any]],
+) -> schemas.OrderCreate:
+    if not product_pool:
+        raise RuntimeError('No hay productos para stress test')
+    product = random.choice(product_pool)
+    address = _admin_stress_random_address(index, prefix)
+    return schemas.OrderCreate(
+        items=[
+            schemas.OrderItem(
+                id=str(product.get('id')),
+                qty=1,
+                meta={
+                    'name': str(product.get('name') or 'Producto'),
+                    'price': float(product.get('price') or 0),
+                },
+            )
+        ],
+        total=float(product.get('price') or 0),
+        customer_type='mayorista',
+        source='web',
+        user_full_name=address['user_full_name'],
+        user_email=address['user_email'],
+        user_barrio=address['user_barrio'],
+        user_calle=address['user_calle'],
+        user_numeracion=address['user_numeracion'],
+        user_postal_code=address['user_postal_code'],
+        user_department=address['user_department'],
+        payment_method='stress-test',
+        payment_status='pending',
+        payment_reference=payment_reference,
+        **{
+            'user_address': address['user_address'],
+            'delivery_lat': float(address['delivery_lat']),
+            'delivery_lon': float(address['delivery_lon']),
+        },
+    )
+
+
+def _run_admin_stress_seed_worker(
+    session_id: str,
+    indices: List[int],
+    prefix: str,
+    payment_reference: str,
+    product_pool: List[Dict[str, Any]],
+) -> None:
+    for index in (indices or []):
+        if not _admin_stress_session_matches(session_id):
+            return
+        db_local = SessionLocal()
+        try:
+            payload = _admin_stress_build_order_payload(index, prefix, payment_reference, product_pool)
+            order = crud.create_order(db_local, payload, current_user=None)
+            order_id = getattr(order, 'id', None)
+            department = str(getattr(payload, 'user_department', '') or '').strip()
+            progress_event = None
+            with ADMIN_STRESS_TEST_LOCK:
+                if str(ADMIN_STRESS_TEST_STATE.get('session_id') or '').strip() != str(session_id):
+                    return
+                ADMIN_STRESS_TEST_STATE['created_count'] = int(ADMIN_STRESS_TEST_STATE.get('created_count') or 0) + 1
+                if order_id is not None:
+                    ADMIN_STRESS_TEST_STATE.setdefault('order_ids', []).append(order_id)
+                zone_counts = dict(ADMIN_STRESS_TEST_STATE.get('zone_counts') or {})
+                if department:
+                    zone_counts[department] = int(zone_counts.get(department) or 0) + 1
+                ADMIN_STRESS_TEST_STATE['zone_counts'] = zone_counts
+                current_created = int(ADMIN_STRESS_TEST_STATE.get('created_count') or 0)
+                requested_total = int(ADMIN_STRESS_TEST_STATE.get('requested_count') or 0)
+                _admin_stress_touch_locked()
+                if current_created == 1 or current_created == requested_total or (current_created % 50) == 0:
+                    progress_event = f'Pedidos QA creados: {current_created}/{requested_total}.'
+            if progress_event:
+                _admin_stress_append_event(progress_event, 'note')
+        except Exception as exc:
+            logger.exception('admin stress seed worker failed for index=%s', index)
+            err_text = str(exc or 'error')
+            progress_event = None
+            with ADMIN_STRESS_TEST_LOCK:
+                if str(ADMIN_STRESS_TEST_STATE.get('session_id') or '').strip() != str(session_id):
+                    return
+                ADMIN_STRESS_TEST_STATE['failed_count'] = int(ADMIN_STRESS_TEST_STATE.get('failed_count') or 0) + 1
+                _admin_stress_touch_locked()
+                current_fail = int(ADMIN_STRESS_TEST_STATE.get('failed_count') or 0)
+                if current_fail <= 5:
+                    progress_event = f'Fallo creando pedido QA #{index}: {err_text[:180]}'
+            if progress_event:
+                _admin_stress_append_event(progress_event, 'err')
+        finally:
+            try:
+                db_local.close()
+            except Exception:
+                pass
+
+
+def _run_admin_stress_seed(session_id: str, prefix: str, payment_reference: str, requested_count: int) -> None:
+    try:
+        db_local = SessionLocal()
+        try:
+            product_pool = _admin_stress_product_pool(db_local, limit=12)
+        finally:
+            try:
+                db_local.close()
+            except Exception:
+                pass
+
+        if not product_pool:
+            _admin_stress_set_error(session_id, 'No hay productos activos con stock para el stress test.')
+            return
+
+        _admin_stress_append_event(
+            f"Iniciando stress test: {requested_count} pedidos QA en Ciudad, Godoy Cruz, Las Heras y Maipu.",
+            'note',
+        )
+
+        worker_count = max(1, min(8, int(requested_count or 0)))
+        threads: List[threading.Thread] = []
+        for worker_idx in range(worker_count):
+            bucket = [idx for idx in range(worker_idx + 1, int(requested_count or 0) + 1, worker_count)]
+            if not bucket:
+                continue
+            thread = threading.Thread(
+                target=_run_admin_stress_seed_worker,
+                args=(session_id, bucket, prefix, payment_reference, product_pool),
+                daemon=True,
+            )
+            threads.append(thread)
+            thread.start()
+
+        for thread in threads:
+            thread.join()
+
+        if not _admin_stress_session_matches(session_id):
+            return
+
+        counts = _admin_stress_refresh_counts_from_db(payment_reference)
+        created_count = int(counts.get('created_count') or 0)
+        failed_count = int(_admin_stress_snapshot().get('failed_count') or 0)
+
+        if created_count <= 0:
+            _admin_stress_set_error(session_id, 'No se pudieron crear pedidos QA para el stress test.')
+            return
+
+        with ADMIN_STRESS_TEST_LOCK:
+            if str(ADMIN_STRESS_TEST_STATE.get('session_id') or '').strip() != str(session_id):
+                return
+            ADMIN_STRESS_TEST_STATE['phase'] = 'awaiting_ready'
+            ADMIN_STRESS_TEST_STATE['message'] = 'Marca los pedidos como preparados y luego ejecuta .ready.'
+            _admin_stress_touch_locked()
+
+        _admin_stress_append_event(
+            f"Listo: {created_count}/{requested_count} pedidos QA creados sin mail. Buscalos por {prefix}.",
+            'ok',
+        )
+        if failed_count > 0:
+            _admin_stress_append_event(f'Hubo {failed_count} fallos durante la siembra.', 'err')
+        _admin_stress_append_event('Cuando termines de dejarlos preparados, ejecuta .ready.', 'note')
+    except Exception as exc:
+        logger.exception('admin stress seed failed')
+        _admin_stress_set_error(session_id, f'No se pudo completar la siembra QA: {exc}')
+
+
+def _admin_stress_list_drivers(db: Session) -> List[Any]:
+    try:
+        users = crud.list_admin_users(db) or []
+    except Exception:
+        users = []
+    drivers = [
+        user for user in (users or [])
+        if str(getattr(user, 'role', '') or '').strip().lower() == 'repartidor'
+        and bool(getattr(user, 'is_active', True))
+    ]
+    drivers.sort(key=lambda user: (str(getattr(user, 'zone', '') or ''), str(getattr(user, 'username', '') or '')))
+    return drivers[:4]
+
+
+def _admin_stress_set_driver_location(
+    driver: Any,
+    lat: float,
+    lon: float,
+    recorded_at: Optional[datetime.datetime] = None,
+    speed: Optional[float] = None,
+) -> None:
+    driver_id = getattr(driver, 'id', None)
+    driver_username = str(getattr(driver, 'username', '') or '').strip() or None
+    driver_name = str(getattr(driver, 'full_name', '') or driver_username or '').strip() or driver_username
+    payload = {
+        'driver_id': driver_id,
+        'driver_username': driver_username,
+        'driver_name': driver_name,
+        'lat': float(lat),
+        'lon': float(lon),
+        'accuracy': 8.0,
+        'speed': float(speed) if speed is not None else None,
+        'heading': None,
+        'battery': 100.0,
+        'recorded_at': recorded_at or _admin_stress_now_utc(),
+    }
+    key = str(driver_id if driver_id is not None else driver_username or 'unknown')
+    with DRIVER_LOCATIONS_LOCK:
+        DRIVER_LOCATIONS[key] = dict(payload, updated_at=time.time())
+
+
+def _admin_stress_clear_driver_location(driver: Any) -> None:
+    driver_id = getattr(driver, 'id', None)
+    driver_username = str(getattr(driver, 'username', '') or '').strip() or None
+    key = str(driver_id if driver_id is not None else driver_username or 'unknown')
+    with DRIVER_LOCATIONS_LOCK:
+        DRIVER_LOCATIONS.pop(key, None)
+        if driver_username:
+            for current_key, payload in list(DRIVER_LOCATIONS.items()):
+                if str((payload or {}).get('driver_username') or '').strip() == driver_username:
+                    DRIVER_LOCATIONS.pop(current_key, None)
+
+
+def _admin_stress_mark_driver_orders_sent(payment_reference: str, driver: Any) -> int:
+    driver_id = getattr(driver, 'id', None)
+    driver_username = str(getattr(driver, 'username', '') or '').strip() or None
+    if driver_id is None and not driver_username:
+        return 0
+    params: Dict[str, Any] = {
+        'payment_reference': str(payment_reference or '').strip(),
+        'now_ts': _admin_stress_now_utc(),
+    }
+    clauses = []
+    if driver_id is not None:
+        clauses.append('assigned_driver_id = :driver_id')
+        params['driver_id'] = int(driver_id)
+    if driver_username:
+        clauses.append('assigned_driver_username = :driver_username')
+        params['driver_username'] = driver_username
+    if not clauses:
+        return 0
+    where_driver = ' OR '.join(clauses)
+    try:
+        with engine.begin() as conn:
+            res = conn.execute(
+                text(
+                    "UPDATE orders SET status = 'enviado', sent_at = COALESCE(sent_at, :now_ts) "
+                    "WHERE payment_reference = :payment_reference "
+                    f"AND ({where_driver}) "
+                    "AND LOWER(COALESCE(status, 'recibido')) = 'preparado'"
+                ),
+                params,
+            )
+        return int(getattr(res, 'rowcount', 0) or 0)
+    except Exception:
+        logger.exception('admin stress sent update failed')
+        return 0
+
+
+def _admin_stress_mark_order_delivered(
+    payment_reference: str,
+    order_data: Dict[str, Any],
+    driver: Any,
+) -> bool:
+    order_id = order_data.get('id')
+    if order_id is None:
+        return False
+    route_order = order_data.get('route_order')
+    try:
+        route_order_int = int(route_order) if route_order is not None else None
+    except Exception:
+        route_order_int = None
+    driver_id = getattr(driver, 'id', None)
+    driver_username = str(getattr(driver, 'username', '') or '').strip() or None
+    now_ts = _admin_stress_now_utc()
+    try:
+        with engine.begin() as conn:
+            params = {
+                'payment_reference': str(payment_reference or '').strip(),
+                'delivered_at': now_ts,
+                'driver_id': int(driver_id) if driver_id is not None else None,
+                'driver_username': driver_username,
+                'id': order_id,
+            }
+            where_order = 'id = :id' if str(order_id).isdigit() else 'CAST(id AS TEXT) = :id'
+            conn.execute(
+                text(
+                    "UPDATE orders SET status = 'entregado', delivered_at = :delivered_at, "
+                    "delivered_by_id = :driver_id, delivered_by_username = :driver_username "
+                    f"WHERE {where_order} AND payment_reference = :payment_reference"
+                ),
+                params,
+            )
+            if route_order_int is not None:
+                shift_params = {
+                    'payment_reference': str(payment_reference or '').strip(),
+                    'route_order': int(route_order_int),
+                }
+                driver_clauses = []
+                if driver_id is not None:
+                    driver_clauses.append('assigned_driver_id = :driver_id')
+                    shift_params['driver_id'] = int(driver_id)
+                if driver_username:
+                    driver_clauses.append('assigned_driver_username = :driver_username')
+                    shift_params['driver_username'] = driver_username
+                if driver_clauses:
+                    conn.execute(
+                        text(
+                            "UPDATE orders SET route_order = route_order - 1 "
+                            "WHERE payment_reference = :payment_reference "
+                            f"AND ({' OR '.join(driver_clauses)}) "
+                            "AND LOWER(COALESCE(status, 'recibido')) IN ('preparado', 'enviado') "
+                            "AND route_order IS NOT NULL AND route_order > :route_order"
+                        ),
+                        shift_params,
+                    )
+        return True
+    except Exception:
+        logger.exception('admin stress delivered update failed for order id=%s', order_id)
+        return False
+
+
+def _admin_stress_build_segment_points(
+    start_lat: float,
+    start_lon: float,
+    end_lat: float,
+    end_lon: float,
+    max_points: int = 6,
+) -> List[Dict[str, float]]:
+    if not (_is_mendoza_point(start_lat, start_lon) and _is_mendoza_point(end_lat, end_lon)):
+        return [{'lat': float(end_lat), 'lon': float(end_lon)}]
+    osrm_points = _fetch_osrm_route_path([(float(start_lat), float(start_lon)), (float(end_lat), float(end_lon))])
+    sampled_points = osrm_points or []
+    if sampled_points:
+        sampled_points = _sample_route_points(sampled_points, max_points=max(2, int(max_points or 6)))
+        if sampled_points and abs(sampled_points[0]['lat'] - float(start_lat)) < 0.000001 and abs(sampled_points[0]['lon'] - float(start_lon)) < 0.000001:
+            sampled_points = sampled_points[1:]
+        return sampled_points or [{'lat': float(end_lat), 'lon': float(end_lon)}]
+    try:
+        dist_m = _haversine_km(float(start_lat), float(start_lon), float(end_lat), float(end_lon)) * 1000.0
+    except Exception:
+        dist_m = 0.0
+    steps = max(1, min(max(1, int(max_points or 6)), int(max(1, math.ceil(dist_m / 180.0)))))
+    out: List[Dict[str, float]] = []
+    for idx in range(1, steps + 1):
+        ratio = idx / float(steps)
+        out.append({
+            'lat': float(start_lat) + ((float(end_lat) - float(start_lat)) * ratio),
+            'lon': float(start_lon) + ((float(end_lon) - float(start_lon)) * ratio),
+        })
+    return out or [{'lat': float(end_lat), 'lon': float(end_lon)}]
+
+
+def _run_admin_stress_driver_simulation(
+    session_id: str,
+    payment_reference: str,
+    driver_id: int,
+) -> None:
+    db_local = SessionLocal()
+    driver = None
+    delivered_local = 0
+    try:
+        try:
+            driver = crud.get_admin_user_by_id(db_local, int(driver_id))
+        except Exception:
+            driver = None
+        if driver is None:
+            _admin_stress_append_event(f'Driver #{driver_id}: no se encontro para la simulacion.', 'err')
+            return
+
+        driver_orders = [
+            order for order in _admin_stress_load_orders(payment_reference, db_local)
+            if str(order.get('assigned_driver_id') or '') == str(driver_id)
+            and _normalize_order_status(order.get('status')) in ('preparado', 'enviado')
+        ]
+        driver_orders.sort(key=lambda item: (item.get('route_order') is None, int(item.get('route_order') or 0), str(item.get('id') or '')))
+        if not driver_orders:
+            _admin_stress_append_event(f"{getattr(driver, 'username', 'driver')}: sin pedidos QA para mover.", 'note')
+            return
+
+        depot_lat, depot_lon = _get_route_start_point(db=db_local)
+        if not _is_mendoza_point(depot_lat, depot_lon):
+            first_point = _extract_driver_order_point(driver_orders[0]) or {}
+            depot_lat = _coerce_coord(first_point.get('lat')) or -32.8895
+            depot_lon = _coerce_coord(first_point.get('lon')) or -68.8458
+        current_lat = float(depot_lat)
+        current_lon = float(depot_lon)
+        sent_started = False
+
+        _admin_stress_set_driver_location(driver, current_lat, current_lon, speed=0.0)
+        _admin_stress_append_event(
+            f"{getattr(driver, 'username', 'driver')}: arranco la simulacion con {len(driver_orders)} entregas.",
+            'note',
+        )
+
+        for order in driver_orders:
+            if not _admin_stress_session_matches(session_id):
+                return
+            point = _extract_driver_order_point(order)
+            if not point:
+                try:
+                    lat_val, lon_val = _resolve_order_coords(order, db=db_local)
+                    if _is_mendoza_point(lat_val, lon_val):
+                        point = {'lat': float(lat_val), 'lon': float(lon_val)}
+                except Exception:
+                    point = None
+            if not point:
+                continue
+
+            segment_points = _admin_stress_build_segment_points(current_lat, current_lon, point['lat'], point['lon'], max_points=6)
+            if not segment_points:
+                segment_points = [{'lat': float(point['lat']), 'lon': float(point['lon'])}]
+
+            for path_point in segment_points:
+                if not _admin_stress_session_matches(session_id):
+                    return
+                if not sent_started:
+                    updated_sent = _admin_stress_mark_driver_orders_sent(payment_reference, driver)
+                    if updated_sent > 0:
+                        with ADMIN_STRESS_TEST_LOCK:
+                            if str(ADMIN_STRESS_TEST_STATE.get('session_id') or '').strip() == str(session_id):
+                                ADMIN_STRESS_TEST_STATE['sent_count'] = int(ADMIN_STRESS_TEST_STATE.get('sent_count') or 0) + int(updated_sent)
+                                _admin_stress_touch_locked()
+                        _admin_stress_append_event(
+                            f"{getattr(driver, 'username', 'driver')}: salio del deposito con {updated_sent} pedidos enviados.",
+                            'note',
+                        )
+                    sent_started = True
+                _admin_stress_set_driver_location(driver, path_point['lat'], path_point['lon'], speed=7.5)
+                time.sleep(0.35)
+
+            if _admin_stress_mark_order_delivered(payment_reference, order, driver):
+                delivered_local += 1
+                with ADMIN_STRESS_TEST_LOCK:
+                    if str(ADMIN_STRESS_TEST_STATE.get('session_id') or '').strip() == str(session_id):
+                        ADMIN_STRESS_TEST_STATE['delivered_count'] = int(ADMIN_STRESS_TEST_STATE.get('delivered_count') or 0) + 1
+                        _admin_stress_touch_locked()
+                if delivered_local == 1 or delivered_local == len(driver_orders) or (delivered_local % 10) == 0:
+                    _admin_stress_append_event(
+                        f"{getattr(driver, 'username', 'driver')}: {delivered_local}/{len(driver_orders)} entregados.",
+                        'note',
+                    )
+
+            current_lat = float(point['lat'])
+            current_lon = float(point['lon'])
+            time.sleep(0.6)
+
+        _admin_stress_append_event(
+            f"{getattr(driver, 'username', 'driver')}: ruta completada ({delivered_local} entregas).",
+            'ok',
+        )
+    except Exception as exc:
+        logger.exception('admin stress driver simulation failed')
+        _admin_stress_append_event(
+            f"{getattr(driver, 'username', 'driver') if driver else f'driver#{driver_id}'}: error {str(exc)[:180]}",
+            'err',
+        )
+    finally:
+        if driver is not None:
+            _admin_stress_clear_driver_location(driver)
+        with ADMIN_STRESS_TEST_LOCK:
+            if str(ADMIN_STRESS_TEST_STATE.get('session_id') or '').strip() == str(session_id):
+                ADMIN_STRESS_TEST_STATE['drivers_active'] = max(0, int(ADMIN_STRESS_TEST_STATE.get('drivers_active') or 0) - 1)
+                _admin_stress_touch_locked()
+        try:
+            db_local.close()
+        except Exception:
+            pass
+
+
+def _run_admin_stress_ready_simulation(session_id: str, payment_reference: str) -> None:
+    try:
+        db_local = SessionLocal()
+        try:
+            drivers = _admin_stress_list_drivers(db_local)
+            session_orders = _admin_stress_load_orders(payment_reference, db_local)
+            ready_orders = [
+                order for order in session_orders
+                if _normalize_order_status(order.get('status')) in ('preparado', 'enviado')
+            ]
+            if not ready_orders:
+                _admin_stress_set_error(session_id, 'No hay pedidos QA preparados para arrancar la simulacion.')
+                return
+            if not drivers:
+                _admin_stress_set_error(session_id, 'No hay repartidores activos para la simulacion.')
+                return
+
+            for driver in drivers:
+                if not _admin_stress_session_matches(session_id):
+                    return
+                try:
+                    _auto_assign_routes_for_driver(driver, ready_orders, include_assigned=False, db=db_local)
+                    ready_orders = [
+                        order for order in _admin_stress_load_orders(payment_reference, db_local)
+                        if _normalize_order_status(order.get('status')) in ('preparado', 'enviado')
+                    ]
+                except Exception:
+                    logger.exception('admin stress auto-assign failed for driver=%s', getattr(driver, 'username', None))
+
+            assigned_ready_orders = [
+                order for order in _admin_stress_load_orders(payment_reference, db_local)
+                if _normalize_order_status(order.get('status')) in ('preparado', 'enviado')
+                and (order.get('assigned_driver_id') or str(order.get('assigned_driver_username') or '').strip())
+            ]
+            if not assigned_ready_orders:
+                _admin_stress_set_error(session_id, 'No se pudieron asignar pedidos QA a repartidores.')
+                return
+
+            grouped_driver_ids: List[int] = []
+            seen_driver_ids = set()
+            for order in assigned_ready_orders:
+                try:
+                    did = int(order.get('assigned_driver_id'))
+                except Exception:
+                    did = None
+                if did is None or did in seen_driver_ids:
+                    continue
+                seen_driver_ids.add(did)
+                grouped_driver_ids.append(did)
+
+            with ADMIN_STRESS_TEST_LOCK:
+                if str(ADMIN_STRESS_TEST_STATE.get('session_id') or '').strip() != str(session_id):
+                    return
+                ADMIN_STRESS_TEST_STATE['phase'] = 'running'
+                ADMIN_STRESS_TEST_STATE['message'] = 'Simulando movimiento de repartidores y entregas QA.'
+                ADMIN_STRESS_TEST_STATE['assigned_count'] = len(assigned_ready_orders)
+                ADMIN_STRESS_TEST_STATE['drivers_total'] = len(grouped_driver_ids)
+                ADMIN_STRESS_TEST_STATE['drivers_active'] = len(grouped_driver_ids)
+                ADMIN_STRESS_TEST_STATE['sent_count'] = sum(
+                    1 for order in assigned_ready_orders
+                    if _normalize_order_status(order.get('status')) == 'enviado'
+                )
+                ADMIN_STRESS_TEST_STATE['delivered_count'] = sum(
+                    1 for order in _admin_stress_load_orders(payment_reference, db_local)
+                    if _normalize_order_status(order.get('status')) == 'entregado'
+                )
+                _admin_stress_touch_locked()
+
+            unassigned_count = max(0, len(ready_orders) - len(assigned_ready_orders))
+            _admin_stress_append_event(
+                f"Simulacion en marcha: {len(assigned_ready_orders)} pedidos QA sobre {len(grouped_driver_ids)} repartidores.",
+                'ok',
+            )
+            if unassigned_count > 0:
+                _admin_stress_append_event(
+                    f'Quedaron {unassigned_count} pedidos QA sin asignar y no entran en esta corrida.',
+                    'err',
+                )
+        finally:
+            try:
+                db_local.close()
+            except Exception:
+                pass
+
+        worker_threads: List[threading.Thread] = []
+        for driver_id in grouped_driver_ids:
+            thread = threading.Thread(
+                target=_run_admin_stress_driver_simulation,
+                args=(session_id, payment_reference, int(driver_id)),
+                daemon=True,
+            )
+            worker_threads.append(thread)
+            thread.start()
+
+        for thread in worker_threads:
+            thread.join()
+
+        if not _admin_stress_session_matches(session_id):
+            return
+
+        counts = _admin_stress_refresh_counts_from_db(payment_reference)
+        with ADMIN_STRESS_TEST_LOCK:
+            if str(ADMIN_STRESS_TEST_STATE.get('session_id') or '').strip() != str(session_id):
+                return
+            ADMIN_STRESS_TEST_STATE['phase'] = 'completed'
+            ADMIN_STRESS_TEST_STATE['message'] = 'Simulacion QA terminada.'
+            ADMIN_STRESS_TEST_STATE['drivers_active'] = 0
+            ADMIN_STRESS_TEST_STATE['delivered_count'] = int(counts.get('delivered_count') or 0)
+            ADMIN_STRESS_TEST_STATE['sent_count'] = int(counts.get('sent_count') or 0)
+            _admin_stress_touch_locked()
+        _admin_stress_append_event(
+            f"Stress test completado: {int(counts.get('delivered_count') or 0)} pedidos QA entregados.",
+            'ok',
+        )
+    except Exception as exc:
+        logger.exception('admin stress ready simulation failed')
+        _admin_stress_set_error(session_id, f'No se pudo ejecutar la simulacion QA: {exc}')
+
+
+@app.get('/admin/stress-test/status')
+def admin_stress_test_status(current_owner=Depends(require_admin_owner)):
+    snapshot = _admin_stress_snapshot()
+    phase = str(snapshot.get('phase') or '').strip().lower()
+    if phase in ('awaiting_ready', 'completed', 'error'):
+        counts = _admin_stress_refresh_counts_from_db(snapshot.get('payment_reference'))
+        snapshot.update(counts)
+    return snapshot
+
+
+@app.post('/admin/stress-test/start')
+async def admin_stress_test_start(request: Request, current_owner=Depends(require_admin_owner)):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        requested_count = int(body.get('count') or 0)
+    except Exception:
+        requested_count = 0
+    if requested_count < 1 or requested_count > 2000:
+        raise HTTPException(status_code=400, detail='count_invalid')
+
+    current = _admin_stress_snapshot()
+    current_phase = str(current.get('phase') or '').strip().lower()
+    if current_phase in ('creating', 'running'):
+        raise HTTPException(status_code=409, detail='stress_test_already_running')
+
+    session_id = uuid.uuid4().hex[:12]
+    prefix = f"qa.console.{session_id}"
+    payment_reference = f"stress:{session_id}"
+    _admin_stress_reset_session(session_id, prefix, payment_reference, requested_count)
+    _admin_stress_append_event(
+        f"Sesion {session_id} creada por {getattr(current_owner, 'username', 'owner')}.",
+        'note',
+    )
+    thread = threading.Thread(
+        target=_run_admin_stress_seed,
+        args=(session_id, prefix, payment_reference, requested_count),
+        daemon=True,
+    )
+    thread.start()
+    return _admin_stress_snapshot()
+
+
+@app.post('/admin/stress-test/ready')
+def admin_stress_test_ready(current_owner=Depends(require_admin_owner)):
+    snapshot = _admin_stress_snapshot()
+    current_phase = str(snapshot.get('phase') or '').strip().lower()
+    if current_phase != 'awaiting_ready':
+        raise HTTPException(status_code=409, detail='stress_test_not_waiting_ready')
+
+    payment_reference = str(snapshot.get('payment_reference') or '').strip()
+    session_id = str(snapshot.get('session_id') or '').strip()
+    if not payment_reference or not session_id:
+        raise HTTPException(status_code=409, detail='stress_test_session_missing')
+
+    counts = _admin_stress_refresh_counts_from_db(payment_reference)
+    ready_count = int(counts.get('ready_count') or 0)
+    pending_count = int(counts.get('pending_count') or 0)
+    if ready_count <= 0:
+        raise HTTPException(status_code=409, detail='stress_test_no_ready_orders')
+
+    with ADMIN_STRESS_TEST_LOCK:
+        if str(ADMIN_STRESS_TEST_STATE.get('session_id') or '').strip() != session_id:
+            raise HTTPException(status_code=409, detail='stress_test_session_changed')
+        ADMIN_STRESS_TEST_STATE['phase'] = 'running'
+        ADMIN_STRESS_TEST_STATE['message'] = 'Preparando simulacion QA de repartidores.'
+        _admin_stress_touch_locked()
+
+    _admin_stress_append_event(
+        f".ready recibido por {getattr(current_owner, 'username', 'owner')}: {ready_count} pedidos QA listos.",
+        'ok',
+    )
+    if pending_count > 0:
+        _admin_stress_append_event(
+            f'Hay {pending_count} pedidos QA todavia no preparados; la simulacion correra solo sobre los listos.',
+            'note',
+        )
+
+    thread = threading.Thread(
+        target=_run_admin_stress_ready_simulation,
+        args=(session_id, payment_reference),
+        daemon=True,
+    )
+    thread.start()
+    return _admin_stress_snapshot()
 
 
 @app.post('/admin/products/auto-categorize')
@@ -13155,6 +14127,30 @@ if os.path.exists(FRONTEND_DIR):
         content = _inject_admin_config(content)
         content = content.replace('repartidor.js"', f'repartidor.js?v={ver}"').replace('styles.css"', f'styles.css?v={ver}"')
         return Response(content=content, media_type='text/html')
+
+    @app.get("/admin/repartidor-app.apk")
+    async def admin_repartidor_apk():
+        apk_path = os.path.abspath(
+            os.path.join(
+                os.path.dirname(__file__),
+                '..',
+                '..',
+                'android',
+                'app',
+                'build',
+                'outputs',
+                'apk',
+                'debug',
+                'app-debug.apk',
+            )
+        )
+        if not os.path.exists(apk_path):
+            raise HTTPException(status_code=404, detail='APK not found')
+        return FileResponse(
+            apk_path,
+            media_type='application/vnd.android.package-archive',
+            filename='app-debug.apk',
+        )
 
     app.mount("/admin", StaticFiles(directory=FRONTEND_DIR), name="admin")
 

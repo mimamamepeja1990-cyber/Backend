@@ -15,6 +15,8 @@ const driverZoneEl = document.getElementById('driverZone');
 const routeCountEl = document.getElementById('routeCount');
 const refreshRouteBtn = document.getElementById('refreshRouteBtn');
 const logoutBtn = document.getElementById('logoutBtn');
+const driverAppCard = document.getElementById('driverAppCard');
+const driverAppInstallBtn = document.getElementById('driverAppInstallBtn');
 
 const currentTitle = document.getElementById('currentTitle');
 const currentBadge = document.getElementById('currentBadge');
@@ -38,6 +40,19 @@ let refreshTimer = null;
 let locationWatchId = null;
 let lastLocationSentAt = 0;
 const LOCATION_SEND_INTERVAL_MS = 8000;
+
+function syncDriverAppInstall(){
+  const loggedIn = !!(currentUser && currentUser.role === 'repartidor');
+  try{
+    if (driverAppCard) driverAppCard.classList.toggle('hidden', !loggedIn);
+  }catch(_){ }
+  try{
+    if (driverAppInstallBtn){
+      const base = String(API_BASE || REMOTE_API_BASE || '').replace(/\/$/, '');
+      driverAppInstallBtn.href = `${base}/admin/repartidor-app.apk`;
+    }
+  }catch(_){ }
+}
 
 function setAuthError(msg){
   if (!authError) return;
@@ -445,6 +460,7 @@ async function bootstrap(){
       setAuthError('');
       try{
         await ensureApiBase();
+        syncDriverAppInstall();
         const body = new URLSearchParams();
         body.set('username', username);
         body.set('password', password);
@@ -472,6 +488,7 @@ async function bootstrap(){
         }
         currentUser = me;
         setSession(me);
+        syncDriverAppInstall();
         setAuthLocked(false);
         driverNameEl.textContent = me.username || '—';
         driverZoneEl.textContent = me.zone || '—';
@@ -491,10 +508,12 @@ async function bootstrap(){
   if (token){
     try{
       await ensureApiBase();
+      syncDriverAppInstall();
       const me = await safeFetch(`${API_BASE}/admin/auth/me`).catch(() => null);
       if (me && me.role === 'repartidor'){
         currentUser = me;
         setSession(me);
+        syncDriverAppInstall();
         setAuthLocked(false);
         driverNameEl.textContent = me.username || '—';
         driverZoneEl.textContent = me.zone || '—';
@@ -523,6 +542,8 @@ if (logoutBtn){
   logoutBtn.addEventListener('click', () => {
     clearToken();
     clearSession();
+    currentUser = null;
+    syncDriverAppInstall();
     stopLocationTracking();
     setAuthLocked(true);
     location.reload();
