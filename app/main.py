@@ -231,6 +231,9 @@ OSRM_ROUTE_MAX_WAYPOINTS = max(2, min(int(float(os.environ.get('OSRM_ROUTE_MAX_W
 OSRM_TRACE_MAX_POINTS = max(2, min(int(float(os.environ.get('OSRM_TRACE_MAX_POINTS') or 24)), 40))
 TRACKING_STOP_MIN_MINUTES = max(0, int(float(os.environ.get('TRACKING_STOP_MIN_MINUTES') or 5)))
 TRACKING_STOP_MAX_MINUTES = max(TRACKING_STOP_MIN_MINUTES, int(float(os.environ.get('TRACKING_STOP_MAX_MINUTES') or 10)))
+TRACKING_STOP_SERVICE_MINUTES = max(0, int(float(os.environ.get('TRACKING_STOP_SERVICE_MINUTES') or TRACKING_STOP_MIN_MINUTES or 5)))
+TRACKING_ROUTE_START_HOUR = max(0, min(23, int(float(os.environ.get('TRACKING_ROUTE_START_HOUR') or 9))))
+TRACKING_ROUTE_START_MINUTE = max(0, min(59, int(float(os.environ.get('TRACKING_ROUTE_START_MINUTE') or 30))))
 TRACKING_LIVE_MAX_AGE_MINUTES = max(1, int(float(os.environ.get('TRACKING_LIVE_MAX_AGE_MINUTES') or 25)))
 TRACKING_FALLBACK_SPEED_KMH = max(10.0, float(os.environ.get('TRACKING_FALLBACK_SPEED_KMH') or 26.0))
 
@@ -12265,21 +12268,140 @@ def _build_active_orders_by_driver_cache(orders: List[Dict[str, Any]]) -> Dict[T
     return grouped
 
 
+def _build_tracking_route_orders(
+    order_data: Optional[Dict[str, Any]],
+    all_orders: Optional[List[Dict[str, Any]]] = None,
+) -> List[Dict[str, Any]]:
+    if not isinstance(order_data, dict):
+        return []
+    driver_id = order_data.get('assigned_driver_id')
+    driver_username = str(order_data.get('assigned_driver_username') or '').strip() or None
+    route_id = str(order_data.get('route_id') or '').strip()
+    scheduled_date = _normalize_iso_date_key(order_data.get('scheduled_delivery_date'))
+    route_generated_dt = _parse_datetime_utc(
+        order_data.get('route_generated_at') or order_data.get('assigned_at') or order_data.get('sent_at') or order_data.get('created_at')
+    )
+
+    def _collect(strict_route: bool) -> List[Dict[str, Any]]:
+        rows: List[Dict[str, Any]] = []
+        seen = set()
+        for candidate in (all_orders or []):
+            if not isinstance(candidate, dict):
+                continue
+            if not _driver_matches_assigned_order(candidate, driver_id=driver_id, driver_username=driver_username):
+                continue
+            candidate_status = _normalize_order_status(candidate.get('status'))
+            if candidate_status == 'cancelado':
+                continue
+            try:
+                candidate_route_order = int(candidate.get('route_order'))
+            except Exception:
+                continue
+            if strict_route:
+                if route_id:
+                    if str(candidate.get('route_id') or '').strip() != route_id:
+                        continue
+                elif scheduled_date:
+                    if _normalize_iso_date_key(candidate.get('scheduled_delivery_date')) != scheduled_date:
+                        continue
+                elif route_generated_dt is not None:
+                    candidate_dt = _parse_datetime_utc(
+                        candidate.get('route_generated_at') or candidate.get('assigned_at') or candidate.get('sent_at') or candidate.get('created_at')
+                    )
+                    if candidate_dt is None or candidate_dt.astimezone(datetime.timezone.utc).date() != route_generated_dt.astimezone(datetime.timezone.utc).date():
+                        continue
+            candidate_id = str(candidate.get('id') or '').strip()
+            if not candidate_id or candidate_id in seen:
+                continue
+            seen.add(candidate_id)
+            rows.append(candidate)
+        return sorted(
+            rows,
+            key=lambda item: (
+                item.get('route_order') is None,
+                int(item.get('route_order') or 0),
+                str(item.get('id') or ''),
+            ),
+        )
+
+    strict_rows = _collect(strict_route=True)
+    if strict_rows:
+        return strict_rows
+    return _collect(strict_route=False)
+
+
 def _format_customer_eta_text(
-    now_utc: datetime.datetime,
-    tzinfo: datetime.tzinfo,
-    eta_min_minutes: int,
-    eta_max_minutes: int,
+    eta_min_local_dt: datetime.datetime,
+    eta_max_local_dt: datetime.datetime,
+    reference_local_dt: Optional[datetime.datetime] = None,
 ) -> str:
-    now_local = now_utc.astimezone(tzinfo)
-    min_dt = now_local + datetime.timedelta(minutes=max(0, int(eta_min_minutes or 0)))
-    max_dt = now_local + datetime.timedelta(minutes=max(0, int(eta_max_minutes or 0)))
-    return f"Llega aproximadamente entre {min_dt.strftime('%H:%M')} y {max_dt.strftime('%H:%M')}"
+    min_dt = eta_min_local_dt
+    max_dt = eta_max_local_dt if isinstance(eta_max_local_dt, datetime.datetime) else eta_min_local_dt
+    ref_dt = reference_local_dt if isinstance(reference_local_dt, datetime.datetime) else min_dt
+    same_day = min_dt.date() == ref_dt.date() and max_dt.date() == ref_dt.date()
+    if abs((max_dt - min_dt).total_seconds()) < 60:
+        if same_day:
+            return f"Llega aproximadamente a las {min_dt.strftime('%H:%M')}"
+        return f"Llega aproximadamente el {min_dt.strftime('%d/%m')} a las {min_dt.strftime('%H:%M')}"
+    if same_day:
+        return f"Llega aproximadamente entre {min_dt.strftime('%H:%M')} y {max_dt.strftime('%H:%M')}"
+    return f"Llega aproximadamente el {min_dt.strftime('%d/%m')} entre {min_dt.strftime('%H:%M')} y {max_dt.strftime('%H:%M')}"
+
+
+def _resolve_tracking_departure_local_dt(
+    order_data: Optional[Dict[str, Any]],
+    route_orders: Optional[List[Dict[str, Any]]],
+    tzinfo: datetime.tzinfo,
+) -> datetime.datetime:
+    route_rows = route_orders or []
+    date_key = _normalize_iso_date_key((order_data or {}).get('scheduled_delivery_date'))
+    if not date_key:
+        for route_order in route_rows:
+            date_key = _normalize_iso_date_key(route_order.get('scheduled_delivery_date'))
+            if date_key:
+                break
+    local_date: Optional[datetime.date] = None
+    if date_key:
+        try:
+            local_date = datetime.date.fromisoformat(date_key)
+        except Exception:
+            local_date = None
+    if local_date is None:
+        raw_candidates: List[Any] = []
+        for route_order in route_rows:
+            raw_candidates.extend([
+                route_order.get('sent_at'),
+                route_order.get('assigned_at'),
+                route_order.get('route_generated_at'),
+                route_order.get('created_at'),
+            ])
+        raw_candidates.extend([
+            (order_data or {}).get('sent_at'),
+            (order_data or {}).get('assigned_at'),
+            (order_data or {}).get('route_generated_at'),
+            (order_data or {}).get('created_at'),
+        ])
+        for raw in raw_candidates:
+            parsed = _parse_datetime_utc(raw)
+            if parsed is None:
+                continue
+            try:
+                local_date = parsed.astimezone(tzinfo).date()
+                break
+            except Exception:
+                continue
+    if local_date is None:
+        local_date = datetime.datetime.now(tzinfo).date()
+    return datetime.datetime.combine(
+        local_date,
+        datetime.time(hour=TRACKING_ROUTE_START_HOUR, minute=TRACKING_ROUTE_START_MINUTE),
+        tzinfo=tzinfo,
+    )
 
 
 def _build_customer_order_tracking_payload(
     order_data: Dict[str, Any],
-    active_orders: List[Dict[str, Any]],
+    all_orders: List[Dict[str, Any]],
     live_payload: Optional[Dict[str, Any]],
     tzinfo: datetime.tzinfo,
     tz_name: str,
@@ -12312,58 +12434,39 @@ def _build_customer_order_tracking_payload(
     if status_key in ('recibido', 'visto', 'entregado', 'cancelado'):
         return payload
 
-    ordered_active = list(active_orders or [])
+    route_orders = _build_tracking_route_orders(order_data, all_orders=all_orders)
     target_id = str(order_data.get('id') or '').strip()
-    target_index = next((idx for idx, item in enumerate(ordered_active) if str(item.get('id') or '').strip() == target_id), -1)
+    target_index = next((idx for idx, item in enumerate(route_orders) if str(item.get('id') or '').strip() == target_id), -1)
     if target_index < 0:
         payload['eta_detail'] = 'Te mostraremos la hora estimada cuando el pedido quede dentro de una ruta activa.'
         return payload
 
-    en_route_indexes = [
-        idx for idx, item in enumerate(ordered_active)
-        if _normalize_order_status(item.get('status')) == 'enviado'
-    ]
-    has_live_route = bool(en_route_indexes)
-    route_start_index = min(en_route_indexes) if en_route_indexes else 0
-    route_start_index = max(0, min(route_start_index, target_index))
-
     origin: Optional[Tuple[float, float]] = None
-    route_nodes_start_index = route_start_index
-    source_label = 'Ruta asignada'
+    source_label = f"Salida planificada {TRACKING_ROUTE_START_HOUR:02d}:{TRACKING_ROUTE_START_MINUTE:02d} desde el deposito"
     live_dt = _parse_datetime_utc(live_payload.get('recorded_at')) if isinstance(live_payload, dict) else None
     if isinstance(live_payload, dict):
         live_lat = _coerce_coord(live_payload.get('lat'))
         live_lon = _coerce_coord(live_payload.get('lon'))
         age_sec = (now_utc - live_dt).total_seconds() if live_dt is not None else None
         if _is_mendoza_point(live_lat, live_lon) and (age_sec is None or age_sec <= TRACKING_LIVE_MAX_AGE_MINUTES * 60):
-            origin = (float(live_lat), float(live_lon))
-            source_label = 'Ubicacion en vivo del repartidor'
             payload['live_tracking'] = True
 
-    if origin is None and has_live_route and status_key == 'enviado' and target_index == route_start_index:
-        payload['eta_detail'] = 'Te mostraremos la hora estimada cuando tengamos la ubicacion en vivo del repartidor.'
-        return payload
-
-    if origin is None and has_live_route and route_start_index < len(ordered_active):
-        current_point = _extract_driver_order_point(ordered_active[route_start_index])
-        if current_point:
-            origin = (float(current_point['lat']), float(current_point['lon']))
-            route_nodes_start_index = min(target_index + 1, route_start_index + 1)
-            source_label = 'Ruta planificada del repartidor'
+    depot_lat, depot_lon = _get_route_start_point(db)
+    if _is_mendoza_point(depot_lat, depot_lon):
+        origin = (float(depot_lat), float(depot_lon))
 
     if origin is None:
-        depot_lat, depot_lon = _get_route_start_point(db)
-        if _is_mendoza_point(depot_lat, depot_lon):
-            origin = (float(depot_lat), float(depot_lon))
-            route_nodes_start_index = 0
-            source_label = 'Salida estimada desde el deposito'
+        first_point = _extract_driver_order_point(route_orders[0]) if route_orders else None
+        if first_point:
+            origin = (float(first_point['lat']), float(first_point['lon']))
+            source_label = 'Ruta planificada sin coordenadas del deposito'
 
     if origin is None:
         payload['eta_detail'] = 'No hay suficientes coordenadas para calcular la hora estimada.'
         return payload
 
     route_nodes: List[Tuple[float, float]] = [origin]
-    for item in ordered_active[route_nodes_start_index:target_index + 1]:
+    for item in route_orders[:target_index + 1]:
         point = _extract_driver_order_point(item)
         if not point:
             continue
@@ -12378,15 +12481,19 @@ def _build_customer_order_tracking_payload(
         payload['eta_detail'] = 'No pudimos calcular la ruta en este momento.'
         return payload
 
-    stops_ahead = max(0, target_index - route_start_index)
-    eta_min = max(0, int(drive_minutes) + (stops_ahead * TRACKING_STOP_MIN_MINUTES))
-    eta_max = max(eta_min, int(drive_minutes) + (stops_ahead * TRACKING_STOP_MAX_MINUTES))
-    stop_label = 'sin paradas antes de tu entrega' if stops_ahead == 0 else f"{stops_ahead} parada{'s' if stops_ahead != 1 else ''} antes de tu entrega"
+    stops_ahead = max(0, target_index)
+    service_minutes = stops_ahead * TRACKING_STOP_SERVICE_MINUTES
+    eta_min = max(0, int(drive_minutes) + service_minutes)
+    eta_max = eta_min
+    departure_local_dt = _resolve_tracking_departure_local_dt(order_data, route_orders, tzinfo)
+    now_local = now_utc.astimezone(tzinfo)
+    eta_local_dt = departure_local_dt + datetime.timedelta(minutes=eta_min)
+    stop_label = 'sin clientes antes de tu entrega' if stops_ahead == 0 else f"{stops_ahead} cliente{'s' if stops_ahead != 1 else ''} antes de tu entrega"
 
     payload.update({
         'eta_available': True,
-        'eta_text': _format_customer_eta_text(now_utc, tzinfo, eta_min, eta_max),
-        'eta_detail': f"{source_label} - {stop_label}.",
+        'eta_text': _format_customer_eta_text(eta_local_dt, eta_local_dt, now_local),
+        'eta_detail': f"{source_label} - {stop_label} (+{TRACKING_STOP_SERVICE_MINUTES} min por cliente).",
         'eta_min_minutes': eta_min,
         'eta_max_minutes': eta_max,
         'stops_ahead': stops_ahead,
@@ -13272,7 +13379,6 @@ async def customer_orders_tracking(
     current_user_id = getattr(current_user, 'id', None)
     current_email = _normalize_email(getattr(current_user, 'email', None))
     all_orders = list_orders(skip=0, limit=2500, source=None, q=None, date=None, db=db)
-    active_by_driver = _build_active_orders_by_driver_cache(all_orders or [])
     live_cache: Dict[Tuple[str, str], Optional[Dict[str, Any]]] = {}
     out: List[Dict[str, Any]] = []
 
@@ -13302,7 +13408,6 @@ async def customer_orders_tracking(
             continue
 
         driver_key = _driver_assignment_cache_key(order_payload.get('assigned_driver_id'), order_payload.get('assigned_driver_username'))
-        active_orders = active_by_driver.get(driver_key, [])
         live_payload = None
         if driver_key[0] or driver_key[1]:
             if driver_key not in live_cache:
@@ -13314,7 +13419,7 @@ async def customer_orders_tracking(
         try:
             tracking_payload = _build_customer_order_tracking_payload(
                 order_payload,
-                active_orders,
+                all_orders,
                 live_payload,
                 tzinfo,
                 tz_name,
