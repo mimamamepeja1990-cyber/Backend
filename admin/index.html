@@ -734,6 +734,37 @@
           </div>
         </div>
       </div>
+      <div id="dashboardStockModal" class="modal hidden" aria-hidden="true" role="dialog" aria-labelledby="dashboardStockModalTitle" aria-modal="true">
+        <div class="modal-card dashboard-stock-modal-card">
+          <button id="dashboardStockModalClose" class="modal-close" aria-label="Cerrar">&times;</button>
+          <div class="dashboard-stock-modal-head">
+            <div class="dashboard-stock-modal-copy">
+              <span class="dashboard-stock-modal-kicker">Reposicion critica</span>
+              <h2 id="dashboardStockModalTitle">Stock para reponer</h2>
+              <p id="dashboardStockModalSubtitle" class="dashboard-stock-modal-subtitle">Articulos que conviene mover primero para no frenar venta ni preparacion.</p>
+            </div>
+            <div class="dashboard-stock-modal-stats">
+              <article class="dashboard-stock-modal-stat">
+                <span>Productos</span>
+                <strong id="dashboardStockModalCount">-</strong>
+              </article>
+              <article class="dashboard-stock-modal-stat">
+                <span>Venta en riesgo</span>
+                <strong id="dashboardStockModalRisk">-</strong>
+              </article>
+              <article class="dashboard-stock-modal-stat">
+                <span>Cobertura sugerida</span>
+                <strong id="dashboardStockModalCoverage">-</strong>
+              </article>
+            </div>
+          </div>
+          <div id="dashboardStockModalBody" class="dashboard-stock-modal-body"></div>
+          <div class="dashboard-stock-modal-actions">
+            <button id="dashboardStockModalCatalogBtn" class="btn primary" type="button">Ir a catalogo</button>
+            <button id="dashboardStockModalCloseBtn" class="btn" type="button">Cerrar</button>
+          </div>
+        </div>
+      </div>
     </main>
   </div>
 

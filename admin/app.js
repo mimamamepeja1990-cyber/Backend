@@ -2057,6 +2057,16 @@ const dashboardHeroMetaEl = document.getElementById('dashboardHeroMeta');
 const dashboardHeroInsightsEl = document.getElementById('dashboardHeroInsights');
 const dashboardHeroPrimaryBtn = document.getElementById('dashboardHeroPrimaryBtn');
 const dashboardHeroSecondaryBtn = document.getElementById('dashboardHeroSecondaryBtn');
+const dashboardStockModal = document.getElementById('dashboardStockModal');
+const dashboardStockModalClose = document.getElementById('dashboardStockModalClose');
+const dashboardStockModalCloseBtn = document.getElementById('dashboardStockModalCloseBtn');
+const dashboardStockModalCatalogBtn = document.getElementById('dashboardStockModalCatalogBtn');
+const dashboardStockModalTitle = document.getElementById('dashboardStockModalTitle');
+const dashboardStockModalSubtitle = document.getElementById('dashboardStockModalSubtitle');
+const dashboardStockModalCount = document.getElementById('dashboardStockModalCount');
+const dashboardStockModalRisk = document.getElementById('dashboardStockModalRisk');
+const dashboardStockModalCoverage = document.getElementById('dashboardStockModalCoverage');
+const dashboardStockModalBody = document.getElementById('dashboardStockModalBody');
 const dashboardAlertLowStockEl = document.getElementById('dashboardAlertLowStock');
 const dashboardAlertUnseenEl = document.getElementById('dashboardAlertUnseen');
 const dashboardAlertUnpreparedEl = document.getElementById('dashboardAlertUnprepared');
@@ -2891,49 +2901,50 @@ function renderDashboardHeroInsights(items){
   list.forEach((item) => {
     const li = document.createElement('li');
     if (item.type === 'product-list'){
-      li.className = 'dashboard-hero-insight-card is-product-list';
+      li.className = 'dashboard-hero-insight-card is-product-summary';
       const title = cleanDashboardText(item.title || 'Reponer ya mismo');
       const titleEl = document.createElement('strong');
       titleEl.className = 'dashboard-hero-insight-title';
       titleEl.textContent = title;
       li.appendChild(titleEl);
-      const listEl = document.createElement('ul');
-      listEl.className = 'dashboard-hero-stock-list';
-      (Array.isArray(item.items) ? item.items : []).forEach((entry) => {
-        const row = document.createElement('li');
-        row.className = 'dashboard-hero-stock-item';
-        const copy = document.createElement('div');
-        copy.className = 'dashboard-hero-stock-copy';
-        const nameEl = document.createElement('strong');
-        nameEl.className = 'dashboard-hero-stock-name';
-        nameEl.textContent = cleanDashboardText(entry && entry.label ? entry.label : 'Producto');
-        copy.appendChild(nameEl);
-        const meta = cleanDashboardText(entry && entry.meta ? entry.meta : '');
-        if (meta){
-          const metaEl = document.createElement('span');
-          metaEl.className = 'dashboard-hero-stock-meta';
-          metaEl.textContent = meta;
-          copy.appendChild(metaEl);
-        }
-        row.appendChild(copy);
-        const tags = Array.isArray(entry && entry.tags) ? entry.tags : [];
-        if (tags.length){
-          const tagsWrap = document.createElement('div');
-          tagsWrap.className = 'dashboard-hero-stock-tags';
-          tags.forEach((tag) => {
-            const text = cleanDashboardText(tag && tag.text ? tag.text : '');
-            if (!text) return;
-            const tagEl = document.createElement('span');
-            tagEl.className = 'dashboard-hero-stock-tag';
-            if (tag && tag.tone) tagEl.classList.add(`is-${cleanDashboardText(tag.tone)}`);
-            tagEl.textContent = text;
-            tagsWrap.appendChild(tagEl);
-          });
-          row.appendChild(tagsWrap);
-        }
-        listEl.appendChild(row);
-      });
-      li.appendChild(listEl);
+      const summary = cleanDashboardText(item.summary || '');
+      if (summary){
+        const summaryEl = document.createElement('p');
+        summaryEl.className = 'dashboard-hero-insight-text';
+        summaryEl.textContent = summary;
+        li.appendChild(summaryEl);
+      }
+      const preview = (Array.isArray(item.preview) ? item.preview : [])
+        .map((entry) => cleanDashboardText(entry))
+        .filter(Boolean)
+        .slice(0, 3);
+      if (preview.length){
+        const previewWrap = document.createElement('div');
+        previewWrap.className = 'dashboard-hero-summary-preview';
+        preview.forEach((text) => {
+          const chip = document.createElement('span');
+          chip.className = 'dashboard-hero-summary-chip';
+          chip.textContent = text;
+          previewWrap.appendChild(chip);
+        });
+        li.appendChild(previewWrap);
+      }
+      const actions = document.createElement('div');
+      actions.className = 'dashboard-hero-summary-actions';
+      const helper = cleanDashboardText(item.helper || '');
+      if (helper){
+        const helperEl = document.createElement('span');
+        helperEl.className = 'dashboard-hero-summary-helper';
+        helperEl.textContent = helper;
+        actions.appendChild(helperEl);
+      }
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'btn dashboard-hero-inline-btn';
+      button.textContent = cleanDashboardText(item.ctaLabel || 'Ver todos');
+      button.addEventListener('click', () => openDashboardStockModal());
+      actions.appendChild(button);
+      li.appendChild(actions);
     } else if (item.type === 'note'){
       li.className = 'dashboard-hero-insight-card';
       if (item.tone) li.classList.add(`is-${cleanDashboardText(item.tone)}`);
@@ -2989,6 +3000,110 @@ function buildDashboardLowStockActionItems(products){
       return { label, meta, tags };
     })
     .filter(Boolean);
+}
+
+function getDashboardLowStockModalItems(){
+  return (Array.isArray(dashboardState.lowStockProducts) ? dashboardState.lowStockProducts : [])
+    .map((entry) => {
+      const label = cleanDashboardText(entry && entry.label ? entry.label : '');
+      if (!label) return null;
+      const brand = cleanDashboardText(entry && entry.brand ? entry.brand : '');
+      const gap = cleanDashboardText(formatDashboardStockGap(entry && entry.restockGap, entry && entry.unit));
+      const pendingOrders = Math.max(0, Number(entry && entry.pendingOrdersCount || 0));
+      const pendingRevenue = Math.max(0, Number(entry && entry.pendingRevenue || 0));
+      const revenueAtRisk = Math.max(0, Number(entry && entry.revenueAtRisk || 0));
+      const restockCost = Math.max(0, Number(entry && entry.restockCost || 0));
+      const metrics = [];
+      if (pendingOrders > 0) metrics.push(`${formatNumber(pendingOrders)} pedido${pendingOrders === 1 ? '' : 's'} abiertos`);
+      if (pendingRevenue > 0) metrics.push(`${formatMoneyRounded(pendingRevenue)} comprometidos`);
+      else if (revenueAtRisk > 0) metrics.push(`Venta en riesgo ${formatMoneyRounded(revenueAtRisk)}`);
+      if (restockCost > 0) metrics.push(`Reposicion ${formatMoneyRounded(restockCost)}`);
+      const tags = [];
+      if (gap && gap !== '0') tags.push({ text: `Faltan ${gap}`, tone: 'urgent' });
+      if (brand) tags.push({ text: brand, tone: 'brand' });
+      if (pendingOrders > 0) tags.push({ text: `${formatNumber(pendingOrders)} pedidos`, tone: 'orders' });
+      return {
+        label,
+        brand,
+        tags,
+        metrics,
+        meta: metrics.join(' - ') || 'Mover ahora para no cortar venta.',
+      };
+    })
+    .filter(Boolean);
+}
+
+function renderDashboardStockModal(){
+  if (!dashboardStockModalBody) return;
+  const items = getDashboardLowStockModalItems();
+  if (dashboardStockModalTitle) dashboardStockModalTitle.textContent = cleanDashboardText(`Reposicion urgente (${formatNumber(items.length)})`);
+  if (dashboardStockModalSubtitle){
+    const brands = (Array.isArray(dashboardState.lowStockBrands) ? dashboardState.lowStockBrands : [])
+      .slice(0, 4)
+      .map((entry) => cleanDashboardText(entry && entry.label ? entry.label : ''))
+      .filter(Boolean);
+    dashboardStockModalSubtitle.textContent = brands.length
+      ? `Marcas a mover primero: ${brands.join(', ')}.`
+      : 'Articulos que conviene mover primero para no frenar venta ni preparacion.';
+  }
+  if (dashboardStockModalCount) dashboardStockModalCount.textContent = formatNumber(items.length);
+  if (dashboardStockModalRisk) dashboardStockModalRisk.textContent = formatMoneyRounded(Number(dashboardState.lowStockPotentialLoss || 0));
+  if (dashboardStockModalCoverage) dashboardStockModalCoverage.textContent = formatMoneyRounded(Number(dashboardState.lowStockRestockEstimate || 0));
+  dashboardStockModalBody.innerHTML = '';
+  if (!items.length){
+    const empty = document.createElement('div');
+    empty.className = 'dashboard-stock-modal-empty';
+    empty.textContent = 'No hay productos criticos para reponer ahora mismo.';
+    dashboardStockModalBody.appendChild(empty);
+    return;
+  }
+  const list = document.createElement('div');
+  list.className = 'dashboard-stock-modal-list';
+  items.forEach((item) => {
+    const article = document.createElement('article');
+    article.className = 'dashboard-stock-modal-item';
+    const head = document.createElement('div');
+    head.className = 'dashboard-stock-modal-item-head';
+    const copy = document.createElement('div');
+    copy.className = 'dashboard-stock-modal-item-copy';
+    const name = document.createElement('strong');
+    name.className = 'dashboard-stock-modal-item-name';
+    name.textContent = item.label;
+    copy.appendChild(name);
+    const meta = document.createElement('p');
+    meta.className = 'dashboard-stock-modal-item-meta';
+    meta.textContent = item.meta;
+    copy.appendChild(meta);
+    head.appendChild(copy);
+    const tagsWrap = document.createElement('div');
+    tagsWrap.className = 'dashboard-stock-modal-tags';
+    (Array.isArray(item.tags) ? item.tags : []).forEach((tag) => {
+      const text = cleanDashboardText(tag && tag.text ? tag.text : '');
+      if (!text) return;
+      const pill = document.createElement('span');
+      pill.className = 'dashboard-stock-modal-tag';
+      if (tag && tag.tone) pill.classList.add(`is-${cleanDashboardText(tag.tone)}`);
+      pill.textContent = text;
+      tagsWrap.appendChild(pill);
+    });
+    head.appendChild(tagsWrap);
+    article.appendChild(head);
+    list.appendChild(article);
+  });
+  dashboardStockModalBody.appendChild(list);
+}
+
+function openDashboardStockModal(){
+  if (!dashboardStockModal) return;
+  renderDashboardStockModal();
+  dashboardStockModal.classList.remove('hidden');
+  dashboardStockModal.setAttribute('aria-hidden', 'false');
+}
+
+function closeDashboardStockModal(){
+  if (!dashboardStockModal) return;
+  dashboardStockModal.classList.add('hidden');
+  dashboardStockModal.setAttribute('aria-hidden', 'true');
 }
 
 function getDashboardFallbackTicket(seedOrders = []){
@@ -3164,8 +3279,13 @@ function getDashboardHeroImpactConfig(){
     if (lowStockActionItems.length){
       insights.push({
         type: 'product-list',
-        title: `Reponer ya mismo (${formatNumber(lowStockActionItems.length)})`,
-        items: lowStockActionItems,
+        title: 'Reposicion urgente',
+        summary: `${formatNumber(lowStockActionItems.length)} articulo${lowStockActionItems.length === 1 ? '' : 's'} piden reposicion inmediata para no cortar venta ni preparacion.`,
+        preview: lowStockActionItems.slice(0, 3).map((entry) => entry && entry.label),
+        helper: lowStockActionItems.length > 3
+          ? `+${formatNumber(lowStockActionItems.length - 3)} mas en el detalle completo`
+          : 'Abrir detalle completo',
+        ctaLabel: 'Ver todos',
       });
     }
     if (lowStockBrandList){
@@ -8484,9 +8604,17 @@ function closeModal(){
 if(modal) modal.addEventListener('click', e => { if(e.target === modal) closeModal(); });
 if(historyModal) historyModal.addEventListener('click', e => { if(e.target === historyModal) closeHistoryModal(); });
 if(historyModalClose) historyModalClose.onclick = () => closeHistoryModal();
+if(dashboardStockModal) dashboardStockModal.addEventListener('click', e => { if(e.target === dashboardStockModal) closeDashboardStockModal(); });
+if(dashboardStockModalClose) dashboardStockModalClose.onclick = () => closeDashboardStockModal();
+if(dashboardStockModalCloseBtn) dashboardStockModalCloseBtn.onclick = () => closeDashboardStockModal();
+if(dashboardStockModalCatalogBtn) dashboardStockModalCatalogBtn.onclick = () => {
+  closeDashboardStockModal();
+  runDashboardAction('catalog');
+};
 // Close on ESC key
 document.addEventListener('keydown', e => {
   if (e.key !== 'Escape') return;
+  try{ if (dashboardStockModal && !dashboardStockModal.classList.contains('hidden')) { closeDashboardStockModal(); return; } }catch(_){ }
   try{ if (historyModal && !historyModal.classList.contains('hidden')) { closeHistoryModal(); return; } }catch(_){ }
   try{ if (!modal.classList.contains('hidden')) closeModal(); }catch(_){ }
 });

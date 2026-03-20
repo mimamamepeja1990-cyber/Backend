@@ -524,6 +524,52 @@ th.col-select input, td.col-select input{width:16px; height:16px}
   line-height:1.5;
   color:rgba(255,255,255,0.96);
 }
+.dashboard-hero-insight-card.is-product-summary{
+  gap:10px;
+  background:rgba(255,255,255,0.12);
+}
+.dashboard-hero-summary-preview{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+}
+.dashboard-hero-summary-chip{
+  display:inline-flex;
+  align-items:center;
+  min-height:30px;
+  padding:0 12px;
+  border-radius:999px;
+  background:rgba(5,16,31,0.22);
+  border:1px solid rgba(255,255,255,0.08);
+  font-size:12px;
+  font-weight:700;
+  color:rgba(255,255,255,0.92);
+}
+.dashboard-hero-summary-actions{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:12px;
+  flex-wrap:wrap;
+}
+.dashboard-hero-summary-helper{
+  font-size:12px;
+  font-weight:700;
+  color:rgba(255,255,255,0.72);
+}
+.dashboard-hero-inline-btn{
+  min-height:38px;
+  padding:0 14px;
+  border-radius:999px;
+  background:rgba(255,255,255,0.12);
+  border:1px solid rgba(255,255,255,0.16);
+  color:#fff;
+  font-weight:800;
+}
+.dashboard-hero-inline-btn:hover{
+  background:rgba(255,255,255,0.18);
+  box-shadow:0 12px 24px rgba(2,6,23,0.18);
+}
 .dashboard-hero-stock-list{
   list-style:none;
   margin:0;
@@ -589,6 +635,171 @@ th.col-select input, td.col-select input{width:16px; height:16px}
 .dashboard-hero-stock-tag.is-brand{
   background:rgba(96,165,250,0.14);
   border-color:rgba(96,165,250,0.28);
+}
+.dashboard-stock-modal-card{
+  width:min(920px, 92vw);
+  max-height:86vh;
+  display:flex;
+  flex-direction:column;
+  gap:18px;
+  padding:26px;
+  border-radius:26px;
+  background:
+    radial-gradient(circle at top right, rgba(242,107,56,0.08), transparent 28%),
+    linear-gradient(180deg, #ffffff, #f8fbff);
+}
+.dashboard-stock-modal-head{
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:18px;
+  flex-wrap:wrap;
+  padding-right:28px;
+}
+.dashboard-stock-modal-copy{
+  display:grid;
+  gap:8px;
+  max-width:48ch;
+}
+.dashboard-stock-modal-kicker{
+  font-size:11px;
+  font-weight:900;
+  letter-spacing:0.18em;
+  text-transform:uppercase;
+  color:rgba(6,26,43,0.48);
+}
+.dashboard-stock-modal-copy h2{
+  margin:0;
+  font-size:32px;
+  line-height:1.02;
+  font-weight:900;
+  letter-spacing:-0.8px;
+  color:#0f172a;
+}
+.dashboard-stock-modal-subtitle{
+  margin:0;
+  font-size:14px;
+  line-height:1.55;
+  color:#475569;
+}
+.dashboard-stock-modal-stats{
+  display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:10px;
+  min-width:min(420px, 100%);
+  flex:1 1 360px;
+}
+.dashboard-stock-modal-stat{
+  padding:14px 16px;
+  border-radius:18px;
+  background:rgba(255,255,255,0.92);
+  border:1px solid rgba(15,23,42,0.08);
+  box-shadow:0 12px 28px rgba(15,23,42,0.06);
+  display:grid;
+  gap:6px;
+}
+.dashboard-stock-modal-stat span{
+  font-size:11px;
+  font-weight:900;
+  letter-spacing:0.12em;
+  text-transform:uppercase;
+  color:#64748b;
+}
+.dashboard-stock-modal-stat strong{
+  font-size:28px;
+  line-height:1;
+  font-weight:900;
+  letter-spacing:-0.8px;
+  color:#0f172a;
+  font-variant-numeric:tabular-nums;
+}
+.dashboard-stock-modal-body{
+  flex:1 1 auto;
+  min-height:0;
+  overflow:auto;
+  padding-right:4px;
+}
+.dashboard-stock-modal-list{
+  display:grid;
+  gap:12px;
+}
+.dashboard-stock-modal-item{
+  padding:16px 18px;
+  border-radius:18px;
+  background:linear-gradient(180deg, #ffffff, #f8fbff);
+  border:1px solid rgba(15,23,42,0.08);
+  box-shadow:0 14px 30px rgba(15,23,42,0.06);
+}
+.dashboard-stock-modal-item-head{
+  display:flex;
+  justify-content:space-between;
+  align-items:flex-start;
+  gap:14px;
+}
+.dashboard-stock-modal-item-copy{
+  min-width:0;
+  display:grid;
+  gap:6px;
+}
+.dashboard-stock-modal-item-name{
+  font-size:16px;
+  line-height:1.35;
+  font-weight:900;
+  color:#0f172a;
+}
+.dashboard-stock-modal-item-meta{
+  margin:0;
+  font-size:13px;
+  line-height:1.55;
+  color:#475569;
+}
+.dashboard-stock-modal-tags{
+  display:flex;
+  flex-wrap:wrap;
+  justify-content:flex-end;
+  gap:8px;
+}
+.dashboard-stock-modal-tag{
+  display:inline-flex;
+  align-items:center;
+  min-height:30px;
+  padding:0 11px;
+  border-radius:999px;
+  background:#eef2ff;
+  border:1px solid rgba(79,70,229,0.12);
+  color:#334155;
+  font-size:12px;
+  font-weight:800;
+  white-space:nowrap;
+}
+.dashboard-stock-modal-tag.is-urgent{
+  background:#fff7ed;
+  border-color:rgba(249,115,22,0.24);
+  color:#c2410c;
+}
+.dashboard-stock-modal-tag.is-brand{
+  background:#eff6ff;
+  border-color:rgba(59,130,246,0.22);
+  color:#1d4ed8;
+}
+.dashboard-stock-modal-tag.is-orders{
+  background:#fef2f2;
+  border-color:rgba(239,68,68,0.2);
+  color:#b91c1c;
+}
+.dashboard-stock-modal-actions{
+  display:flex;
+  justify-content:flex-end;
+  gap:10px;
+  flex-wrap:wrap;
+}
+.dashboard-stock-modal-empty{
+  padding:18px;
+  border-radius:18px;
+  background:rgba(255,255,255,0.9);
+  border:1px dashed rgba(148,163,184,0.5);
+  color:#64748b;
+  font-weight:700;
 }
 .dashboard-hero-actions{display:flex;gap:10px;flex-wrap:wrap;margin-top:22px}
 .dashboard-hero-actions .btn{min-height:46px;padding:0 16px}
@@ -955,6 +1166,8 @@ th.col-select input, td.col-select input{width:16px; height:16px}
   .dashboard-hero-copy{padding:24px}
   .dashboard-hero-title{font-size:34px}
   .dashboard-hero-value{font-size:58px}
+  .dashboard-stock-modal-card{padding:22px}
+  .dashboard-stock-modal-stats{grid-template-columns:1fr}
   .dashboard-hero-stock-list{max-height:240px}
   .dashboard-priority-grid{grid-template-columns:1fr}
   .dashboard-kpi-grid{grid-template-columns:1fr}
@@ -978,6 +1191,11 @@ th.col-select input, td.col-select input{width:16px; height:16px}
   .dashboard-hero-focus{gap:10px}
   .dashboard-hero-value{font-size:48px}
   .dashboard-hero-label{margin-bottom:6px}
+  .dashboard-hero-summary-actions{align-items:flex-start}
+  .dashboard-stock-modal-head{padding-right:0}
+  .dashboard-stock-modal-copy h2{font-size:28px}
+  .dashboard-stock-modal-item-head{flex-direction:column}
+  .dashboard-stock-modal-tags{justify-content:flex-start}
   .dashboard-hero-stock-item{flex-direction:column;align-items:flex-start}
   .dashboard-hero-stock-tags{justify-content:flex-start}
   .dashboard-hero-stock-list{max-height:none}
