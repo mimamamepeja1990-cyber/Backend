@@ -10319,6 +10319,30 @@ def _normalize_mp_payment_status(value: Optional[str]) -> str:
     return 'mp_pending'
 
 
+def _select_mercadopago_payment_candidate(results: Any) -> Optional[Dict[str, Any]]:
+    items = [item for item in (results or []) if isinstance(item, dict)]
+    if not items:
+        return None
+
+    def _priority(item: Dict[str, Any]) -> tuple:
+        status_value = _normalize_mp_payment_status(item.get('status'))
+        order = {
+            'approved': 0,
+            'refunded': 1,
+            'in_process': 2,
+            'mp_pending': 2,
+            'rejected': 3,
+        }.get(status_value, 4)
+        payment_id = str(item.get('id') or '').strip()
+        try:
+            payment_rank = -int(payment_id)
+        except Exception:
+            payment_rank = 0
+        return (order, payment_rank)
+
+    return sorted(items, key=_priority)[0]
+
+
 
 def _is_mercadopago_payment_method(value: Any) -> bool:
     raw = str(value or '').strip().lower()
@@ -10412,18 +10436,9 @@ async def _resolve_mercadopago_payment_for_order(order_data: Optional[Dict[str, 
     if not isinstance(results, list) or not results:
         return {'ok': False, 'reason': 'payment_not_found'}
 
-    def _priority(item: Dict[str, Any]) -> tuple:
-        status_value = _normalize_mp_payment_status(item.get('status'))
-        order = {
-            'approved': 0,
-            'refunded': 1,
-            'in_process': 2,
-            'mp_pending': 2,
-            'rejected': 3,
-        }.get(status_value, 4)
-        return (order, -int(item.get('id') or 0) if str(item.get('id') or '').isdigit() else 0)
-
-    best = sorted([item for item in results if isinstance(item, dict)], key=_priority)[0]
+    best = _select_mercadopago_payment_candidate(results)
+    if not best:
+        return {'ok': False, 'reason': 'payment_not_found'}
     return _build_result(best)
 
 
@@ -10580,17 +10595,9 @@ async def _sync_mercadopago_payment(
     payment_reference = str(payment_id or '').strip() or None
     mp_payload: Optional[Dict[str, Any]] = None
 
-    # Security: by default, require payment_id so the backend can verify the
-    # payment against Mercado Pago before updating order status.
-    if not payment_id and not allow_unverified:
-        return {
-            'ok': True,
-            'updated': False,
-            'reason': 'missing_payment_id',
-            'payment_status': _normalize_mp_payment_status(resolved_status),
-        }
-
     # Prefer authoritative payment details from MP when payment_id is available.
+    # If the return/webhook arrives without payment_id, we can still verify using
+    # the order's external_reference instead of trusting a raw status string.
     if payment_id and access_token:
         try:
             timeout = httpx.Timeout(20.0, connect=8.0)
@@ -10621,6 +10628,60 @@ async def _sync_mercadopago_payment(
                 )
         except Exception:
             logger.exception('Could not fetch Mercado Pago payment details for payment_id=%s', payment_id)
+
+    if access_token and not mp_payload and resolved_order_id:
+        try:
+            timeout = httpx.Timeout(20.0, connect=8.0)
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(
+                    'https://api.mercadopago.com/v1/payments/search',
+                    headers={'Authorization': f'Bearer {access_token}'},
+                    params={
+                        'external_reference': resolved_order_id,
+                        'sort': 'date_created',
+                        'criteria': 'desc',
+                        'limit': 5,
+                    },
+                )
+            if resp.status_code < 400:
+                search_payload = resp.json() or {}
+                results = search_payload.get('results') if isinstance(search_payload, dict) else []
+                best = _select_mercadopago_payment_candidate(results)
+                if best:
+                    mp_payload = best
+                    resolved_status = str(best.get('status') or resolved_status or '').strip().lower()
+                    mp_ext = str(best.get('external_reference') or '').strip()
+                    if mp_ext:
+                        resolved_order_id = mp_ext
+                    try:
+                        md = best.get('metadata') if isinstance(best, dict) else None
+                        if not resolved_order_id and isinstance(md, dict):
+                            resolved_order_id = str(md.get('order_id') or '').strip()
+                    except Exception:
+                        pass
+                    pid = str(best.get('id') or payment_id or '').strip()
+                    payment_reference = pid or payment_reference
+            else:
+                logger.warning(
+                    'Mercado Pago payment search lookup failed status=%s body=%s external_reference=%s',
+                    resp.status_code,
+                    (resp.text or '')[:500],
+                    resolved_order_id,
+                )
+        except Exception:
+            logger.exception(
+                'Could not search Mercado Pago payment details for external_reference=%s',
+                resolved_order_id,
+            )
+
+    if not payment_id and not mp_payload and not allow_unverified:
+        return {
+            'ok': True,
+            'updated': False,
+            'reason': 'missing_payment_id',
+            'payment_status': _normalize_mp_payment_status(resolved_status),
+            'order_id': resolved_order_id or None,
+        }
 
     if not resolved_order_id:
         return {
@@ -10754,10 +10815,15 @@ async def mercadopago_sync(request: Request):
     except Exception:
         body = {}
 
+    payment_reference = str(body.get('payment_reference') or '').strip() or None
     payment_id = str(body.get('payment_id') or body.get('id') or '').strip() or None
+    if not payment_id and payment_reference and payment_reference.isdigit():
+        payment_id = payment_reference
     external_reference = str(body.get('external_reference') or body.get('order_id') or '').strip() or None
     status = str(body.get('status') or body.get('collection_status') or '').strip() or None
     metadata = body.get('metadata') if isinstance(body.get('metadata'), dict) else {}
+    if payment_reference and 'payment_reference' not in metadata:
+        metadata['payment_reference'] = payment_reference
 
     result = await _sync_mercadopago_payment(
         payment_id=payment_id,
@@ -10841,6 +10907,26 @@ async def create_mercadopago_preference(request: Request, payload: schemas.Merca
         except Exception:
             return False
 
+    def _attach_mp_return_state(url_value: Any, payment_state: str) -> Optional[str]:
+        raw_url = str(url_value or '').strip()
+        if not _is_http_url(raw_url):
+            return None
+        try:
+            from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+            parts = urlsplit(raw_url)
+            query_pairs = parse_qsl(parts.query, keep_blank_values=True)
+            query = dict(query_pairs)
+            if payment_state and not str(query.get('payment') or '').strip():
+                query['payment'] = str(payment_state)
+            if not str(query.get('order_id') or '').strip():
+                query['order_id'] = str(payload.order_id)
+            if not str(query.get('external_reference') or '').strip():
+                query['external_reference'] = str(payload.external_reference or payload.order_id)
+            return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+        except Exception:
+            return raw_url
+
     # 1) Explicit env URLs (highest priority in production)
     back_urls: Dict[str, str] = {}
     env_back_urls = {
@@ -10882,6 +10968,10 @@ async def create_mercadopago_preference(request: Request, payload: schemas.Merca
             back_urls['success'] = back_urls.get('success') or f"{origin}{return_path}?payment=success"
             back_urls['failure'] = back_urls.get('failure') or f"{origin}{return_path}?payment=failure"
             back_urls['pending'] = back_urls.get('pending') or f"{origin}{return_path}?payment=pending"
+
+    for key in ('success', 'failure', 'pending'):
+        state_value = 'success' if key == 'success' else ('failure' if key == 'failure' else 'pending')
+        back_urls[key] = _attach_mp_return_state(back_urls.get(key), state_value) or back_urls.get(key)
 
     if back_urls:
         mp_payload['back_urls'] = back_urls
