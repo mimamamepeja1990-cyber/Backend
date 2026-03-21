@@ -14765,7 +14765,7 @@ async def cancel_customer_order(
     current_status = _normalize_order_status(order_payload.get('status'))
     if current_status == 'cancelado':
         raise HTTPException(status_code=409, detail='El pedido ya esta cancelado')
-    if current_status not in ('recibido', 'visto'):
+    if current_status not in ('recibido', 'visto', 'preparado'):
         raise HTTPException(status_code=409, detail='Este pedido ya no se puede cancelar desde Mi cuenta')
 
     cancel_reason = str(getattr(payload, 'reason', '') if payload is not None else '').strip()
