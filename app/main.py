@@ -876,6 +876,109 @@ def _serialize_products(items: Any) -> List[Dict[str, Any]]:
         return out
 
 
+def _load_products_serialized(
+    db: Session,
+    skip: int = 0,
+    limit: int = 100,
+    q: Optional[str] = None,
+    category: Optional[str] = None,
+    active: Optional[bool] = None,
+    sort: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    limit_max = int(os.environ.get('PRODUCTS_LIST_LIMIT_MAX') or 5000)
+    limit = max(1, min(int(limit or 100), limit_max))
+    skip = max(0, int(skip or 0))
+    cache_key = _products_cache_key(skip, limit, q, category, active, sort)
+    cached = _cache_get(PRODUCTS_CACHE, cache_key, PRODUCTS_CACHE_TTL)
+    if cached is not None:
+        return cached
+    try:
+        items = crud.get_products(db, skip, limit, q, category, active, sort)
+        serialized = _serialize_products(items)
+        if limit <= PRODUCTS_CACHE_LIMIT_MAX:
+            _cache_set(PRODUCTS_CACHE, cache_key, serialized, PRODUCTS_CACHE_MAX)
+        return serialized
+    except Exception:
+        logger.exception('load_products_serialized ORM failed, attempting raw fallback')
+        try:
+            try:
+                bind = db.get_bind()
+                insp = inspect(bind)
+                existing = {c['name'] for c in insp.get_columns('products')}
+            except Exception:
+                existing = set()
+            cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
+            if 'code' in existing: cols.append('code')
+            if 'brand' in existing: cols.append('brand')
+            if 'price_retail' in existing: cols.append('price_retail')
+            if 'cost' in existing: cols.append('cost')
+            if 'stock' in existing: cols.append('stock')
+            if 'min_stock' in existing: cols.append('min_stock')
+            if 'stock_kg' in existing: cols.append('stock_kg')
+            if 'kg_per_unit' in existing: cols.append('kg_per_unit')
+            if 'discount' in existing: cols.append('discount')
+            if 'sale_unit' in existing: cols.append('sale_unit')
+            where = []
+            params = {'skip': skip, 'limit': limit}
+            if q:
+                match_parts = ["LOWER(COALESCE(name, '')) LIKE :q", "LOWER(COALESCE(description, '')) LIKE :q"]
+                if 'code' in existing:
+                    match_parts.append("LOWER(COALESCE(code, '')) LIKE :q")
+                where.append('(' + ' OR '.join(match_parts) + ')')
+                params['q'] = f"%{q.lower()}%"
+            if category:
+                where.append('category = :category')
+                params['category'] = category
+            if active is not None and 'active' in existing:
+                where.append('active = :active')
+                params['active'] = bool(active)
+            where_clause = (' WHERE ' + ' AND '.join(where)) if where else ''
+            order_clause = ''
+            if sort == 'price_asc': order_clause = ' ORDER BY price ASC'
+            elif sort == 'price_desc': order_clause = ' ORDER BY price DESC'
+            elif sort == 'name_asc': order_clause = ' ORDER BY name ASC'
+            elif sort == 'name_desc': order_clause = ' ORDER BY name DESC'
+            cols_sql = ', '.join(cols)
+            sql = f"SELECT {cols_sql} FROM products{where_clause}{order_clause} LIMIT :limit OFFSET :skip"
+            rows = crud._safe_execute_fetchall(db, sql, params)
+            result = []
+            for row in rows:
+                objd = {cols[i]: row[i] for i in range(len(cols))}
+                result.append(objd)
+            if limit <= PRODUCTS_CACHE_LIMIT_MAX:
+                _cache_set(PRODUCTS_CACHE, cache_key, result, PRODUCTS_CACHE_MAX)
+            return result
+        except Exception:
+            logger.exception('load_products_serialized raw fallback failed')
+            return []
+
+
+def _load_consumos_snapshot(db: Session) -> List[Dict[str, Any]]:
+    try:
+        items = []
+        try:
+            rec = db.query(models.Setting).filter(models.Setting.key == 'consumos').first()
+            if rec and rec.value:
+                try:
+                    items = json.loads(rec.value) or []
+                except Exception:
+                    items = []
+        except Exception:
+            items = []
+        if not items:
+            consumos_path = os.path.join(CATALOG_DIR, 'consumos.json')
+            if os.path.exists(consumos_path):
+                try:
+                    with open(consumos_path, 'r', encoding='utf-8') as f:
+                        items = json.load(f) or []
+                except Exception:
+                    items = []
+        return items if isinstance(items, list) else []
+    except Exception as e:
+        logger.exception('load_consumos_snapshot failed: %s', e)
+        return []
+
+
 def _invalidate_products_cache() -> None:
     PRODUCTS_CACHE.clear()
     PRODUCTS_COUNT_CACHE.clear()
@@ -6109,26 +6212,7 @@ def list_consumos(request: Request, db: Session = Depends(get_db)):
     Prefer DB-backed settings when available; fall back to consumos.json.
     """
     try:
-        items = []
-        # Prefer DB-backed setting if present
-        try:
-            rec = db.query(models.Setting).filter(models.Setting.key == 'consumos').first()
-            if rec and rec.value:
-                try:
-                    items = json.loads(rec.value) or []
-                except Exception:
-                    items = []
-        except Exception:
-            items = []
-        # Fallback to file if DB empty
-        if not items:
-            consumos_path = os.path.join(CATALOG_DIR, 'consumos.json')
-            if os.path.exists(consumos_path):
-                try:
-                    with open(consumos_path, 'r', encoding='utf-8') as f:
-                        items = json.load(f) or []
-                except Exception:
-                    items = []
+        items = _load_consumos_snapshot(db)
         headers = _cors_headers_for_request(request)
         return JSONResponse(status_code=200, content=items, headers=headers)
     except Exception as e:
@@ -8408,70 +8492,40 @@ def list_products(
     sort: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
-    limit_max = int(os.environ.get('PRODUCTS_LIST_LIMIT_MAX') or 5000)
-    limit = max(1, min(int(limit or 100), limit_max))
-    skip = max(0, int(skip or 0))
-    cache_key = _products_cache_key(skip, limit, q, category, active, sort)
-    cached = _cache_get(PRODUCTS_CACHE, cache_key, PRODUCTS_CACHE_TTL)
-    if cached is not None:
-        return cached
-    try:
-        items = crud.get_products(db, skip, limit, q, category, active, sort)
-        serialized = _serialize_products(items)
-        if limit <= PRODUCTS_CACHE_LIMIT_MAX:
-            _cache_set(PRODUCTS_CACHE, cache_key, serialized, PRODUCTS_CACHE_MAX)
-        return serialized
-    except Exception:
-        logger.exception('list_products ORM failed, attempting raw fallback')
-        # Try raw fallback select to avoid failing when DB lacks mapped columns
-        try:
-            try:
-                bind = db.get_bind()
-                insp = inspect(bind)
-                existing = {c['name'] for c in insp.get_columns('products')}
-            except Exception:
-                existing = set()
-            cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
-            if 'code' in existing: cols.append('code')
-            if 'brand' in existing: cols.append('brand')
-            if 'price_retail' in existing: cols.append('price_retail')
-            if 'cost' in existing: cols.append('cost')
-            if 'stock' in existing: cols.append('stock')
-            if 'min_stock' in existing: cols.append('min_stock')
-            if 'stock_kg' in existing: cols.append('stock_kg')
-            if 'kg_per_unit' in existing: cols.append('kg_per_unit')
-            if 'discount' in existing: cols.append('discount')
-            if 'sale_unit' in existing: cols.append('sale_unit')
-            where = []
-            params = {'skip': skip, 'limit': limit}
-            if q:
-                match_parts = ["LOWER(COALESCE(name, '')) LIKE :q", "LOWER(COALESCE(description, '')) LIKE :q"]
-                if 'code' in existing:
-                    match_parts.append("LOWER(COALESCE(code, '')) LIKE :q")
-                where.append('(' + ' OR '.join(match_parts) + ')'); params['q'] = f"%{q.lower()}%"
-            if category:
-                where.append('category = :category'); params['category'] = category
-            if active is not None and 'active' in existing:
-                where.append('active = :active'); params['active'] = bool(active)
-            where_clause = (' WHERE ' + ' AND '.join(where)) if where else ''
-            order_clause = ''
-            if sort == 'price_asc': order_clause = ' ORDER BY price ASC'
-            elif sort == 'price_desc': order_clause = ' ORDER BY price DESC'
-            elif sort == 'name_asc': order_clause = ' ORDER BY name ASC'
-            elif sort == 'name_desc': order_clause = ' ORDER BY name DESC'
-            cols_sql = ', '.join(cols)
-            sql = f"SELECT {cols_sql} FROM products{where_clause}{order_clause} LIMIT :limit OFFSET :skip"
-            rows = crud._safe_execute_fetchall(db, sql, params)
-            result = []
-            for row in rows:
-                objd = {cols[i]: row[i] for i in range(len(cols))}
-                result.append(objd)
-            if limit <= PRODUCTS_CACHE_LIMIT_MAX:
-                _cache_set(PRODUCTS_CACHE, cache_key, result, PRODUCTS_CACHE_MAX)
-            return result
-        except Exception:
-            logger.exception('list_products raw fallback failed')
-            return []
+    return _load_products_serialized(
+        db,
+        skip=skip,
+        limit=limit,
+        q=q,
+        category=category,
+        active=active,
+        sort=sort,
+    )
+
+
+@app.get("/init")
+def catalog_init(
+    skip: int = 0,
+    limit: int = 100,
+    q: Optional[str] = None,
+    category: Optional[str] = None,
+    active: Optional[bool] = None,
+    sort: Optional[str] = None,
+    db: Session = Depends(get_db),
+):
+    return {
+        'products': _load_products_serialized(
+            db,
+            skip=skip,
+            limit=limit,
+            q=q,
+            category=category,
+            active=active,
+            sort=sort,
+        ),
+        'promotions': _get_promotions_cached(),
+        'consumos': _load_consumos_snapshot(db),
+    }
 
 @app.get("/products/paged", response_model=schemas.PagedProductsResponse)
 def list_products_paged(
