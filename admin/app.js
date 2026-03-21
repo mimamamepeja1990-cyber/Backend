@@ -6340,6 +6340,117 @@ async function verifyServerHasOrder(id, attempts = 6, interval = 2000){
   }catch(e){ console.error('verifyServerHasOrder unexpected error', e); return false; }
 }
 
+async function openAdminOrderDetailById(idRaw){
+  const id = String(idRaw || '').trim();
+  if (!id) return;
+  try{
+    const existing = (lastOrdersBaseWeb || []).find((x) => String(x && x.id) === id)
+      || (lastPreparationsBase || []).find((x) => String(x && x.id) === id);
+    if (existing && Array.isArray(existing.items)) {
+      showOrderDetail(existing);
+      return;
+    }
+  }catch(_){ }
+  try{
+    const list = await fetchOrders(String(id));
+    const order = (list || []).find((x) => String(x.id) === id) || (list && list[0]);
+    if (order) showOrderDetail(order);
+  }catch(_){ }
+}
+
+async function handleOrdersTableActionClick(button){
+  const btn = button && button.closest ? button.closest('.viewOrderBtn, .markSeenBtn, .markPreparedBtn') : null;
+  if (!btn) return;
+
+  const id = btn && btn.dataset ? String(btn.dataset.id || '').trim() : '';
+  if (!id) return;
+
+  if (btn.classList.contains('viewOrderBtn')){
+    await openAdminOrderDetailById(id);
+    return;
+  }
+
+  let row = null;
+  try{ row = (btn && btn.closest) ? btn.closest('tr') : null; }catch(_){ }
+  if (!row) try{ row = findOrderRowById(id); }catch(_){ }
+
+  const currentStatus = normalizeOrderStatus((row && row.dataset ? row.dataset.status : '') || '');
+  const isMarkSeen = btn.classList.contains('markSeenBtn');
+  const targetStatus = isMarkSeen ? 'visto' : 'preparado';
+
+  if (isMarkSeen && orderStatusRank(currentStatus) >= orderStatusRank('visto')){
+    showToast('Este pedido ya está marcado (estado: ' + formatOrderStatusLabel(currentStatus) + ')');
+    return;
+  }
+  if (!isMarkSeen && orderStatusRank(currentStatus) >= orderStatusRank('preparado')){
+    showToast('Este pedido ya está marcado (estado: ' + formatOrderStatusLabel(currentStatus) + ')');
+    return;
+  }
+  if (!isMarkSeen && orderStatusRank(currentStatus) < orderStatusRank('visto')){
+    showToast('Primero marcá el pedido como visto.');
+    return;
+  }
+
+  const oldBtnText = btn && btn.textContent ? btn.textContent : '';
+  try{
+    if (btn){
+      btn.textContent = isMarkSeen ? 'Marcando...' : 'Guardando...';
+      btn.classList.add('updating');
+    }
+    if (row) row.classList.add('updating');
+  }catch(_){ }
+  try{ if (btn) btn.disabled = true; }catch(_){ }
+
+  try{
+    const updated = await patchOrderStatus(id, targetStatus);
+    try{
+      if (row && row.dataset){
+        row.dataset.status = normalizeOrderStatus(updated && updated.status);
+      }
+    }catch(_){ }
+    if (document.getElementById('orderModal') && document.getElementById('orderModal').classList.contains('hidden') === false){
+      try{ showOrderDetail(updated); }catch(_){ }
+    }
+    try{
+      if (isPreparationsSectionActive()) renderPreparations(lastPreparationsBase);
+    }catch(_){ }
+    try{ scheduleOperationsRefresh(isMarkSeen ? 'order:mark_seen' : 'order:mark_prepared', 120); }catch(_){ }
+    if (String((updated && updated.status) || targetStatus).toLowerCase() === targetStatus){
+      showToast(isMarkSeen ? 'Pedido marcado como visto y movido a Preparaciones' : 'Pedido marcado como preparado');
+    } else {
+      showToast('Pedido actualizado');
+    }
+  }catch(e){
+    console.error(isMarkSeen ? 'mark seen failed' : 'mark prepared failed', e);
+    try{ if (btn) btn.textContent = oldBtnText; }catch(_){ }
+    const msg = (e && e.status === 409 && e.payload && e.payload.current)
+      ? ('No se puede volver atrás (actual: ' + formatOrderStatusLabel(e.payload.current) + ').')
+      : 'No se pudo actualizar estado';
+    showToast(msg, 'error');
+  } finally {
+    try{
+      if (btn) btn.classList.remove('updating');
+      if (row) row.classList.remove('updating');
+    }catch(_){ }
+    try{ if (btn) btn.disabled = false; }catch(_){ }
+  }
+}
+
+let ordersTableDelegationBound = false;
+function ensureOrdersTableDelegation(){
+  if (ordersTableDelegationBound) return;
+  const ordersTableBody = document.querySelector('#ordersTable_web tbody');
+  if (!ordersTableBody) return;
+  ordersTableBody.addEventListener('click', async (ev) => {
+    const target = ev && ev.target && ev.target.closest
+      ? ev.target.closest('.viewOrderBtn, .markSeenBtn, .markPreparedBtn')
+      : null;
+    if (!target || !ordersTableBody.contains(target)) return;
+    await handleOrdersTableActionClick(target);
+  });
+  ordersTableDelegationBound = true;
+}
+
 function safeParseItems(items){
   if(!items) return [];
   if(Array.isArray(items)) return items;
@@ -6654,6 +6765,7 @@ function renderOrders(list, source, dateFilter){
   const tableId = `ordersTable_${source}`;
   const ordersTableBody = document.querySelector(`#${tableId} tbody`);
   if(!ordersTableBody) return;
+  ensureOrdersTableDelegation();
   try{ console.debug('[admin] renderOrders called (rebuild)', { count: Array.isArray(list)?list.length:0, source }); }catch(_){ }
   ordersTableBody.innerHTML = '';
   if(!list || list.length === 0){
@@ -6677,6 +6789,7 @@ function renderOrders(list, source, dateFilter){
   // Agrupar por día y deduplicar por id (siempre mostrar solo una vez por tabla)
   const groups = new Map();
   const seenIds = new Set();
+  const renderFragment = document.createDocumentFragment();
   for(const o of (list || [])){
     try{
       const id = String(o.id);
@@ -6702,7 +6815,7 @@ function renderOrders(list, source, dateFilter){
       const dayText = isNaN(lab.getTime()) ? 'Sin fecha' : lab.toLocaleDateString('es-ES', { year: 'numeric', month: 'long', day: 'numeric' });
       hdrLabel.innerHTML = `<div class="day-label">${escapeHtml(dayText)} <span class="badge-pill">${items.length}</span></div>`;
       hdr.appendChild(hdrLabel);
-      ordersTableBody.appendChild(hdr);
+      renderFragment.appendChild(hdr);
     }catch(_){ }
 
     // sort items newest first within day
@@ -6715,12 +6828,13 @@ function renderOrders(list, source, dateFilter){
           tr.setAttribute('data-source', String(o.source || source));
           tr.setAttribute('data-customer-type', normalizeOrderCustomerType(o && o.customer_type));
         }
-        ordersTableBody.appendChild(tr);
+        renderFragment.appendChild(tr);
       }catch(_){ }
     }
   }
 
   // Restaurar solo filas locales cuyo source sea exactamente el de la pestaña
+  ordersTableBody.replaceChildren(renderFragment);
   try{
     window.__localOrderRows = window.__localOrderRows || {};
     for(const lid of Object.keys(window.__localOrderRows)){
@@ -6744,6 +6858,7 @@ function renderOrders(list, source, dateFilter){
   }catch(_){ }
 
   updateBadgeCount(source);
+  return;
 
   // wire buttons after rendering
   document.querySelectorAll('.viewOrderBtn').forEach(el => el.onclick = async (ev) => { const id = ev.target.dataset.id; const list = await fetchOrders(String(id)); const order = (list || []).find(x => String(x.id) === String(id)) || (list && list[0]); if(order) showOrderDetail(order); });
@@ -7578,8 +7693,75 @@ function syncPreparationsSnapshot(list){
   }
 }
 
+async function openPreparationOrderDetailById(idRaw){
+  const id = String(idRaw || '').trim();
+  if (!id) return;
+  try{
+    const existing = (lastPreparationsBase || []).find((entry) => String(entry && entry.id) === id);
+    if (existing){
+      showOrderDetail(existing);
+      return;
+    }
+  }catch(_){ }
+  await openAdminOrderDetailById(id);
+}
+
+async function handlePreparationActionClick(button){
+  const btn = button && button.closest ? button.closest('.prepViewOrderBtn, .prepOpenFullOrderBtn, .prepMarkPreparedBtn') : null;
+  if (!btn) return;
+
+  const id = btn && btn.dataset ? String(btn.dataset.id || '').trim() : '';
+  if (!id) return;
+
+  if (!btn.classList.contains('prepMarkPreparedBtn')){
+    await openPreparationOrderDetailById(id);
+    return;
+  }
+
+  try{
+    btn.disabled = true;
+    btn.textContent = 'Guardando...';
+    const updated = await patchOrderStatus(id, 'preparado');
+    const uid = String((updated && updated.id) || id);
+    try{
+      const modal = document.getElementById('orderModal');
+      if (modal && !modal.classList.contains('hidden')){
+        const title = document.getElementById('orderModalTitle');
+        if (title && String(title.textContent || '').includes('#' + uid)){
+          const existing = (lastPreparationsBase || []).find((entry) => String(entry && entry.id) === uid) || {};
+          showOrderDetail(Object.assign({}, existing, updated));
+        }
+      }
+    }catch(_){ }
+    try{ scheduleOperationsRefresh('order:prep_list_mark_prepared', 120); }catch(_){ }
+    renderPreparations(lastPreparationsBase);
+    showToast('Pedido marcado como preparado');
+  }catch(e){
+    console.error('prepMarkPrepared failed', e);
+    showToast('No se pudo marcar como preparado', 'error');
+    try{
+      btn.disabled = false;
+      btn.textContent = 'Marcar preparado';
+    }catch(_){ }
+  }
+}
+
+let preparationsDelegationBound = false;
+function ensurePreparationsDelegation(){
+  if (preparationsDelegationBound || !preparationsList) return;
+  preparationsList.addEventListener('click', async (ev) => {
+    const target = ev && ev.target && ev.target.closest
+      ? ev.target.closest('.prepViewOrderBtn, .prepOpenFullOrderBtn, .prepMarkPreparedBtn')
+      : null;
+    if (!target || !preparationsList.contains(target)) return;
+    await handlePreparationActionClick(target);
+  });
+  preparationsDelegationBound = true;
+}
+
 function renderPreparations(list){
   if (!preparationsList) return;
+  ensurePreparationsDelegation();
   const rows = Array.isArray(list) ? list.slice() : [];
   const q = preparationsSearch && preparationsSearch.value ? preparationsSearch.value.trim().toLowerCase() : '';
   const dateFilter = normalizeIsoDateKey(preparationsDate && preparationsDate.value ? preparationsDate.value : '');
@@ -7607,7 +7789,8 @@ function renderPreparations(list){
   summary.className = 'preparations-summary';
   const validDateGroups = new Set(filtered.map((entry) => entry.scheduleDateKey)).size;
   summary.textContent = String(filtered.length) + ' pedidos agrupados en ' + String(validDateGroups) + ' día(s) de salida';
-  preparationsList.appendChild(summary);
+  const renderFragment = document.createDocumentFragment();
+  renderFragment.appendChild(summary);
 
   const groups = new Map();
   filtered.forEach((entry) => {
@@ -7684,8 +7867,10 @@ function renderPreparations(list){
       cards.appendChild(card);
     });
     dayBlock.appendChild(cards);
-    preparationsList.appendChild(dayBlock);
+    renderFragment.appendChild(dayBlock);
   });
+  preparationsList.replaceChildren(renderFragment);
+  return;
 
   const openPreparationOrderDetail = async (idRaw) => {
     const id = String(idRaw || '').trim();

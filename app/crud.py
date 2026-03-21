@@ -2,7 +2,7 @@ from app import models, schemas
 from sqlalchemy.orm import Session
 from fastapi import HTTPException
 import os
-from typing import Optional, List
+from typing import Optional, List, Dict, Set, Tuple
 from sqlalchemy import func, or_
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
@@ -14,8 +14,33 @@ import datetime
 import os
 import re
 import uuid
+import time
 from sqlalchemy.exc import InternalError
 from zoneinfo import ZoneInfo
+
+
+_TABLE_COLUMNS_CACHE: Dict[str, Tuple[float, Set[str]]] = {}
+_TABLE_COLUMNS_CACHE_TTL = 60.0
+
+
+def _get_table_columns(db: Session, table_name: str) -> Set[str]:
+    cache_key = str(table_name or '').strip().lower()
+    now_ts = time.time()
+    cached = _TABLE_COLUMNS_CACHE.get(cache_key)
+    if cached:
+        cached_ts, cached_cols = cached
+        if (now_ts - float(cached_ts or 0.0)) <= _TABLE_COLUMNS_CACHE_TTL and isinstance(cached_cols, set):
+            return set(cached_cols)
+    try:
+        bind = db.get_bind()
+        insp = inspect(bind)
+        existing = {c['name'] for c in insp.get_columns(table_name)}
+        _TABLE_COLUMNS_CACHE[cache_key] = (now_ts, set(existing))
+        return existing
+    except Exception:
+        if cached and isinstance(cached[1], set):
+            return set(cached[1])
+        return set()
 
 
 def _normalize_cutoff_hour(raw_value, default_value=18):
@@ -2724,17 +2749,13 @@ def get_orders(
     date: Optional[str] = None,
     assigned_driver_id: Optional[int] = None,
     assigned_driver_username: Optional[str] = None,
+    status_values: Optional[List[str]] = None,
 ):
     """Return recent orders using a safe raw SELECT that only requests
     columns present in the `orders` table. This avoids ProgrammingError
     when the live DB schema lacks newly added columns.
     """
-    try:
-        bind = db.get_bind()
-        insp = inspect(bind)
-        existing = {c['name'] for c in insp.get_columns('orders')}
-    except Exception:
-        existing = set()
+    existing = _get_table_columns(db, 'orders')
 
     cols = ['id', 'items', 'total', 'status', 'created_at']
     optional = [
@@ -2780,6 +2801,19 @@ def get_orders(
             # Supports YYYY-MM-DD date filtering on both sqlite and postgres.
             where.append('DATE(created_at) = :date')
             params['date'] = date_value
+
+        normalized_statuses: List[str] = []
+        for raw_status in (status_values or []):
+            status_key = str(raw_status or '').strip().lower()
+            if status_key:
+                normalized_statuses.append(status_key)
+        if normalized_statuses and 'status' in existing:
+            status_placeholders = []
+            for idx, status_key in enumerate(normalized_statuses):
+                param_name = f'status_{idx}'
+                params[param_name] = status_key
+                status_placeholders.append(f':{param_name}')
+            where.append("LOWER(COALESCE(status, 'recibido')) IN (" + ', '.join(status_placeholders) + ")")
 
         q_raw = str(q or '').strip()
         if q_raw:

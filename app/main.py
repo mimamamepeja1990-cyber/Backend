@@ -788,6 +788,8 @@ ORDER_PAYLOAD_CACHE_MAX_AGE = 60 * 60 * 2  # keep for 2 hours
 # Used as a fallback if DB status column is missing or update fails.
 ORDER_STATUS_CACHE = {}
 ORDER_STATUS_CACHE_MAX_AGE = 60 * 60 * 24  # keep for 24 hours
+ORDER_PRODUCT_PRICE_MAP_CACHE: Dict[str, Any] = {'ts': 0.0, 'data': {}}
+ORDER_PRODUCT_PRICE_MAP_CACHE_TTL = float(os.environ.get('ORDER_PRODUCT_PRICE_MAP_CACHE_TTL') or 30.0)
 
 # Catalog endpoint caches (short TTL to reduce load during bursts)
 PRODUCTS_CACHE: Dict[Any, Dict[str, Any]] = {}
@@ -1034,6 +1036,89 @@ def _prune_status_cache():
                 pass
     except Exception:
         pass
+
+
+def _load_order_product_price_map(db: Session) -> Dict[str, Dict[str, Optional[float]]]:
+    now_ts = time.time()
+    try:
+        cache_age = now_ts - float(ORDER_PRODUCT_PRICE_MAP_CACHE.get('ts') or 0.0)
+        cached_map = ORDER_PRODUCT_PRICE_MAP_CACHE.get('data')
+        if isinstance(cached_map, dict) and cached_map and cache_age <= ORDER_PRODUCT_PRICE_MAP_CACHE_TTL:
+            return cached_map
+    except Exception:
+        pass
+
+    product_price_map: Dict[str, Dict[str, Optional[float]]] = {}
+    try:
+        product_rows = db.query(models.Product.id, models.Product.price, models.Product.price_retail).all()
+        for pr in (product_rows or []):
+            try:
+                pid = str(getattr(pr, 'id', '')).strip()
+                if not pid:
+                    continue
+                wholesale = float(getattr(pr, 'price', 0) or 0)
+                retail_raw = getattr(pr, 'price_retail', None)
+                retail = None if retail_raw is None else float(retail_raw)
+                product_price_map[pid] = {'wholesale': wholesale, 'retail': retail}
+            except Exception:
+                continue
+    except Exception:
+        product_price_map = {}
+
+    try:
+        ORDER_PRODUCT_PRICE_MAP_CACHE['ts'] = now_ts
+        ORDER_PRODUCT_PRICE_MAP_CACHE['data'] = product_price_map
+    except Exception:
+        pass
+    return product_price_map
+
+
+def _load_order_token_previews_batch(order_ids: List[Any]) -> Dict[str, Dict[str, Any]]:
+    ordered_ids: List[str] = []
+    seen_ids: set = set()
+    for raw_id in (order_ids or []):
+        oid = str(raw_id or '').strip()
+        if not oid or oid in seen_ids:
+            continue
+        seen_ids.add(oid)
+        ordered_ids.append(oid)
+    if not ordered_ids:
+        return {}
+
+    params: Dict[str, Any] = {}
+    placeholders: List[str] = []
+    for idx, oid in enumerate(ordered_ids):
+        key = f'oid_{idx}'
+        params[key] = oid
+        placeholders.append(f':{key}')
+
+    try:
+        rows = _safe_engine_fetchall(
+            'SELECT order_id, token_preview, token_received, created_at '
+            f"FROM order_token_previews WHERE order_id IN ({', '.join(placeholders)}) "
+            'ORDER BY created_at DESC'
+        ) or []
+    except Exception:
+        return {}
+
+    preview_map: Dict[str, Dict[str, Any]] = {}
+    for row in (rows or []):
+        try:
+            oid = str(row[0] or '').strip()
+            if not oid or oid in preview_map:
+                continue
+            tp_raw = row[1]
+            try:
+                token_preview = json.loads(tp_raw) if isinstance(tp_raw, str) and tp_raw else (tp_raw if isinstance(tp_raw, dict) else {})
+            except Exception:
+                token_preview = {}
+            preview_map[oid] = {
+                'token_preview': token_preview if isinstance(token_preview, dict) else {},
+                'token_received': bool(row[2]),
+            }
+        except Exception:
+            continue
+    return preview_map
 
 
 # --- Orders: lifecycle normalization + auto milestones ---
@@ -11982,7 +12067,7 @@ async def backup_orders(request: Request):
     return {'saved': len([r for r in results if r.get('ok')]), 'results': results}
 
 
-@app.get('/orders', response_model=List[schemas.OrderResponse])
+@app.get('/orders')
 def list_orders(
     skip: int = 0,
     limit: Optional[int] = None,
@@ -11992,6 +12077,7 @@ def list_orders(
     db: Session = Depends(get_db),
     assigned_driver_id: Optional[int] = None,
     assigned_driver_username: Optional[str] = None,
+    status_values: Optional[List[str]] = None,
 ):
     # Fetch recent orders (safe select in CRUD). Then merge any cached pushed payloads
     # (which may contain token preview) to surface user info when DB lacks columns.
@@ -12004,6 +12090,7 @@ def list_orders(
         date=date,
         assigned_driver_id=assigned_driver_id,
         assigned_driver_username=assigned_driver_username,
+        status_values=status_values,
     )
     try:
         _prune_order_cache()
@@ -12024,22 +12111,7 @@ def list_orders(
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     status_updates: List[Tuple[int, str]] = []
 
-    product_price_map = {}
-    try:
-        product_rows = db.query(models.Product.id, models.Product.price, models.Product.price_retail).all()
-        for pr in (product_rows or []):
-            try:
-                pid = str(getattr(pr, 'id', '')).strip()
-                if not pid:
-                    continue
-                wholesale = float(getattr(pr, 'price', 0) or 0)
-                retail_raw = getattr(pr, 'price_retail', None)
-                retail = None if retail_raw is None else float(retail_raw)
-                product_price_map[pid] = {'wholesale': wholesale, 'retail': retail}
-            except Exception:
-                continue
-    except Exception:
-        product_price_map = {}
+    product_price_map = _load_order_product_price_map(db)
 
     def _infer_customer_type_from_items(items_value):
         try:
@@ -12103,6 +12175,48 @@ def list_orders(
         except Exception:
             pass
         return ''
+
+    def _merge_token_preview_record(od: Dict[str, Any], preview_record: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        try:
+            tp = preview_record.get('token_preview') if isinstance(preview_record, dict) else {}
+            if not isinstance(tp, dict) or not tp:
+                return None
+            tp_addr = tp.get('address') if isinstance(tp.get('address'), dict) else {}
+            if not od.get('user_full_name') and tp.get('name'):
+                od['user_full_name'] = tp.get('name')
+            if not od.get('user_email') and tp.get('email'):
+                od['user_email'] = tp.get('email')
+            if not od.get('user_postal_code'):
+                od['user_postal_code'] = (
+                    tp.get('postal_code') or tp.get('user_postal_code') or
+                    tp_addr.get('postal_code') or tp_addr.get('postcode')
+                )
+            if not od.get('user_department'):
+                od['user_department'] = tp.get('department') or tp.get('user_department') or tp_addr.get('department')
+            od['_token_preview'] = tp
+            od['_token_received'] = bool(preview_record.get('token_received'))
+            return tp
+        except Exception:
+            return None
+
+    token_preview_rows: Dict[str, Dict[str, Any]] = {}
+    try:
+        preview_ids: List[Any] = []
+        needs_assigned_preview = assigned_driver_id is not None or bool(assigned_driver_username)
+        for r in (rows or []):
+            oid = (r.get('id') if isinstance(r, dict) else getattr(r, 'id', None))
+            if oid is None:
+                continue
+            user_name = r.get('user_full_name') if isinstance(r, dict) else getattr(r, 'user_full_name', None)
+            user_email = r.get('user_email') if isinstance(r, dict) else getattr(r, 'user_email', None)
+            token_preview_raw = r.get('_token_preview') if isinstance(r, dict) else getattr(r, '_token_preview', None)
+            needs_contact_preview = not user_name and not user_email
+            needs_driver_preview = needs_assigned_preview and not isinstance(token_preview_raw, dict)
+            if needs_contact_preview or needs_driver_preview:
+                preview_ids.append(oid)
+        token_preview_rows = _load_order_token_previews_batch(preview_ids)
+    except Exception:
+        token_preview_rows = {}
 
     cached_any = 0
     for r in (rows or []):
@@ -12207,41 +12321,15 @@ def list_orders(
                 except Exception:
                     pass
 
-                # If still missing user info try to read persisted token previews table
-                # (durable across restarts) and merge into the row.
                 if (not od.get('user_full_name') and not od.get('user_email')) and od.get('id'):
                     try:
-                        # order_id stored as text in order_token_previews to support debug ids
-                        row = _safe_engine_fetchone('SELECT token_preview, token_received FROM order_token_previews WHERE order_id = :id ORDER BY created_at DESC LIMIT 1', {'id': str(od.get('id'))})
-                        if row:
-                            try:
-                                tp_raw = row[0]
-                                tr_flag = row[1]
-                                if tp_raw:
-                                    try:
-                                        tp = json.loads(tp_raw) if isinstance(tp_raw, str) else tp_raw
-                                    except Exception:
-                                        tp = {}
-                                    if not od.get('user_full_name') and tp.get('name'):
-                                        od['user_full_name'] = tp.get('name')
-                                    if not od.get('user_email') and tp.get('email'):
-                                        od['user_email'] = tp.get('email')
-                                    tp_addr = tp.get('address') if isinstance(tp.get('address'), dict) else {}
-                                    if not od.get('user_postal_code'):
-                                        od['user_postal_code'] = (
-                                            tp.get('postal_code') or tp.get('user_postal_code') or
-                                            tp_addr.get('postal_code') or tp_addr.get('postcode')
-                                        )
-                                    if not od.get('user_department'):
-                                        od['user_department'] = tp.get('department') or tp.get('user_department') or tp_addr.get('department')
-                                    if not customer_type_value:
-                                        customer_type_value = _customer_type_from_preview(tp)
-                                    od['_token_preview'] = tp
-                                    od['_token_received'] = bool(tr_flag)
-                                    cached_used = True
-                                    cached_any += 1
-                            except Exception:
-                                pass
+                        preview_record = token_preview_rows.get(str(od.get('id')))
+                        merged_preview = _merge_token_preview_record(od, preview_record)
+                        if merged_preview:
+                            if not customer_type_value:
+                                customer_type_value = _customer_type_from_preview(merged_preview)
+                            cached_used = True
+                            cached_any += 1
                     except Exception:
                         pass
             od['customer_type'] = customer_type_value or 'mayorista'
@@ -12282,17 +12370,8 @@ def list_orders(
                 pass
             try:
                 if (assigned_driver_id is not None or assigned_driver_username) and not isinstance(od.get('_token_preview'), dict) and od.get('id'):
-                    row = _safe_engine_fetchone(
-                        'SELECT token_preview, token_received FROM order_token_previews WHERE order_id = :id ORDER BY created_at DESC LIMIT 1',
-                        {'id': str(od.get('id'))},
-                    )
-                    if row:
-                        tp_raw = row[0]
-                        tr_flag = row[1] if len(row) > 1 else False
-                        tp = json.loads(tp_raw) if isinstance(tp_raw, str) and tp_raw else (tp_raw if isinstance(tp_raw, dict) else {})
-                        if isinstance(tp, dict) and tp:
-                            od['_token_preview'] = tp
-                            od['_token_received'] = bool(tr_flag)
+                    preview_record = token_preview_rows.get(str(od.get('id')))
+                    _merge_token_preview_record(od, preview_record)
             except Exception:
                 pass
             try:
@@ -12335,7 +12414,7 @@ def list_orders(
     return out
 
 
-@app.get('/admin/orders', response_model=List[schemas.OrderResponse])
+@app.get('/admin/orders')
 def admin_list_orders(
     skip: int = 0,
     limit: Optional[int] = None,
@@ -12395,6 +12474,7 @@ def admin_list_orders(
             db=db,
             assigned_driver_id=admin_id,
             assigned_driver_username=admin_username,
+            status_values=status_values,
         )
         if status_values:
             orders = [o for o in (orders or []) if _normalize_order_status(o.get('status')) in status_values]
@@ -12423,6 +12503,7 @@ def admin_list_orders(
                     db=db,
                     assigned_driver_id=admin_id,
                     assigned_driver_username=admin_username,
+                    status_values=status_values,
                 )
                 if status_values:
                     orders = [o for o in (orders or []) if _normalize_order_status(o.get('status')) in status_values]
@@ -12430,7 +12511,7 @@ def admin_list_orders(
                 logger.exception('auto-assign for repartidor failed')
     else:
         # Reuse existing list_orders logic for admins/owners.
-        orders = list_orders(skip=skip, limit=limit, source=source, q=q, date=date, db=db)
+        orders = list_orders(skip=skip, limit=limit, source=source, q=q, date=date, db=db, status_values=status_values)
 
     if target_driver_id is not None or target_driver_username:
         orders = [
