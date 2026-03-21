@@ -6664,12 +6664,8 @@ function renderOrders(list, source, dateFilter){
   }
 
   // El panel de pedidos ahora es solo Web.
-  try{
-    list = (list || []).filter(o => {
-      const osrc = (o && typeof o.source !== 'undefined' && o.source !== null && String(o.source).trim() !== '') ? String(o.source) : 'web';
-      return String(osrc).toLowerCase() === 'web';
-    });
-  }catch(_){ }
+  // No ocultar pedidos por `source`: si entran clasificados distinto igual
+  // tienen que aparecer en el panel único de pedidos.
   try{
     const activeSearch = orderSearch_web && orderSearch_web.value ? String(orderSearch_web.value).trim() : '';
     const shouldFilterByType = !activeSearch;

@@ -11214,12 +11214,9 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
         if not src or not str(src).strip():
             ua = (request.headers.get('user-agent') or '').lower()
             # Detectar móvil por user-agent o headers
-            if ua and ( 'okhttp' in ua or 'android' in ua or 'dalvik' in ua or 'retrofit' in ua or 'okhttp/' in ua ):
+            if ua and ( 'okhttp' in ua or 'dalvik' in ua or 'retrofit' in ua or 'okhttp/' in ua ):
                 src = 'app'
             # También considerar si el referer o origin contiene 'app' (por si hay proxy)
-            ref = (request.headers.get('referer') or request.headers.get('origin') or '').lower()
-            if 'app' in ref:
-                src = 'app'
         # Si sigue sin source, default a web
         if not src or not str(src).strip():
             src = 'web'
@@ -11229,7 +11226,7 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
             src = 'web'
         # Forzar 'app' si user-agent es móvil aunque el cliente mande mal el campo
         ua = (request.headers.get('user-agent') or '').lower()
-        if ua and ( 'okhttp' in ua or 'android' in ua or 'dalvik' in ua or 'retrofit' in ua or 'okhttp/' in ua ):
+        if ua and ( 'okhttp' in ua or 'dalvik' in ua or 'retrofit' in ua or 'okhttp/' in ua ):
             src = 'app'
         try:
             setattr(payload, 'source', src)
