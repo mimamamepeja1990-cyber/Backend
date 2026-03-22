@@ -52,6 +52,7 @@ class AdminUser(Base):
     username = Column(String(80), nullable=False, unique=True, index=True)
     full_name = Column(String(200), nullable=True)
     role = Column(String(50), nullable=False, default='admin')
+    business_scope = Column(String(20), nullable=True, default='mayorista')
     zone = Column(String(120), nullable=True)
     hashed_password = Column(String(200), nullable=False)
     is_active = Column(Boolean, default=True)
@@ -72,6 +73,22 @@ class AdminDriverLocation(Base):
     heading = Column(Float, nullable=True)
     battery = Column(Float, nullable=True)
     recorded_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class AdminBranch(Base):
+    __tablename__ = "admin_branches"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(160), nullable=False)
+    business_scope = Column(String(20), nullable=False, default='mayorista', index=True)
+    street = Column(String(200), nullable=False)
+    street_number = Column(String(50), nullable=False)
+    address_line = Column(String(260), nullable=True)
+    lat = Column(Float, nullable=False)
+    lon = Column(Float, nullable=False)
+    is_active = Column(Boolean, default=True)
+    created_by = Column(String(80), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
 
 class Order(Base):

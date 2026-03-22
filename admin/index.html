@@ -24,13 +24,41 @@
 </head>
 <body class="auth-locked">  
   <div id="authOverlay" class="auth-overlay" aria-hidden="true">
-    <div class="auth-card">
+    <div id="authScopeStep" class="auth-card auth-step auth-step-scope">
       <div class="auth-brand">
         <svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M12 2l3 7h7l-6 5 3 8-7-4-7 4 3-8-6-5h7z" fill="#111827"/></svg>
         <span>Panel Admin</span>
       </div>
-      <h1>Ingresar</h1>
-      <p class="auth-sub">Acceso para administración</p>
+      <h1>Rubro de administraci&oacute;n</h1>
+      <p class="auth-sub">Eleg&iacute; primero qu&eacute; rubro vas a administrar.</p>
+      <div class="field auth-scope-field">
+        <span class="auth-scope-label">Seleccion&aacute; el rubro</span>
+        <div id="authBusinessScopeToggle" class="auth-scope-grid" role="group" aria-label="Seleccionar rubro de administraci&oacute;n">
+          <button class="auth-scope-btn active" type="button" data-auth-business-scope="mayorista">
+            <strong>Mayorista</strong>
+            <small>Panel principal de distribuci&oacute;n</small>
+          </button>
+          <button class="auth-scope-btn" type="button" data-auth-business-scope="minorista">
+            <strong>Minorista</strong>
+            <small>Mismas secciones, m&eacute;tricas minoristas</small>
+          </button>
+        </div>
+      </div>
+      <div class="auth-actions">
+        <button id="authScopeContinue" class="btn primary" type="button">Continuar</button>
+      </div>
+    </div>
+    <div id="authLoginStep" class="auth-card auth-step auth-step-login hidden">
+      <div class="auth-brand">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M12 2l3 7h7l-6 5 3 8-7-4-7 4 3-8-6-5h7z" fill="#111827"/></svg>
+        <span>Panel Admin</span>
+      </div>
+      <h1>Inicio de sesi&oacute;n</h1>
+      <p class="auth-sub">Ingres&aacute; con tu usuario administrativo para continuar.</p>
+      <div class="auth-login-copy">
+        <div class="auth-login-title">Rubro seleccionado</div>
+        <p class="auth-login-sub">Vas a entrar al panel de <strong id="authSelectedScopeLabel">Mayorista</strong>.</p>
+      </div>
       <form id="authLoginForm" class="auth-form" autocomplete="on">
         <div class="field">
           <label for="authUser">Usuario</label>
@@ -45,7 +73,10 @@
           Mostrar contraseña
         </label>
         <div id="authError" class="auth-error" role="alert" aria-live="polite"></div>
-        <button class="btn primary" type="submit">Ingresar</button>
+        <div class="auth-actions">
+          <button id="authBackToScope" class="btn" type="button">Cambiar rubro</button>
+          <button class="btn primary" type="submit">Ingresar</button>
+        </div>
       </form>
     </div>
   </div>
@@ -58,7 +89,7 @@
       <nav>
         <a class="active" data-section="dashboard">Dashboard</a>
         <a data-section="catalog">Catálogo</a>
-        <a data-section="retail-prices">Precios minorista</a>
+        <a class="role-hidden" data-section="retail-prices" data-business-scope-only="minorista">Precios minorista</a>
         <a data-section="consumos">Consumición inmediata</a>
         <a data-section="promotions">Promociones</a>
         <a data-section="promo-images">Imágenes Promocionales</a>
@@ -68,6 +99,7 @@
         <a data-section="preparations">Preparaciones</a>
         <a data-section="routes" data-role="owner,admin">Rutas</a>
         <a data-section="deliveries" data-role="owner,admin">Entregas</a>
+        <a data-section="branches" data-role="owner">Sucursales</a>
         <a data-section="users" data-role="owner,admin">Usuarios</a>
         <a data-section="admin-console" data-role="owner">Consola</a>
       </nav>
@@ -76,6 +108,7 @@
           <div class="user-meta">
             <div class="user-name" id="currentUserLabel">—</div>
             <div class="user-role" id="currentRoleLabel">—</div>
+            <div class="user-role" id="currentBusinessScopeLabel">—</div>
           </div>
           <button id="logoutBtn" class="btn" type="button">Salir</button>
         </div>
@@ -355,9 +388,9 @@
           </div>
           <div class="bulk-actions">
             <select id="bulkTarget" title="Campo a modificar">
-              <option value="price">Precio mayorista</option>
-              <option value="price_retail">Precio minorista</option>
-              <option value="both_prices">Mayorista + Minorista</option>
+              <option id="bulkTargetPriceOption" value="price">Precio mayorista</option>
+              <option id="bulkTargetRetailOption" value="price_retail">Precio minorista</option>
+              <option id="bulkTargetBothPricesOption" value="both_prices">Mayorista + Minorista</option>
               <option value="active">Activo</option>
             </select>
             <select id="bulkMode" title="Modo">
@@ -379,8 +412,8 @@
                 <th>Marca</th>
                 <th>Código</th>
                 <th>Categoria</th>
-                <th>Precio mayorista</th>
-                <th>Precio minorista</th>
+                <th id="productsPrimaryPriceHead">Precio mayorista</th>
+                <th id="productsRetailPriceHead">Precio minorista</th>
                 <th>Costo</th>
                 <th>Margen</th>
                 <th>Stock</th>
@@ -402,7 +435,7 @@
         </div>
       </section>
 
-      <section id="retail-prices" class="section hidden">
+      <section id="retail-prices" class="section hidden role-hidden">
         <h2>Precios minorista</h2>
         <p>Modifica solo el precio minorista. Si queda vacío, el catálogo minorista usa el precio mayorista.</p>
         <div class="controls">
@@ -487,7 +520,7 @@
           <button id="clearOrderCache" class="btn clear-cache">Limpiar cache local</button>
         </div>
         <section id="orders_web" class="section">
-          <h3>Pedidos - Web</h3>
+          <h3 id="ordersSectionTitle">Pedidos - Web</h3>
         <div id="ordersCustomerTabs" class="controls tabs">
           <button id="ordersTypeTab_mayorista" class="btn tab active">Mayoristas <span id="badge_type_mayorista" class="badge-pill">0</span></button>
           <button id="ordersTypeTab_minorista" class="btn tab">Minoristas <span id="badge_type_minorista" class="badge-pill">0</span></button>
@@ -632,9 +665,61 @@
         </div>
       </section>
 
+      <section id="branches" class="section hidden" data-role="owner">
+        <h2 id="branchesSectionTitle">Sucursales</h2>
+        <p id="branchesSectionSub" class="section-subtle">Administr&aacute; las sucursales del rubro activo y verific&aacute; su ubicaci&oacute;n en el mapa.</p>
+        <form id="branchForm" class="user-form">
+          <div class="row">
+            <div class="field">
+              <label for="branchName">Nombre</label>
+              <input id="branchName" name="branchName" placeholder="Sucursal Centro" required />
+            </div>
+            <div class="field">
+              <label for="branchStreet">Calle</label>
+              <input id="branchStreet" name="branchStreet" placeholder="San Mart&iacute;n" required />
+            </div>
+            <div class="field">
+              <label for="branchStreetNumber">N&uacute;mero</label>
+              <input id="branchStreetNumber" name="branchStreetNumber" placeholder="1234" required />
+            </div>
+            <div class="field">
+              <label for="branchLat">Latitud</label>
+              <input id="branchLat" name="branchLat" type="number" step="0.000001" placeholder="-32.889458" required />
+            </div>
+            <div class="field">
+              <label for="branchLon">Longitud</label>
+              <input id="branchLon" name="branchLon" type="number" step="0.000001" placeholder="-68.845839" required />
+            </div>
+          </div>
+          <div class="form-actions">
+            <button class="btn primary" type="submit">Agregar sucursal</button>
+          </div>
+          <div id="branchFormMsg" class="user-form-msg" role="status" aria-live="polite"></div>
+        </form>
+        <div class="branches-layout">
+          <div class="branches-map-wrap">
+            <div id="branchesMap" class="branches-map"></div>
+            <div id="branchesMapEmpty" class="driver-map-empty">Todav&iacute;a no hay sucursales cargadas para este rubro.</div>
+          </div>
+          <div class="table-wrap">
+            <table id="branchesTable">
+              <thead>
+                <tr>
+                  <th>Nombre</th>
+                  <th>Direcci&oacute;n</th>
+                  <th>Coordenadas</th>
+                  <th>Acciones</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <section id="users" class="section hidden" data-role="owner,admin">
         <h2>Usuarios</h2>
-        <p>Creá usuarios con rol admin o repartidor. Admins y owners pueden asignar la zona de los repartidores.</p>
+        <p>Cre&aacute; usuarios con rol admin o repartidor y asignales el rubro que les corresponde.</p>
         <form id="userForm" class="user-form">
           <div class="row">
             <div class="field">
@@ -653,6 +738,13 @@
               </select>
             </div>
             <div class="field">
+              <label for="userBusinessScope">Rubro</label>
+              <select id="userBusinessScope" name="userBusinessScope">
+                <option value="mayorista">Mayorista</option>
+                <option value="minorista">Minorista</option>
+              </select>
+            </div>
+            <div class="field" id="userZoneField">
               <label for="userZone">Zona</label>
               <select id="userZone" name="userZone">
                 <option value="">Sin zona</option>
@@ -688,6 +780,7 @@
               <tr>
                 <th>Usuario</th>
                 <th>Rol</th>
+                <th>Rubro</th>
                 <th>Zona</th>
                 <th>Zona mañana</th>
                 <th>Creado</th>
@@ -793,7 +886,7 @@
             <label id="priceLabel" for="price">Precio mayorista</label>
             <input id="price" name="price" required type="number" step="0.01" placeholder="0.00" />
           </div>
-          <div class="field">
+          <div id="retailPriceField" class="field">
             <label for="price_retail">Precio minorista</label>
             <input id="price_retail" name="price_retail" type="number" step="0.01" placeholder="0.00" />
           </div>

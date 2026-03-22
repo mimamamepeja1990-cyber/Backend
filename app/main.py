@@ -319,6 +319,9 @@ def _ensure_default_admin_owner() -> None:
                     if getattr(existing_owner, 'is_active', True) is False:
                         existing_owner.is_active = True
                         changed = True
+                    if str(getattr(existing_owner, 'business_scope', '') or '').strip().lower() != 'all':
+                        existing_owner.business_scope = 'all'
+                        changed = True
                     if changed:
                         db.add(existing_owner)
                         db.commit()
@@ -332,6 +335,7 @@ def _ensure_default_admin_owner() -> None:
         if existing_user:
             try:
                 existing_user.role = 'owner'
+                existing_user.business_scope = 'all'
                 if force_reset and password:
                     existing_user.hashed_password = utils.hash_password(password)
                 db.add(existing_user)
@@ -365,19 +369,35 @@ def _ensure_admin_user_columns() -> None:
         existing = {c['name'] for c in insp.get_columns('admin_users')}
     except Exception:
         existing = set()
-    if 'zone' in existing:
-        return
     try:
         dialect_local = getattr(engine, 'dialect', None)
         dialect_name = getattr(dialect_local, 'name', '') if dialect_local else ''
         with engine.begin() as conn:
-            if 'postgres' in dialect_name:
-                try:
-                    conn.execute(text("ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS zone VARCHAR(120)"))
-                except Exception:
-                    conn.execute(text("ALTER TABLE admin_users ADD COLUMN zone VARCHAR(120)"))
-            else:
-                conn.execute(text("ALTER TABLE admin_users ADD COLUMN zone VARCHAR(120)"))
+            for col_name, col_sql in (
+                ('zone', 'VARCHAR(120)'),
+                ('business_scope', "VARCHAR(20) DEFAULT 'mayorista'"),
+            ):
+                if col_name in existing:
+                    continue
+                if 'postgres' in dialect_name:
+                    try:
+                        conn.execute(text(f"ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS {col_name} {col_sql}"))
+                    except Exception:
+                        conn.execute(text(f"ALTER TABLE admin_users ADD COLUMN {col_name} {col_sql}"))
+                else:
+                    conn.execute(text(f"ALTER TABLE admin_users ADD COLUMN {col_name} {col_sql}"))
+                existing.add(col_name)
+        with engine.begin() as conn:
+            if 'business_scope' in existing:
+                conn.execute(
+                    text(
+                        "UPDATE admin_users SET business_scope = CASE "
+                        "WHEN COALESCE(LOWER(role), '') = 'owner' THEN 'all' "
+                        "WHEN COALESCE(TRIM(LOWER(business_scope)), '') = 'minorista' THEN 'minorista' "
+                        "ELSE 'mayorista' "
+                        "END"
+                    )
+                )
     except Exception:
         logger.exception('ensure_admin_user_columns failed')
 
@@ -938,6 +958,8 @@ def _load_products_serialized(
             order_clause = ''
             if sort == 'price_asc': order_clause = ' ORDER BY price ASC'
             elif sort == 'price_desc': order_clause = ' ORDER BY price DESC'
+            elif sort == 'price_retail_asc': order_clause = ' ORDER BY CASE WHEN price_retail IS NULL THEN 1 ELSE 0 END ASC, price_retail ASC'
+            elif sort == 'price_retail_desc': order_clause = ' ORDER BY CASE WHEN price_retail IS NULL THEN 1 ELSE 0 END ASC, price_retail DESC'
             elif sort == 'name_asc': order_clause = ' ORDER BY name ASC'
             elif sort == 'name_desc': order_clause = ' ORDER BY name DESC'
             cols_sql = ', '.join(cols)
@@ -6736,6 +6758,59 @@ def _normalize_admin_role(value: Optional[str]) -> str:
     return role
 
 
+def _normalize_admin_business_scope(value: Optional[str], allow_all: bool = False) -> Optional[str]:
+    try:
+        scope = str(value or '').strip().lower()
+    except Exception:
+        scope = ''
+    if scope in ('mayorista', 'minorista'):
+        return scope
+    if allow_all and scope in ('all', 'todos', 'ambos', '*', 'owner'):
+        return 'all'
+    return None
+
+
+def _admin_business_scope_label(scope: Optional[str]) -> str:
+    normalized = _normalize_admin_business_scope(scope, allow_all=True)
+    if normalized == 'minorista':
+        return 'Minorista'
+    if normalized == 'all':
+        return 'Ambos'
+    return 'Mayorista'
+
+
+def _get_admin_assigned_business_scope(admin_user: Any) -> str:
+    role = _normalize_admin_role(getattr(admin_user, 'role', None))
+    stored = _normalize_admin_business_scope(getattr(admin_user, 'business_scope', None), allow_all=(role == 'owner'))
+    if role == 'owner':
+        return stored or 'all'
+    return stored or 'mayorista'
+
+
+def _resolve_admin_active_business_scope(admin_user: Any, requested_scope: Optional[str] = None) -> str:
+    assigned_scope = _get_admin_assigned_business_scope(admin_user)
+    role = _normalize_admin_role(getattr(admin_user, 'role', None))
+    if role == 'owner':
+        return _normalize_admin_business_scope(requested_scope) or 'mayorista'
+    requested = _normalize_admin_business_scope(requested_scope)
+    if requested and requested != assigned_scope:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Esta cuenta pertenece al rubro {_admin_business_scope_label(assigned_scope)}.",
+        )
+    return assigned_scope
+
+
+def _resolve_admin_customer_type_filter(current_admin: Any, requested_scope: Optional[str] = None) -> Optional[str]:
+    scope_hint = requested_scope
+    if scope_hint is None:
+        scope_hint = getattr(current_admin, 'active_business_scope', None)
+    if scope_hint is None:
+        scope_hint = getattr(current_admin, 'business_scope', None)
+    active_scope = _resolve_admin_active_business_scope(current_admin, requested_scope=scope_hint)
+    return active_scope if active_scope in ('mayorista', 'minorista') else None
+
+
 def _normalize_admin_zone(value: Optional[str]) -> Optional[str]:
     try:
         zone = str(value or '').strip()
@@ -7165,6 +7240,16 @@ def get_current_admin_user(token: str = Depends(admin_oauth2_scheme)):
             raise HTTPException(status_code=401, detail='Admin user not found')
         if not getattr(user, 'is_active', True):
             raise HTTPException(status_code=403, detail='Admin user disabled')
+        assigned_scope = _get_admin_assigned_business_scope(user)
+        active_scope = _resolve_admin_active_business_scope(user, requested_scope=payload.get('business_scope'))
+        try:
+            setattr(user, 'business_scope', assigned_scope)
+        except Exception:
+            pass
+        try:
+            setattr(user, 'active_business_scope', active_scope)
+        except Exception:
+            pass
         return user
     finally:
         db.close()
@@ -7178,6 +7263,15 @@ def require_admin_owner(current_admin=Depends(get_current_admin_user)):
 
 @app.post('/admin/auth/token', response_model=schemas.Token)
 async def admin_login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+    requested_scope = None
+    try:
+        requested_scope = next(
+            (scope for scope in (getattr(form_data, 'scopes', None) or []) if _normalize_admin_business_scope(scope)),
+            None,
+        )
+    except Exception:
+        requested_scope = None
+
     def task():
         db = SessionLocal()
         try:
@@ -7194,10 +7288,14 @@ async def admin_login_for_access_token(form_data: OAuth2PasswordRequestForm = De
 
     if not user:
         raise HTTPException(status_code=401, detail='Incorrect credentials')
+    active_scope = _resolve_admin_active_business_scope(user, requested_scope=requested_scope)
+    assigned_scope = _get_admin_assigned_business_scope(user)
     access_token = utils.create_access_token({
         "sub": user.username,
         "id": user.id,
         "role": user.role,
+        "business_scope": active_scope,
+        "assigned_business_scope": assigned_scope,
         "zone": getattr(user, 'zone', None),
         "kind": "admin",
     })
@@ -8240,8 +8338,12 @@ def admin_list_users(current_admin=Depends(get_current_admin_user), db: Session 
     users = crud.list_admin_users(db)
     if role == 'owner':
         return users
-    # Admins can see only repartidores to assign zones.
-    return [u for u in (users or []) if str(getattr(u, 'role', '') or '').strip().lower() == 'repartidor']
+    current_scope = _get_admin_assigned_business_scope(current_admin)
+    return [
+        u for u in (users or [])
+        if str(getattr(u, 'role', '') or '').strip().lower() == 'repartidor'
+        and _get_admin_assigned_business_scope(u) == current_scope
+    ]
 
 
 @app.post('/admin/users', response_model=schemas.AdminUserResponse)
@@ -8252,6 +8354,9 @@ def admin_create_user(payload: schemas.AdminUserCreate, current_owner=Depends(re
     role = _normalize_admin_role(payload.role)
     if role == 'owner':
         raise HTTPException(status_code=400, detail='No se pueden crear owners adicionales')
+    business_scope = _normalize_admin_business_scope(getattr(payload, 'business_scope', None))
+    if business_scope not in ('mayorista', 'minorista'):
+        raise HTTPException(status_code=400, detail='Rubro requerido')
     zone = _normalize_admin_zone(getattr(payload, 'zone', None))
     if role == 'repartidor':
         zone_tokens = _parse_admin_zones(zone)
@@ -8270,6 +8375,7 @@ def admin_create_user(payload: schemas.AdminUserCreate, current_owner=Depends(re
         raise
     except Exception:
         pass
+    payload.business_scope = business_scope
     payload.zone = zone
     hashed = utils.hash_password(payload.password)
     try:
@@ -8329,8 +8435,35 @@ def admin_update_user(
     if not user:
         raise HTTPException(status_code=404, detail='Usuario no encontrado')
     target_role = str(getattr(user, 'role', '') or '').strip().lower()
+    target_scope = _get_admin_assigned_business_scope(user)
+    if role != 'owner' and target_scope != _get_admin_assigned_business_scope(current_admin):
+        raise HTTPException(status_code=403, detail='No autorizado para ese rubro')
+    requested_scope = getattr(payload, 'business_scope', None)
+    normalized_scope = None
+    if requested_scope is not None:
+        if role != 'owner':
+            raise HTTPException(status_code=403, detail='Solo el owner puede cambiar el rubro')
+        normalized_scope = _normalize_admin_business_scope(requested_scope)
+        if normalized_scope not in ('mayorista', 'minorista'):
+            raise HTTPException(status_code=400, detail='Rubro invalido')
     if target_role != 'repartidor':
-        raise HTTPException(status_code=403, detail='Solo se puede asignar zona a repartidores')
+        if normalized_scope is None:
+            raise HTTPException(status_code=403, detail='Solo se puede asignar zona a repartidores')
+        try:
+            updated = crud.update_admin_user_scope_and_zone(
+                db,
+                int(getattr(user, 'id')),
+                business_scope=normalized_scope,
+                zone=None,
+            )
+            if not updated:
+                raise HTTPException(status_code=404, detail='Usuario no encontrado')
+            return updated
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.exception('admin_update_user failed: %s', e)
+            raise HTTPException(status_code=500, detail='No se pudo actualizar el usuario')
     zone = _normalize_admin_zone(getattr(payload, 'zone', None))
     zone_tokens = _parse_admin_zones(zone)
     if not zone_tokens:
@@ -8342,7 +8475,12 @@ def admin_update_user(
     canonical = _canonicalize_zones(zone_tokens)
     zone = ', '.join(canonical)
     try:
-        updated = crud.update_admin_user_zone(db, int(getattr(user, 'id')), zone)
+        updated = crud.update_admin_user_scope_and_zone(
+            db,
+            int(getattr(user, 'id')),
+            business_scope=normalized_scope,
+            zone=zone,
+        )
         if not updated:
             raise HTTPException(status_code=404, detail='Usuario no encontrado')
         return updated
@@ -8446,8 +8584,95 @@ def admin_driver_next_zones(current_admin=Depends(get_current_admin_user), db: S
         _save_driver_next_zone_assignments(db, cleaned)
         assignments = cleaned
     rows = [value for value in assignments.values() if isinstance(value, dict)]
+    if role != 'owner':
+        allowed_scope = _get_admin_assigned_business_scope(current_admin)
+        allowed_ids = {
+            str(getattr(user, 'id'))
+            for user in (crud.list_admin_users(db) or [])
+            if str(getattr(user, 'role', '') or '').strip().lower() == 'repartidor'
+            and _get_admin_assigned_business_scope(user) == allowed_scope
+        }
+        rows = [row for row in rows if str(row.get('driver_id') or '') in allowed_ids]
     rows.sort(key=lambda item: (str(item.get('driver_username') or '').lower(), str(item.get('delivery_date') or '')))
     return rows
+
+
+def _clean_admin_branch_text(value: Any, max_len: int) -> str:
+    try:
+        text_value = str(value or '').strip()
+    except Exception:
+        text_value = ''
+    return text_value[:max_len].strip()
+
+
+@app.get('/admin/branches', response_model=List[schemas.AdminBranchResponse])
+def admin_list_branches(
+    business_scope: Optional[str] = None,
+    current_admin=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role not in ('owner', 'admin'):
+        raise HTTPException(status_code=403, detail='No autorizado')
+    scope_filter = _resolve_admin_customer_type_filter(current_admin, business_scope)
+    return crud.list_admin_branches(db, business_scope=scope_filter, include_inactive=(role == 'owner'))
+
+
+@app.post('/admin/branches', response_model=schemas.AdminBranchResponse)
+def admin_create_branch(
+    payload: schemas.AdminBranchCreate,
+    current_owner=Depends(require_admin_owner),
+    db: Session = Depends(get_db),
+):
+    scope_value = _resolve_admin_customer_type_filter(current_owner, getattr(payload, 'business_scope', None))
+    name = _clean_admin_branch_text(getattr(payload, 'name', None), 160)
+    street = _clean_admin_branch_text(getattr(payload, 'street', None), 200)
+    street_number = _clean_admin_branch_text(getattr(payload, 'street_number', None), 50)
+    if not name:
+        raise HTTPException(status_code=400, detail='Nombre requerido')
+    if not street or not street_number:
+        raise HTTPException(status_code=400, detail='Calle y numeracion requeridas')
+    try:
+        lat = float(getattr(payload, 'lat'))
+        lon = float(getattr(payload, 'lon'))
+    except Exception:
+        raise HTTPException(status_code=400, detail='Coordenadas invalidas')
+    if not _is_mendoza_point(lat, lon):
+        raise HTTPException(status_code=400, detail='Las coordenadas deben estar dentro de Mendoza')
+    payload.business_scope = scope_value or 'mayorista'
+    payload.name = name
+    payload.street = street
+    payload.street_number = street_number
+    payload.lat = float(lat)
+    payload.lon = float(lon)
+    try:
+        return crud.create_admin_branch(db, payload, created_by=getattr(current_owner, 'username', None))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception('admin_create_branch failed: %s', e)
+        raise HTTPException(status_code=500, detail='No se pudo crear la sucursal')
+
+
+@app.delete('/admin/branches/{branch_id}')
+def admin_delete_branch(
+    branch_id: int,
+    current_owner=Depends(require_admin_owner),
+    db: Session = Depends(get_db),
+):
+    branch = crud.get_admin_branch_by_id(db, branch_id)
+    if not branch:
+        raise HTTPException(status_code=404, detail='Sucursal no encontrada')
+    try:
+        ok = crud.delete_admin_branch(db, branch_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail='Sucursal no encontrada')
+        return {'ok': True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception('admin_delete_branch failed: %s', e)
+        raise HTTPException(status_code=500, detail='No se pudo eliminar la sucursal')
 
 @app.post("/products")
 async def create_product(payload: schemas.ProductCreate, request: Request, background_tasks: BackgroundTasks):
@@ -8665,6 +8890,8 @@ _IMPORT_HEADER_ALIASES = {
     'category': {'category', 'categoria', 'rubro', 'familia', 'linea'},
     'price': {'price', 'precio', 'precio_mayorista', 'mayorista', 'precio_may', 'precio_wholesale', 'precio_mayoreo'},
     'price_retail': {'price_retail', 'precio_minorista', 'minorista', 'precio_minor', 'precio_retail', 'precio_venta', 'precio_menudeo'},
+    'price_list_1': {'lista_1', 'lista1', 'lista_n_1', 'lista_de_precio_1', 'precio_lista_1', 'precio_1', 'precio1'},
+    'price_list_2': {'lista_2', 'lista2', 'lista_n_2', 'lista_de_precio_2', 'precio_lista_2', 'precio_2', 'precio2'},
     'cost': {'cost', 'costo', 'coste', 'precio_costo', 'costo_unitario'},
     'discount': {'discount', 'descuento', 'descuento_pct', 'descuento_%', 'dto'},
     'stock': {'stock', 'cantidad', 'existencias', 'stock_actual'},
@@ -9329,10 +9556,17 @@ async def import_products_excel(
     background_tasks: BackgroundTasks = None,
 ):
     actor = None
+    business_scope = 'mayorista'
     try:
         actor = (request.headers.get('x-actor') or request.headers.get('X-Actor') or '').strip() or None
     except Exception:
         actor = None
+    try:
+        business_scope = _normalize_admin_customer_type_filter(
+            request.headers.get('x-business-scope') or request.headers.get('X-Business-Scope')
+        ) or 'mayorista'
+    except Exception:
+        business_scope = 'mayorista'
 
     content = await file.read()
     filename = getattr(file, 'filename', '') or ''
@@ -9408,6 +9642,10 @@ async def import_products_excel(
 
                 price = _coerce_float(row.get('price'))
                 price_retail = _coerce_float(row.get('price_retail'))
+                price_list_1 = _coerce_float(row.get('price_list_1'))
+                price_list_2 = _coerce_float(row.get('price_list_2'))
+                scoped_price = price_list_1 if price_list_1 is not None else price
+                scoped_price_retail = price_list_2 if price_list_2 is not None else price_retail
                 cost = _coerce_float(row.get('cost'))
                 discount = _coerce_float(row.get('discount'))
                 image_url = _resolve_import_image_url(db, code, name, row.get('image_url'))
@@ -9458,10 +9696,12 @@ async def import_products_excel(
                         updates['description'] = description
                     if category is not None:
                         updates['category'] = category
-                    if price is not None:
-                        updates['price'] = float(price)
-                    if price_retail is not None:
-                        updates['price_retail'] = float(price_retail)
+                    if business_scope == 'minorista':
+                        if scoped_price_retail is not None:
+                            updates['price_retail'] = float(scoped_price_retail)
+                    else:
+                        if scoped_price is not None:
+                            updates['price'] = float(scoped_price)
                     if cost is not None:
                         updates['cost'] = float(cost)
                     if discount is not None:
@@ -9508,8 +9748,8 @@ async def import_products_excel(
                 payload = schemas.ProductCreate(
                     code=code,
                     name=name,
-                    price=0.0 if price is None else float(price),
-                    price_retail=None if price_retail is None else float(price_retail),
+                    price=0.0 if scoped_price is None else float(scoped_price),
+                    price_retail=None if scoped_price_retail is None else float(scoped_price_retail),
                     cost=None if cost is None else float(cost),
                     description=description or '',
                     category=category or '',
@@ -10314,6 +10554,22 @@ def sales_stats(
         'customer_type': customer_type_filter or None,
         'sample_size': len(orders_list),
     }
+
+
+@app.get("/admin/sales/stats")
+def admin_sales_stats(
+    days: int = 30,
+    source: Optional[str] = None,
+    customer_type: Optional[str] = None,
+    limit: int = 5000,
+    current_admin=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role not in ('owner', 'admin'):
+        raise HTTPException(status_code=403, detail='No autorizado')
+    scope_filter = _resolve_admin_customer_type_filter(current_admin, customer_type)
+    return sales_stats(days=days, source=source, customer_type=scope_filter, limit=limit, db=db)
 
 
 # -----------------------------
@@ -12414,6 +12670,14 @@ def list_orders(
     return out
 
 
+def _normalize_admin_customer_type_filter(value: Any) -> Optional[str]:
+    try:
+        normalized = str(value or '').strip().lower()
+    except Exception:
+        return None
+    return normalized if normalized in ('mayorista', 'minorista') else None
+
+
 @app.get('/admin/orders')
 def admin_list_orders(
     skip: int = 0,
@@ -12422,6 +12686,7 @@ def admin_list_orders(
     q: Optional[str] = None,
     date: Optional[str] = None,
     status: Optional[str] = None,
+    customer_type: Optional[str] = None,
     zone: Optional[str] = None,
     driver_id: Optional[str] = None,
     driver_username: Optional[str] = None,
@@ -12432,6 +12697,7 @@ def admin_list_orders(
     role = str(getattr(current_admin, 'role', '') or '').strip().lower()
     admin_id = getattr(current_admin, 'id', None)
     admin_username = getattr(current_admin, 'username', None)
+    customer_type_filter = _resolve_admin_customer_type_filter(current_admin, customer_type)
 
     # Status filter
     status_values: List[str] = []
@@ -12524,6 +12790,12 @@ def admin_list_orders(
     elif role == 'repartidor':
         return []
 
+    if customer_type_filter:
+        orders = [
+            o for o in (orders or [])
+            if _normalize_admin_customer_type_filter(o.get('customer_type')) == customer_type_filter
+        ]
+
     # Zone filter (admins/owners only). Repartidores are filtered by assignment.
     if role != 'repartidor':
         zone_tokens: List[str] = _parse_admin_zones(zone) if zone else []
@@ -12552,6 +12824,7 @@ def _auto_assign_routes_for_driver(driver, orders: List[Dict[str, Any]], include
     driver_id = getattr(driver, 'id', None)
     driver_username = getattr(driver, 'username', None)
     driver_zone = str(getattr(driver, 'zone', '') or '').strip()
+    driver_scope = _get_admin_assigned_business_scope(driver)
     if not driver_id or not driver_zone:
         return {'driver_id': driver_id, 'assigned': 0, 'route_id': None, 'assigned_ids': []}
     zone_tokens = _parse_admin_zones(driver_zone)
@@ -12573,6 +12846,9 @@ def _auto_assign_routes_for_driver(driver, orders: List[Dict[str, Any]], include
                 continue
             if not include_assigned and (assigned_id or assigned_user):
                 continue
+            if driver_scope in ('mayorista', 'minorista'):
+                if _normalize_admin_customer_type_filter(od.get('customer_type')) != driver_scope:
+                    continue
             if zone_tokens and not _order_matches_zone(od, zone_tokens):
                 continue
             candidates.append(od)
@@ -12743,6 +13019,7 @@ async def admin_auto_assign_routes(request: Request, current_admin=Depends(get_c
     driver_id = body.get('driver_id')
     driver_username = body.get('driver_username')
     include_assigned = body.get('include_assigned', True)
+    customer_type_filter = _resolve_admin_customer_type_filter(current_admin, body.get('customer_type'))
 
     drivers = []
     if driver_id or driver_username:
@@ -12758,11 +13035,26 @@ async def admin_auto_assign_routes(request: Request, current_admin=Depends(get_c
             raise HTTPException(status_code=404, detail='Repartidor no encontrado')
         if str(getattr(driver, 'role', '') or '').strip().lower() != 'repartidor':
             raise HTTPException(status_code=400, detail='Usuario no es repartidor')
+        driver_scope = _get_admin_assigned_business_scope(driver)
+        if customer_type_filter and driver_scope != customer_type_filter:
+            raise HTTPException(status_code=409, detail='El repartidor pertenece a otro rubro')
         drivers = [driver]
     else:
-        drivers = [u for u in (crud.list_admin_users(db) or []) if str(getattr(u, 'role', '') or '').strip().lower() == 'repartidor']
+        drivers = [
+            u for u in (crud.list_admin_users(db) or [])
+            if str(getattr(u, 'role', '') or '').strip().lower() == 'repartidor'
+            and (
+                not customer_type_filter
+                or _get_admin_assigned_business_scope(u) == customer_type_filter
+            )
+        ]
 
     orders = list_orders(skip=0, limit=2000, source=None, q=None, date=None, db=db)
+    if customer_type_filter:
+        orders = [
+            order for order in (orders or [])
+            if _normalize_admin_customer_type_filter(order.get('customer_type')) == customer_type_filter
+        ]
     results = []
     for d in drivers:
         try:
@@ -13357,7 +13649,7 @@ def _build_driver_route_points(
     return route_points
 
 
-def _build_driver_insights_payload(driver: Any, db: Session) -> Dict[str, Any]:
+def _build_driver_insights_payload(driver: Any, db: Session, customer_type_filter: Optional[str] = None) -> Dict[str, Any]:
     driver_id = getattr(driver, 'id', None)
     driver_username = str(getattr(driver, 'username', '') or '').strip() or None
     tzinfo, tz_name = _resolve_dashboard_tzinfo()
@@ -13377,6 +13669,9 @@ def _build_driver_insights_payload(driver: Any, db: Session) -> Dict[str, Any]:
     for order_data in (all_orders or []):
         if not isinstance(order_data, dict):
             continue
+        if customer_type_filter:
+            if _normalize_admin_customer_type_filter(order_data.get('customer_type')) != customer_type_filter:
+                continue
         status_val = _normalize_order_status(order_data.get('status'))
         if status_val in ('preparado', 'enviado') and _driver_matches_assigned_order(order_data, driver_id=driver_id, driver_username=driver_username):
             active_orders.append(order_data)
@@ -13467,6 +13762,7 @@ def _build_driver_insights_payload(driver: Any, db: Session) -> Dict[str, Any]:
         'planned_route_path': planned_route_path,
         'route_mode': 'live_trace' if len(location_points) >= 2 else 'planned_route',
         'updated_at': now_utc,
+        'customer_type': customer_type_filter,
     }
 
 
@@ -13828,17 +14124,22 @@ def admin_deliveries(
     driver_username: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    customer_type: Optional[str] = None,
     current_admin=Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ):
     role = str(getattr(current_admin, 'role', '') or '').strip().lower()
     if role not in ('owner', 'admin'):
         raise HTTPException(status_code=403, detail='No autorizado')
+    customer_type_filter = _resolve_admin_customer_type_filter(current_admin, customer_type)
     orders = list_orders(skip=skip, limit=limit, source=None, q=None, date=None, db=db)
     out = []
     df = str(date_from or '').strip()
     dt = str(date_to or '').strip()
     for od in (orders or []):
+        if customer_type_filter:
+            if _normalize_admin_customer_type_filter(od.get('customer_type')) != customer_type_filter:
+                continue
         status_val = _normalize_order_status(od.get('status'))
         delivered_at = od.get('delivered_at')
         issue_at = od.get('last_delivery_issue_at')
@@ -13883,6 +14184,7 @@ def admin_driver_insights(
     request: Request,
     driver_id: Optional[str] = None,
     driver_username: Optional[str] = None,
+    customer_type: Optional[str] = None,
     current_admin=Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ):
@@ -13905,7 +14207,11 @@ def admin_driver_insights(
     if str(getattr(driver, 'role', '') or '').strip().lower() != 'repartidor':
         raise HTTPException(status_code=400, detail='Usuario no es repartidor')
 
-    payload = _build_driver_insights_payload(driver, db)
+    payload = _build_driver_insights_payload(
+        driver,
+        db,
+        customer_type_filter=_resolve_admin_customer_type_filter(current_admin, customer_type),
+    )
     headers = _cors_headers_for_request(request)
     return JSONResponse(status_code=200, content=jsonable_encoder(payload), headers=headers)
 
@@ -14273,7 +14579,7 @@ async def admin_assign_order(order_id: str, request: Request, current_admin=Depe
     except Exception:
         existing = set()
     cols = ['id']
-    for c in ('status', 'user_barrio', 'user_calle', 'user_numeracion', 'user_postal_code', 'user_department', '_token_preview', 'items', 'created_at'):
+    for c in ('status', 'customer_type', 'user_barrio', 'user_calle', 'user_numeracion', 'user_postal_code', 'user_department', '_token_preview', 'items', 'created_at'):
         if c in existing:
             cols.append(c)
     cols_sql = ', '.join(cols)
@@ -14295,6 +14601,12 @@ async def admin_assign_order(order_id: str, request: Request, current_admin=Depe
             order_data['_token_preview'] = json.loads(order_data['_token_preview'])
     except Exception:
         pass
+
+    driver_scope = _get_admin_assigned_business_scope(driver)
+    order_scope = _normalize_admin_customer_type_filter(order_data.get('customer_type'))
+    if driver_scope in ('mayorista', 'minorista') and order_scope and order_scope != driver_scope:
+        headers = _cors_headers_for_request(request)
+        return JSONResponse(status_code=409, content={'error': 'rubro_no_coincide'}, headers=headers)
 
     zone_tokens = _parse_admin_zones(driver_zone)
     try:

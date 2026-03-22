@@ -104,6 +104,7 @@ class AdminUserCreate(BaseModel):
     password: str
     role: Optional[str] = 'admin'
     full_name: Optional[str] = None
+    business_scope: Optional[str] = None
     zone: Optional[str] = None
 
 
@@ -112,6 +113,8 @@ class AdminUserResponse(BaseModel):
     username: str
     full_name: Optional[str] = None
     role: str
+    business_scope: Optional[str] = None
+    active_business_scope: Optional[str] = None
     zone: Optional[str] = None
     is_active: bool
     created_by: Optional[str] = None
@@ -122,6 +125,41 @@ class AdminUserResponse(BaseModel):
 
 class AdminUserUpdate(BaseModel):
     zone: Optional[str] = None
+    business_scope: Optional[str] = None
+
+
+class AdminBranchBase(BaseModel):
+    name: str
+    business_scope: Optional[str] = 'mayorista'
+    street: str
+    street_number: str
+    lat: float
+    lon: float
+    is_active: Optional[bool] = True
+
+
+class AdminBranchCreate(AdminBranchBase):
+    pass
+
+
+class AdminBranchUpdate(BaseModel):
+    name: Optional[str] = None
+    business_scope: Optional[str] = None
+    street: Optional[str] = None
+    street_number: Optional[str] = None
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    is_active: Optional[bool] = None
+
+
+class AdminBranchResponse(AdminBranchBase):
+    id: int
+    address_line: Optional[str] = None
+    created_by: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    model_config = { 'from_attributes': True }
 
 
 # --- Users / Auth ---

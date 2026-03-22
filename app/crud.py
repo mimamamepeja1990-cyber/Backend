@@ -449,6 +449,10 @@ def get_products(db: Session, skip: int = 0, limit: int = 100, q: Optional[str]=
             query = query.order_by(models.Product.price.asc())
         elif sort == "price_desc":
             query = query.order_by(models.Product.price.desc())
+        elif sort == "price_retail_asc":
+            query = query.order_by(models.Product.price_retail.asc().nullslast())
+        elif sort == "price_retail_desc":
+            query = query.order_by(models.Product.price_retail.desc().nullslast())
         elif sort == "name_asc":
             query = query.order_by(models.Product.name.asc())
         elif sort == "name_desc":
@@ -504,6 +508,8 @@ def get_products(db: Session, skip: int = 0, limit: int = 100, q: Optional[str]=
         order_clause = ''
         if sort == 'price_asc': order_clause = ' ORDER BY price ASC'
         elif sort == 'price_desc': order_clause = ' ORDER BY price DESC'
+        elif sort == 'price_retail_asc': order_clause = ' ORDER BY CASE WHEN price_retail IS NULL THEN 1 ELSE 0 END ASC, price_retail ASC'
+        elif sort == 'price_retail_desc': order_clause = ' ORDER BY CASE WHEN price_retail IS NULL THEN 1 ELSE 0 END ASC, price_retail DESC'
         elif sort == 'name_asc': order_clause = ' ORDER BY name ASC'
         elif sort == 'name_desc': order_clause = ' ORDER BY name DESC'
         sql = f"SELECT {cols_sql} FROM products{where_clause}{order_clause} LIMIT :limit OFFSET :skip"
@@ -3026,6 +3032,18 @@ def _normalize_admin_zone(value: Optional[str]) -> Optional[str]:
     return zone or None
 
 
+def _normalize_admin_business_scope(value: Optional[str], allow_all: bool = False) -> Optional[str]:
+    try:
+        scope = str(value or '').strip().lower()
+    except Exception:
+        scope = ''
+    if scope in ('mayorista', 'minorista'):
+        return scope
+    if allow_all and scope in ('all', 'todos', 'ambos', '*', 'owner'):
+        return 'all'
+    return None
+
+
 def get_admin_user_by_username(db: Session, username: str) -> Optional[models.AdminUser]:
     uname = _normalize_admin_username(username)
     if not uname:
@@ -3045,7 +3063,11 @@ def get_admin_user_by_id(db: Session, user_id: int) -> Optional[models.AdminUser
 
 def list_admin_users(db: Session) -> List[models.AdminUser]:
     try:
-        return db.query(models.AdminUser).order_by(models.AdminUser.role.asc(), models.AdminUser.username.asc()).all()
+        return db.query(models.AdminUser).order_by(
+            models.AdminUser.role.asc(),
+            models.AdminUser.business_scope.asc(),
+            models.AdminUser.username.asc(),
+        ).all()
     except Exception:
         return []
 
@@ -3061,10 +3083,19 @@ def create_admin_user(
     if not username:
         raise HTTPException(status_code=400, detail='Username requerido')
     role = _normalize_admin_role(force_role or payload.role)
+    business_scope = _normalize_admin_business_scope(
+        getattr(payload, 'business_scope', None),
+        allow_all=(role == 'owner'),
+    )
+    if role == 'owner':
+        business_scope = business_scope or 'all'
+    else:
+        business_scope = business_scope or 'mayorista'
     obj = models.AdminUser(
         username=username,
         full_name=str(getattr(payload, 'full_name', None) or '').strip() or None,
         role=role,
+        business_scope=business_scope,
         zone=_normalize_admin_zone(getattr(payload, 'zone', None)),
         hashed_password=hashed_password,
         is_active=True,
@@ -3125,6 +3156,118 @@ def update_admin_user_zone(db: Session, user_id: int, zone: Optional[str]) -> Op
     except Exception:
         pass
     return user
+
+
+def update_admin_user_scope_and_zone(
+    db: Session,
+    user_id: int,
+    business_scope: Optional[str] = None,
+    zone: Optional[str] = None,
+) -> Optional[models.AdminUser]:
+    user = get_admin_user_by_id(db, user_id)
+    if not user:
+        return None
+    role = _normalize_admin_role(getattr(user, 'role', None))
+    if business_scope is not None:
+        normalized_scope = _normalize_admin_business_scope(business_scope, allow_all=(role == 'owner'))
+        if role == 'owner':
+            user.business_scope = normalized_scope or 'all'
+        elif normalized_scope in ('mayorista', 'minorista'):
+            user.business_scope = normalized_scope
+    if zone is not None:
+        user.zone = _normalize_admin_zone(zone)
+    db.add(user)
+    try:
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise
+    try:
+        db.refresh(user)
+    except Exception:
+        pass
+    return user
+
+
+def _clean_branch_text(value: Optional[str], max_len: int) -> str:
+    try:
+        text_value = str(value or '').strip()
+    except Exception:
+        text_value = ''
+    return text_value[:max_len].strip()
+
+
+def _branch_address_line(street: Optional[str], street_number: Optional[str]) -> Optional[str]:
+    street_value = _clean_branch_text(street, 200)
+    street_number_value = _clean_branch_text(street_number, 50)
+    line = ' '.join(part for part in (street_value, street_number_value) if part).strip()
+    return line or None
+
+
+def list_admin_branches(
+    db: Session,
+    business_scope: Optional[str] = None,
+    include_inactive: bool = False,
+) -> List[models.AdminBranch]:
+    try:
+        query = db.query(models.AdminBranch)
+        normalized_scope = _normalize_admin_business_scope(business_scope)
+        if normalized_scope:
+            query = query.filter(models.AdminBranch.business_scope == normalized_scope)
+        if not include_inactive:
+            query = query.filter(models.AdminBranch.is_active == True)  # noqa: E712
+        return query.order_by(models.AdminBranch.business_scope.asc(), models.AdminBranch.name.asc(), models.AdminBranch.id.asc()).all()
+    except Exception:
+        return []
+
+
+def get_admin_branch_by_id(db: Session, branch_id: int) -> Optional[models.AdminBranch]:
+    try:
+        return db.query(models.AdminBranch).filter(models.AdminBranch.id == int(branch_id)).first()
+    except Exception:
+        return None
+
+
+def create_admin_branch(
+    db: Session,
+    payload: schemas.AdminBranchCreate,
+    created_by: Optional[str] = None,
+) -> models.AdminBranch:
+    business_scope = _normalize_admin_business_scope(getattr(payload, 'business_scope', None)) or 'mayorista'
+    obj = models.AdminBranch(
+        name=_clean_branch_text(getattr(payload, 'name', None), 160),
+        business_scope=business_scope,
+        street=_clean_branch_text(getattr(payload, 'street', None), 200),
+        street_number=_clean_branch_text(getattr(payload, 'street_number', None), 50),
+        address_line=_branch_address_line(getattr(payload, 'street', None), getattr(payload, 'street_number', None)),
+        lat=float(getattr(payload, 'lat')),
+        lon=float(getattr(payload, 'lon')),
+        is_active=bool(getattr(payload, 'is_active', True)),
+        created_by=str(created_by).strip() if created_by else None,
+    )
+    db.add(obj)
+    db.commit()
+    db.refresh(obj)
+    return obj
+
+
+def delete_admin_branch(db: Session, branch_id: int) -> bool:
+    branch = get_admin_branch_by_id(db, branch_id)
+    if not branch:
+        return False
+    db.delete(branch)
+    try:
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise
+    return True
 
 
 def _clean_address_str(value, max_len: int = 200) -> str:

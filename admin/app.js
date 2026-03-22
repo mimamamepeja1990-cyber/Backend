@@ -13,11 +13,18 @@ const SECTION_TITLES = {
   'preparations': 'Preparaciones',
   'routes': 'Rutas',
   'deliveries': 'Entregas',
+  'branches': 'Sucursales',
   'users': 'Usuarios',
   'admin-console': 'Consola Admin',
 };
 let currentAdminUser = null;
 let currentSectionId = 'dashboard';
+const BUSINESS_SCOPE_DEFAULT = 'mayorista';
+const BUSINESS_SCOPE_LABELS = {
+  mayorista: 'Mayorista',
+  minorista: 'Minorista',
+};
+let currentBusinessScope = BUSINESS_SCOPE_DEFAULT;
 
 let driverMap = null;
 let driverMapReady = false;
@@ -1176,6 +1183,7 @@ async function loadDriverInsights(driver){
   const params = new URLSearchParams();
   if (driver && (driver.driver_id || driver.id)) params.set('driver_id', String(driver.driver_id || driver.id));
   else if (driver && (driver.driver_username || driver.username)) params.set('driver_username', String(driver.driver_username || driver.username));
+  params.set('customer_type', getScopedOrderCustomerType());
   const requestId = ++driverInsightsReqSeq;
   const payload = await safeFetch(`${API_BASE}/admin/driver-insights?${params.toString()}`, { cache: 'no-store' });
   if (requestId !== driverInsightsReqSeq) return null;
@@ -1220,8 +1228,16 @@ async function refreshSelectedDriverInsights(forceMapFocus){
 
 function canAccessSection(sectionId){
   if (!currentAdminUser || !sectionId) return false;
+  if (sectionId === 'retail-prices') return false;
+  const sectionEl = document.getElementById(sectionId);
+  const allowedRoles = sectionEl && sectionEl.dataset && sectionEl.dataset.role
+    ? String(sectionEl.dataset.role || '').split(',').map((item) => String(item || '').trim()).filter(Boolean)
+    : [];
+  if (allowedRoles.length && !allowedRoles.includes(String(currentAdminUser.role || '').trim())){
+    return false;
+  }
   if (currentAdminUser.role === 'owner') return true;
-  if (currentAdminUser.role === 'admin') return sectionId !== 'admin-console';
+  if (currentAdminUser.role === 'admin') return true;
   return false;
 }
 
@@ -1258,6 +1274,7 @@ function activateSection(sectionId){
   if (sectionId === 'preparations') { try{ refreshPreparations(false); }catch(_){ } }
   if (sectionId === 'routes') { try{ refreshRoutes(false); }catch(_){ } }
   if (sectionId === 'deliveries') { try{ refreshDeliveries(false); }catch(_){ } }
+  if (sectionId === 'branches') { try{ const p = renderBranches(); if (p && p.catch) p.catch(()=>{}); }catch(_){ } }
   if (sectionId === 'admin-console') {
     try{
       ensureAdminConsole();
@@ -1308,7 +1325,89 @@ try{
 // Admin JS ? UI principal sin modo oscuro ni bot?n de tarjeta (card)
 console.log('[admin] app.js loaded');
 const REMOTE_API_BASE = 'https://backend-0lcs.onrender.com';
-let API_BASE = (location.protocol && location.protocol.startsWith('http')) ? location.origin : REMOTE_API_BASE;
+const LOCAL_API_CANDIDATES = ['http://127.0.0.1:8000', 'http://localhost:8000'];
+
+function isLocalHostname(hostname){
+  const host = String(hostname || '').trim().toLowerCase();
+  if (!host) return false;
+  if (host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host === '::1') return true;
+  if (/^10\.\d+\.\d+\.\d+$/.test(host)) return true;
+  if (/^192\.168\.\d+\.\d+$/.test(host)) return true;
+  const match172 = host.match(/^172\.(\d+)\.\d+\.\d+$/);
+  if (match172){
+    const second = Number(match172[1]);
+    if (second >= 16 && second <= 31) return true;
+  }
+  return false;
+}
+
+function isLocalRuntime(){
+  try{
+    if (!(location.protocol && location.protocol.startsWith('http'))) return true;
+    return isLocalHostname(location.hostname);
+  }catch(_){
+    return true;
+  }
+}
+
+function buildApiBaseCandidates(){
+  const candidates = [];
+  const push = (value) => {
+    const text = String(value || '').trim();
+    if (!text || candidates.includes(text)) return;
+    candidates.push(text);
+  };
+  const fileMode = !(location.protocol && location.protocol.startsWith('http'));
+  const localRuntime = isLocalRuntime();
+
+  if (fileMode){
+    LOCAL_API_CANDIDATES.forEach(push);
+    return candidates;
+  }
+
+  const origin = String(location.origin || '').trim();
+  const currentPort = String(location.port || '').trim();
+  if (localRuntime){
+    if (currentPort === '8000'){
+      push(origin);
+    }
+    LOCAL_API_CANDIDATES.forEach(push);
+    return candidates;
+  }
+
+  push(origin);
+  push(REMOTE_API_BASE);
+  return candidates;
+}
+
+let API_BASE = buildApiBaseCandidates()[0] || ((location.protocol && location.protocol.startsWith('http')) ? location.origin : LOCAL_API_CANDIDATES[0]);
+const API_BASE_RECHECK_MS = 5000;
+let apiBaseCheckedAt = 0;
+let apiBaseReachable = false;
+
+function canUseSameOriginStaticFallback(){
+  try{
+    return !!(location.protocol && location.protocol.startsWith('http') && String(location.port || '').trim() === '8000');
+  }catch(_){
+    return false;
+  }
+}
+
+function buildOptionalSameOriginUrls(paths){
+  if (!canUseSameOriginStaticFallback()) return [];
+  const urls = [];
+  (Array.isArray(paths) ? paths : []).forEach((path) => {
+    const text = String(path || '').trim();
+    if (!text || urls.includes(text)) return;
+    urls.push(text);
+  });
+  return urls;
+}
+
+function hasApiConnection(){
+  return !!apiBaseReachable;
+}
+
 function getActor(){
   try{
     const v = localStorage.getItem('admin:actor');
@@ -1338,6 +1437,63 @@ function normalizeUsername(value){
   return String(value || '').trim().toLowerCase();
 }
 
+function normalizeBusinessScope(value){
+  return String(value || '').trim().toLowerCase() === 'minorista' ? 'minorista' : 'mayorista';
+}
+
+function normalizeAccountBusinessScope(value, role){
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw === 'all' || raw === 'ambos' || raw === 'todos'){
+    return String(role || '').trim().toLowerCase() === 'owner' ? 'all' : 'mayorista';
+  }
+  return raw === 'minorista' ? 'minorista' : 'mayorista';
+}
+
+function getAccountBusinessScopeLabel(value, role){
+  const normalized = normalizeAccountBusinessScope(value, role);
+  if (normalized === 'all' && String(role || '').trim().toLowerCase() === 'owner'){
+    return 'Ambos';
+  }
+  return getBusinessScopeLabel(normalized);
+}
+
+function getBusinessScopeLabel(scope = currentBusinessScope){
+  const normalized = normalizeBusinessScope(scope);
+  return BUSINESS_SCOPE_LABELS[normalized] || BUSINESS_SCOPE_LABELS[BUSINESS_SCOPE_DEFAULT];
+}
+
+function isRetailBusinessScope(scope = currentBusinessScope){
+  return normalizeBusinessScope(scope) === 'minorista';
+}
+
+function getScopedOrderCustomerType(){
+  return normalizeBusinessScope(currentBusinessScope);
+}
+
+function matchesCurrentBusinessScope(order){
+  return normalizeOrderCustomerType(order && order.customer_type) === getScopedOrderCustomerType();
+}
+
+function getScopedProductPriceField(scope = currentBusinessScope){
+  return isRetailBusinessScope(scope) ? 'price_retail' : 'price';
+}
+
+function getScopedProductPriceLabel(scope = currentBusinessScope, { kg = false } = {}){
+  if (isRetailBusinessScope(scope)){
+    return kg ? 'Precio minorista (unidad completa)' : 'Precio minorista';
+  }
+  return kg ? 'Precio mayorista (unidad completa)' : 'Precio mayorista';
+}
+
+function getScopedProductPrice(product){
+  if (!product || typeof product !== 'object') return 0;
+  const wholesale = Number(product.price ?? 0);
+  if (!isRetailBusinessScope()) return Number.isFinite(wholesale) ? wholesale : 0;
+  const retail = Number(product.price_retail);
+  if (Number.isFinite(retail)) return retail;
+  return Number.isFinite(wholesale) ? wholesale : 0;
+}
+
 function getAdminToken(){
   try{
     const t = localStorage.getItem(ADMIN_TOKEN_KEY);
@@ -1360,16 +1516,26 @@ function clearAdminToken(){
 function getSessionUser(){
   const session = readLocalJson(ADMIN_SESSION_KEY, null);
   if (!session || !session.username) return null;
+  session.role = String(session.role || '').trim().toLowerCase();
+  session.business_scope = normalizeAccountBusinessScope(session.business_scope, session.role);
+  session.active_business_scope = normalizeBusinessScope(
+    session.active_business_scope || (session.business_scope === 'minorista' ? 'minorista' : currentBusinessScope)
+  );
   return session;
 }
 
-function setSessionUser(user){
+function setSessionUser(user, businessScope = currentBusinessScope){
   if (!user) return;
+  const role = String(user.role || '').trim().toLowerCase();
+  const assignedScope = normalizeAccountBusinessScope(user.business_scope, role);
+  const activeScope = normalizeBusinessScope(user.active_business_scope || businessScope || currentBusinessScope);
   const session = {
     id: user.id,
     username: user.username,
-    role: user.role,
+    role,
     full_name: user.full_name || null,
+    business_scope: assignedScope,
+    active_business_scope: activeScope,
     loginAt: Date.now(),
   };
   writeLocalJson(ADMIN_SESSION_KEY, session);
@@ -1381,6 +1547,123 @@ function clearSessionUser(){
     localStorage.removeItem(ADMIN_SESSION_KEY);
     localStorage.removeItem('admin:actor');
   }catch(_){ }
+}
+
+function invalidateBusinessScopeCaches(){
+  salesStatsTs = 0;
+  salesStatsCache = null;
+  salesStatsCacheKey = '';
+  lastOrdersBaseWeb = [];
+  lastPreparationsBase = [];
+  lastCustomersBase = [];
+  lastCustomersMonthKey = '';
+  lastCustomersOrdersRaw = [];
+  lastCustomersOrdersMeta = { totalOrders: 0, limit: 0 };
+  routesAssignedBase = [];
+  routesUnassignedBase = [];
+}
+
+function syncScopeSensitiveProductUi(){
+  try{
+    const primaryHead = document.getElementById('productsPrimaryPriceHead');
+    if (primaryHead) primaryHead.textContent = getScopedProductPriceLabel();
+  }catch(_){ }
+  try{
+    const bulkPrimaryOpt = document.getElementById('bulkTargetPriceOption');
+    if (bulkPrimaryOpt) bulkPrimaryOpt.textContent = getScopedProductPriceLabel();
+  }catch(_){ }
+  try{
+    if (priceLabel){
+      const unit = normalizeSaleUnit((productForm && productForm.sale_unit && productForm.sale_unit.value) ? productForm.sale_unit.value : 'unit');
+      priceLabel.textContent = getScopedProductPriceLabel(currentBusinessScope, { kg: unit === 'kg' });
+    }
+  }catch(_){ }
+  try{
+    const retailHead = document.getElementById('productsRetailPriceHead');
+    if (retailHead) retailHead.classList.add('hidden');
+  }catch(_){ }
+  try{
+    document.querySelectorAll('.product-retail-price-cell').forEach((cell) => {
+      cell.classList.add('hidden');
+    });
+  }catch(_){ }
+  try{
+    const retailField = document.getElementById('retailPriceField');
+    if (retailField) retailField.classList.add('hidden');
+  }catch(_){ }
+  try{
+    const retailOpt = document.getElementById('bulkTargetRetailOption');
+    const bothOpt = document.getElementById('bulkTargetBothPricesOption');
+    if (retailOpt){
+      retailOpt.hidden = true;
+      retailOpt.disabled = true;
+    }
+    if (bothOpt){
+      bothOpt.hidden = true;
+      bothOpt.disabled = true;
+    }
+    if (bulkTarget){
+      const currentTarget = String(bulkTarget.value || 'price');
+      if (currentTarget === 'price_retail' || currentTarget === 'both_prices'){
+        bulkTarget.value = 'price';
+      }
+    }
+  }catch(_){ }
+  try{ updateBulkBar(); }catch(_){ }
+}
+
+function syncBusinessScopeUI(){
+  const scope = getScopedOrderCustomerType();
+  const scopeLabel = getBusinessScopeLabel(scope);
+  currentOrderCustomerType = scope;
+  try{ document.body.dataset.businessScope = scope; }catch(_){ }
+  try{
+    const scopeLabelEl = document.getElementById('currentBusinessScopeLabel');
+    if (scopeLabelEl) scopeLabelEl.textContent = `Rubro: ${scopeLabel}`;
+  }catch(_){ }
+  try{
+    const ordersTitle = document.getElementById('ordersSectionTitle');
+    if (ordersTitle) ordersTitle.textContent = `Pedidos - ${scopeLabel}`;
+  }catch(_){ }
+  try{
+    const ordersTabs = document.getElementById('ordersCustomerTabs');
+    if (ordersTabs) ordersTabs.classList.add('hidden');
+  }catch(_){ }
+  try{
+    const retailNav = document.querySelector('.sidebar nav a[data-section="retail-prices"]');
+    if (retailNav) retailNav.classList.add('role-hidden');
+  }catch(_){ }
+  try{
+    const retailSection = document.getElementById('retail-prices');
+    if (retailSection) retailSection.classList.add('role-hidden');
+    if (currentSectionId === 'retail-prices'){
+      activateSection('catalog');
+    }
+  }catch(_){ }
+  try{
+    if (retailPricesTableBody) retailPricesTableBody.innerHTML = '';
+  }catch(_){ }
+  try{ normalizeDashboardStaticCopy(); }catch(_){ }
+  try{ updateUserUI(currentAdminUser); }catch(_){ }
+  try{ syncScopeSensitiveProductUi(); }catch(_){ }
+}
+
+function applyBusinessScope(scope, options = {}){
+  const opts = options || {};
+  currentBusinessScope = normalizeBusinessScope(scope);
+  if (currentAdminUser && typeof currentAdminUser === 'object'){
+    currentAdminUser.active_business_scope = currentBusinessScope;
+  }
+  if (opts.invalidate !== false){
+    try{ invalidateBusinessScopeCaches(); }catch(_){ }
+  }
+  if (opts.persist !== false && currentAdminUser){
+    try{ setSessionUser(currentAdminUser, currentBusinessScope); }catch(_){ }
+  }
+  syncBusinessScopeUI();
+  if (currentSectionId === 'branches'){
+    try{ const p = renderBranches(); if (p && p.catch) p.catch(()=>{}); }catch(_){ }
+  }
 }
 
 function setAuthLocked(locked){
@@ -1401,12 +1684,20 @@ function formatRoleLabel(role){
 function updateUserUI(user){
   const userLabel = document.getElementById('currentUserLabel');
   const roleLabel = document.getElementById('currentRoleLabel');
+  const scopeLabel = document.getElementById('currentBusinessScopeLabel');
   if (userLabel) userLabel.textContent = user ? user.username : '—';
   if (roleLabel) roleLabel.textContent = user ? formatRoleLabel(user.role) : '—';
+  if (scopeLabel) scopeLabel.textContent = user ? `Rubro: ${getBusinessScopeLabel()}` : '—';
 }
 
 function applyRoleAccess(user){
-  currentAdminUser = user || null;
+  const assignedScope = user ? normalizeAccountBusinessScope(user.business_scope, user.role) : null;
+  currentAdminUser = user ? Object.assign({}, user, {
+    business_scope: assignedScope,
+    active_business_scope: normalizeBusinessScope(
+      user.active_business_scope || (assignedScope === 'minorista' ? 'minorista' : currentBusinessScope)
+    ),
+  }) : null;
   updateUserUI(user);
   updateUserFormAccess();
   const role = user ? user.role : null;
@@ -1421,6 +1712,7 @@ function applyRoleAccess(user){
     const allowed = role && roles.includes(role);
     el.classList.toggle('role-hidden', !allowed);
   });
+  syncBusinessScopeUI();
 
   const activeLink = document.querySelector('.sidebar nav a.active[data-section]');
   const activeSection = activeLink ? activeLink.getAttribute('data-section') : null;
@@ -1430,16 +1722,77 @@ function applyRoleAccess(user){
 }
 
 function initAuth(){
+  const scopeStep = document.getElementById('authScopeStep');
+  const loginStep = document.getElementById('authLoginStep');
   const loginForm = document.getElementById('authLoginForm');
   const userInput = document.getElementById('authUser');
   const passInput = document.getElementById('authPass');
   const showPass = document.getElementById('authShowPass');
   const errorEl = document.getElementById('authError');
   const logoutBtn = document.getElementById('logoutBtn');
+  const scopeButtons = Array.from(document.querySelectorAll('[data-auth-business-scope]'));
+  const scopeContinueBtn = document.getElementById('authScopeContinue');
+  const backToScopeBtn = document.getElementById('authBackToScope');
+  const selectedScopeLabel = document.getElementById('authSelectedScopeLabel');
+  let pendingBusinessScope = BUSINESS_SCOPE_DEFAULT;
 
   function setAuthError(msg){
     if (!errorEl) return;
     errorEl.textContent = msg || '';
+  }
+
+  function syncAuthScopeSummary(){
+    const scopeLabel = getBusinessScopeLabel(pendingBusinessScope);
+    if (selectedScopeLabel) selectedScopeLabel.textContent = scopeLabel;
+    if (scopeContinueBtn) scopeContinueBtn.textContent = `Continuar con ${scopeLabel}`;
+  }
+
+  function setAuthStep(step){
+    const nextStep = String(step || 'scope').trim().toLowerCase() === 'login' ? 'login' : 'scope';
+    if (scopeStep) scopeStep.classList.toggle('hidden', nextStep !== 'scope');
+    if (loginStep) loginStep.classList.toggle('hidden', nextStep !== 'login');
+    try{ document.body.dataset.authStep = nextStep; }catch(_){ }
+    if (nextStep === 'login'){
+      try{ userInput && userInput.focus(); }catch(_){ }
+    } else {
+      try{
+        const activeScopeBtn = scopeButtons.find((btn) => btn && btn.classList && btn.classList.contains('active'));
+        if (activeScopeBtn) activeScopeBtn.focus();
+        else if (scopeContinueBtn) scopeContinueBtn.focus();
+      }catch(_){ }
+    }
+  }
+
+  function setPendingBusinessScope(scope){
+    pendingBusinessScope = normalizeBusinessScope(scope);
+    scopeButtons.forEach((btn) => {
+      const btnScope = btn && btn.dataset ? btn.dataset.authBusinessScope : '';
+      btn.classList.toggle('active', normalizeBusinessScope(btnScope) === pendingBusinessScope);
+    });
+    syncAuthScopeSummary();
+  }
+
+  scopeButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const scope = btn && btn.dataset ? btn.dataset.authBusinessScope : BUSINESS_SCOPE_DEFAULT;
+      setPendingBusinessScope(scope);
+      setAuthError('');
+    });
+  });
+  setPendingBusinessScope(BUSINESS_SCOPE_DEFAULT);
+  setAuthStep('scope');
+
+  if (scopeContinueBtn){
+    scopeContinueBtn.addEventListener('click', () => {
+      setAuthError('');
+      setAuthStep('login');
+    });
+  }
+  if (backToScopeBtn){
+    backToScopeBtn.addEventListener('click', () => {
+      setAuthError('');
+      setAuthStep('scope');
+    });
   }
 
   if (showPass && passInput){
@@ -1460,18 +1813,30 @@ function initAuth(){
       }
       setAuthError('');
       try{
-        await ensureApiBase();
+        const resolvedApiBase = await ensureApiBase();
+        if (!resolvedApiBase){
+          setAuthError('Backend local no disponible. Levantá la API en el puerto 8000.');
+          return;
+        }
       }catch(_){ }
       try{
         const body = new URLSearchParams();
         body.set('username', username);
         body.set('password', password);
+        body.set('scope', normalizeBusinessScope(pendingBusinessScope));
         const res = await fetch(API_BASE + '/admin/auth/token', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body: body.toString(),
         });
         if (!res || !res.ok){
+          try{
+            const errPayload = await res.json();
+            if (errPayload && (errPayload.detail || errPayload.error)){
+              setAuthError(String(errPayload.detail || errPayload.error));
+              return;
+            }
+          }catch(_){ }
           setAuthError('Usuario o contraseña incorrecta.');
           return;
         }
@@ -1488,9 +1853,13 @@ function initAuth(){
           clearAdminToken();
           return;
         }
-        setSessionUser(me);
+        const scope = normalizeBusinessScope(me.active_business_scope || pendingBusinessScope);
+        me.active_business_scope = scope;
+        applyBusinessScope(scope, { persist: false, invalidate: true });
+        setSessionUser(me, scope);
         setAuthLocked(false);
         applyRoleAccess(me);
+        try{ setupSocket(); }catch(_){ }
         activateSection('dashboard');
       }catch(e){
         console.error('admin login failed', e);
@@ -1513,13 +1882,25 @@ function initAuth(){
     try{
       await ensureApiBase();
     }catch(_){ }
+    if (!hasApiConnection()){
+      setAuthLocked(true);
+      setAuthError('');
+      setPendingBusinessScope(BUSINESS_SCOPE_DEFAULT);
+      setAuthStep('scope');
+      return;
+    }
     const token = getAdminToken();
     if (token){
+      const sessionUser = getSessionUser();
       const me = await safeFetch(API_BASE + '/admin/auth/me').catch(() => null);
     if (me && me.username){
-      setSessionUser(me);
+      const scope = normalizeBusinessScope((me && me.active_business_scope) || (sessionUser && sessionUser.active_business_scope));
+      me.active_business_scope = scope;
+      applyBusinessScope(scope, { persist: false, invalidate: true });
+      setSessionUser(me, scope);
       setAuthLocked(false);
       applyRoleAccess(me);
+      try{ setupSocket(); }catch(_){ }
       if (me.role !== 'repartidor'){
         const activeLink = document.querySelector('.sidebar nav a.active[data-section]');
         const activeSection = activeLink ? activeLink.getAttribute('data-section') : null;
@@ -1531,7 +1912,9 @@ function initAuth(){
     clearAdminToken();
     clearSessionUser();
     setAuthLocked(true);
-    try{ userInput && userInput.focus(); }catch(_){ }
+    setAuthError('');
+    setPendingBusinessScope(BUSINESS_SCOPE_DEFAULT);
+    setAuthStep('scope');
   })();
 }
 initAuth();
@@ -1555,7 +1938,21 @@ async function safeFetch(url, opts) {
       next.headers = headers;
     }catch(_){ }
   }
-  const res = await fetch(url, next);
+  let res;
+  try{
+    res = await fetch(url, next);
+  }catch(err){
+    try{
+      const resolved = new URL(url, location.origin);
+      const apiOrigin = new URL(API_BASE, location.origin).origin;
+      if (resolved.origin === apiOrigin){
+        apiBaseCheckedAt = Date.now();
+        apiBaseReachable = false;
+        if(apiBaseIndicator) apiBaseIndicator.textContent = API_BASE + ' (sin conexión)';
+      }
+    }catch(_){ }
+    throw err;
+  }
   if (!res) throw new Error('no-response');
   const ct = res.headers.get('content-type') || '';
   let payload = null;
@@ -1574,18 +1971,20 @@ async function safeFetch(url, opts) {
   return payload;
 }
 
-async function ensureApiBase(){
+async function ensureApiBase(options){
+  const opts = options || {};
+  const now = Date.now();
+  if (!opts.force && apiBaseCheckedAt && (now - apiBaseCheckedAt) < API_BASE_RECHECK_MS){
+    return apiBaseReachable ? API_BASE : null;
+  }
   const candidates = [];
-  const fileMode = !(location.protocol && location.protocol.startsWith('http'));
-  if (fileMode){
-    candidates.push('http://127.0.0.1:8000');
-    candidates.push(REMOTE_API_BASE);
-  } else {
-    try{ if (API_BASE) candidates.push(String(API_BASE)); }catch(_){ }
-  }
-  for (const c of ['http://127.0.0.1:8000', REMOTE_API_BASE]){
-    if (!candidates.includes(c)) candidates.push(c);
-  }
+  const push = (value) => {
+    const text = String(value || '').trim();
+    if (!text || candidates.includes(text)) return;
+    candidates.push(text);
+  };
+  try{ if (API_BASE) push(API_BASE); }catch(_){ }
+  buildApiBaseCandidates().forEach(push);
   for (const base of candidates){
     try{
       const controller = new AbortController();
@@ -1593,6 +1992,8 @@ async function ensureApiBase(){
       const res = await fetch(base + '/health', { cache: 'no-store', signal: controller.signal });
       clearTimeout(t);
       if (res && res.ok){
+        apiBaseCheckedAt = Date.now();
+        apiBaseReachable = true;
         API_BASE = base;
         if(apiBaseIndicator) apiBaseIndicator.textContent = API_BASE;
         return API_BASE;
@@ -1600,7 +2001,11 @@ async function ensureApiBase(){
     }catch(_){ }
   }
   if(apiBaseIndicator) apiBaseIndicator.textContent = API_BASE + ' (sin conexión)';
-  return API_BASE;
+  apiBaseCheckedAt = Date.now();
+  apiBaseReachable = false;
+  if (candidates.length) API_BASE = candidates[0];
+  if(apiBaseIndicator) apiBaseIndicator.textContent = API_BASE + ' (sin conexión)';
+  return null;
 }
 // --- Imágenes Promocionales (admin) ---
 const promoImagesList = document.getElementById('promoImagesList');
@@ -2163,7 +2568,7 @@ function normalizeDashboardStaticCopy(){
   setNodeText('.dashboard-group-catalog .dashboard-group-note', 'Base activa');
   setNodeText('#dashboardSalesRevenue30 + .dashboard-kpi-meta', 'Facturacion acumulada del periodo.');
   setNodeText('#dashboardSalesOrders30 + .dashboard-kpi-meta', 'Volumen total procesado en 30 dias.');
-  setNodeText('#dashboardAvgPrice + .dashboard-kpi-meta', 'Referencia rapida del catalogo mayorista.');
+  setNodeText('#dashboardAvgPrice + .dashboard-kpi-meta', `Referencia rapida del catalogo ${isRetailBusinessScope() ? 'minorista' : 'mayorista'}.`);
   setNodeText('article[data-dashboard-action="filters"] .dashboard-kpi-label', 'Cobertura de categorias');
   setNodeText(dashboardCategoryCoverageMetaEl, 'Esperando datos del catalogo.');
   setNodeText('.dashboard-action-card[data-dashboard-action="orders"] .dashboard-action-kicker', 'Accion');
@@ -2343,9 +2748,23 @@ const userForm = document.getElementById('userForm');
 const userUsernameInput = document.getElementById('userUsername');
 const userPasswordInput = document.getElementById('userPassword');
 const userRoleSelect = document.getElementById('userRole');
+const userBusinessScopeSelect = document.getElementById('userBusinessScope');
 const userZoneSelect = document.getElementById('userZone');
+const userZoneField = document.getElementById('userZoneField');
 const userFormMsg = document.getElementById('userFormMsg');
 const usersTableBody = document.querySelector('#usersTable tbody');
+const branchForm = document.getElementById('branchForm');
+const branchNameInput = document.getElementById('branchName');
+const branchStreetInput = document.getElementById('branchStreet');
+const branchStreetNumberInput = document.getElementById('branchStreetNumber');
+const branchLatInput = document.getElementById('branchLat');
+const branchLonInput = document.getElementById('branchLon');
+const branchFormMsg = document.getElementById('branchFormMsg');
+const branchesTableBody = document.querySelector('#branchesTable tbody');
+const branchesSectionTitle = document.getElementById('branchesSectionTitle');
+const branchesSectionSub = document.getElementById('branchesSectionSub');
+const branchesMapContainer = document.getElementById('branchesMap');
+const branchesMapEmpty = document.getElementById('branchesMapEmpty');
 
 function getZoneOptions(){
   const opts = [];
@@ -2361,6 +2780,15 @@ function updateUserFormAccess(){
   if (!userForm) return;
   const isOwner = currentAdminUser && currentAdminUser.role === 'owner';
   userForm.classList.toggle('role-hidden', !isOwner);
+  syncUserFormRoleState();
+}
+
+function syncUserFormRoleState(){
+  const role = userRoleSelect ? String(userRoleSelect.value || 'admin').trim().toLowerCase() : 'admin';
+  const isDriver = role === 'repartidor';
+  if (userZoneField) userZoneField.classList.toggle('role-hidden', !isDriver);
+  if (userZoneSelect) userZoneSelect.disabled = !isDriver;
+  if (!isDriver && userZoneSelect) userZoneSelect.value = '';
 }
 let currentEditId = null;
 let imageUrl = null;
@@ -2451,6 +2879,7 @@ let duplicateSkuSet = new Set();
 let duplicateSkuSetTs = 0;
 let salesStatsTs = 0;
 let salesStatsCache = null;
+let salesStatsCacheKey = '';
 let currentPromotionEditId = null;
 const SALES_STATS_TTL_MS = 1000 * 60;
 
@@ -2483,6 +2912,10 @@ function formatUserDate(ts){
 
 let adminUsersCache = [];
 let driverNextZonesCache = new Map();
+let branchesCache = [];
+let branchesMap = null;
+let branchesMapReady = false;
+const branchMarkers = new Map();
 
 async function fetchAdminUsers(){
   try{
@@ -2523,6 +2956,7 @@ async function renderUsers(){
   if (!usersTableBody) return;
   if (!currentAdminUser || (currentAdminUser.role !== 'owner' && currentAdminUser.role !== 'admin')) return;
   updateUserFormAccess();
+  if (userBusinessScopeSelect) userBusinessScopeSelect.value = getScopedOrderCustomerType();
   const users = await fetchAdminUsers();
   await fetchDriverNextZones();
   const roleOrder = { owner: 0, admin: 1, repartidor: 2 };
@@ -2541,6 +2975,8 @@ async function renderUsers(){
     tdUser.textContent = u.username || '—';
     const tdRole = document.createElement('td');
     tdRole.textContent = formatRoleLabel(u.role);
+    const tdScope = document.createElement('td');
+    tdScope.textContent = getAccountBusinessScopeLabel(u.business_scope, u.role);
     const tdZone = document.createElement('td');
     const tdNextZone = document.createElement('td');
     const isRepartidor = String(u.role || '').toLowerCase() === 'repartidor';
@@ -2677,6 +3113,7 @@ async function renderUsers(){
     }
     tr.appendChild(tdUser);
     tr.appendChild(tdRole);
+    tr.appendChild(tdScope);
     tr.appendChild(tdZone);
     tr.appendChild(tdNextZone);
     tr.appendChild(tdCreated);
@@ -2694,6 +3131,7 @@ function handleUserFormSubmit(ev){
   const username = userUsernameInput ? String(userUsernameInput.value || '').trim() : '';
   const password = userPasswordInput ? String(userPasswordInput.value || '') : '';
   const role = userRoleSelect ? String(userRoleSelect.value || 'admin') : 'admin';
+  const businessScope = userBusinessScopeSelect ? normalizeBusinessScope(userBusinessScopeSelect.value || 'mayorista') : 'mayorista';
   const zone = userZoneSelect ? String(userZoneSelect.value || '').trim() : '';
   if (!username || !password){
     setUserFormMessage('Completá usuario y contraseña.', 'error');
@@ -2715,10 +3153,12 @@ function handleUserFormSubmit(ev){
       await safeFetch(`${API_BASE}/admin/users`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, password, role, zone: zone || null }),
+        body: JSON.stringify({ username, password, role, business_scope: businessScope, zone: zone || null }),
       });
       setUserFormMessage('Usuario creado correctamente.', 'success');
       if (userForm) userForm.reset();
+      if (userBusinessScopeSelect) userBusinessScopeSelect.value = getScopedOrderCustomerType();
+      syncUserFormRoleState();
       renderUsers();
     }catch(e){
       const msg = (e && e.payload && (e.payload.detail || e.payload.error)) ? String(e.payload.detail || e.payload.error) : 'No se pudo crear el usuario.';
@@ -2732,6 +3172,13 @@ function setupUserManagement(){
     userForm.addEventListener('submit', handleUserFormSubmit);
     userForm.addEventListener('input', () => setUserFormMessage(''));
   }
+  if (userRoleSelect){
+    userRoleSelect.addEventListener('change', () => {
+      syncUserFormRoleState();
+      setUserFormMessage('');
+    });
+  }
+  syncUserFormRoleState();
   if (usersTableBody){
     usersTableBody.addEventListener('click', (ev) => {
       const btn = ev.target && ev.target.closest ? ev.target.closest('.user-delete-btn') : null;
@@ -2765,6 +3212,247 @@ function setupUserManagement(){
 }
 
 setupUserManagement();
+
+function setBranchFormMessage(msg, tone){
+  if (!branchFormMsg) return;
+  branchFormMsg.textContent = msg || '';
+  branchFormMsg.classList.remove('error', 'success');
+  if (tone) branchFormMsg.classList.add(tone);
+}
+
+function syncBranchesScopeCopy(){
+  const scopeLabel = getBusinessScopeLabel(getScopedOrderCustomerType());
+  if (branchesSectionTitle) branchesSectionTitle.textContent = `Sucursales ${scopeLabel.toLowerCase()}s`;
+  if (branchesSectionSub) branchesSectionSub.textContent = `Administr\u00e1 las sucursales ${scopeLabel.toLowerCase()}s del panel actual y verific\u00e1 su ubicaci\u00f3n en el mapa.`;
+}
+
+function setBranchesMapEmpty(message){
+  if (!branchesMapEmpty) return;
+  branchesMapEmpty.textContent = message || '';
+  branchesMapEmpty.style.display = message ? 'block' : 'none';
+}
+
+function clearBranchMarkers(){
+  branchMarkers.forEach((marker) => {
+    try{ marker.setMap(null); }catch(_){ }
+  });
+  branchMarkers.clear();
+}
+
+async function initBranchesMap(){
+  if (!branchesMapContainer) return false;
+  if (branchesMapReady && branchesMap) return true;
+  const ok = await loadGoogleMapsApi();
+  if (!ok){
+    setBranchesMapEmpty('Configura GOOGLE_MAPS_JS_API_KEY para ver el mapa de sucursales.');
+    branchesMapReady = false;
+    return false;
+  }
+  branchesMap = new google.maps.Map(branchesMapContainer, {
+    center: { lat: -32.8895, lng: -68.8458 },
+    zoom: 11,
+    mapTypeControl: false,
+    streetViewControl: false,
+    fullscreenControl: true,
+    styles: DRIVER_MAP_STYLE,
+  });
+  branchesMapReady = true;
+  return true;
+}
+
+function focusBranchOnMap(branch){
+  if (!(branchesMapReady && branchesMap && branch)) return;
+  const lat = Number(branch.lat);
+  const lng = Number(branch.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+  try{
+    branchesMap.panTo({ lat, lng });
+    branchesMap.setZoom(16);
+  }catch(_){ }
+}
+
+function renderBranchesMap(branches){
+  if (!(branchesMapReady && branchesMap && window.google && window.google.maps)) return;
+  clearBranchMarkers();
+  const rows = Array.isArray(branches) ? branches : [];
+  if (!rows.length){
+    setBranchesMapEmpty('Todav\u00eda no hay sucursales cargadas para este rubro.');
+    try{
+      branchesMap.setCenter({ lat: -32.8895, lng: -68.8458 });
+      branchesMap.setZoom(11);
+    }catch(_){ }
+    return;
+  }
+  const bounds = new google.maps.LatLngBounds();
+  let hasPoints = false;
+  rows.forEach((branch) => {
+    const lat = Number(branch && branch.lat);
+    const lng = Number(branch && branch.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    const marker = new google.maps.Marker({
+      map: branchesMap,
+      position: { lat, lng },
+      title: String(branch && branch.name || 'Sucursal').trim() || 'Sucursal',
+      label: {
+        text: String(branch && branch.name || 'Sucursal').trim().slice(0, 1).toUpperCase(),
+        fontSize: '12px',
+        fontWeight: '700',
+        color: '#111827',
+      },
+    });
+    try{
+      marker.addListener('click', () => focusBranchOnMap(branch));
+    }catch(_){ }
+    branchMarkers.set(String(branch && branch.id || ''), marker);
+    bounds.extend({ lat, lng });
+    hasPoints = true;
+  });
+  if (!hasPoints){
+    setBranchesMapEmpty('Las sucursales cargadas todav\u00eda no tienen coordenadas v\u00e1lidas.');
+    return;
+  }
+  setBranchesMapEmpty('');
+  try{
+    if (rows.length === 1){
+      const first = rows[0];
+      branchesMap.setCenter({ lat: Number(first.lat), lng: Number(first.lon) });
+      branchesMap.setZoom(16);
+    } else {
+      branchesMap.fitBounds(bounds, 56);
+    }
+  }catch(_){ }
+}
+
+async function renderBranches(){
+  if (!branchesTableBody) return;
+  if (!currentAdminUser || currentAdminUser.role !== 'owner') return;
+  syncBranchesScopeCopy();
+  branchesTableBody.innerHTML = '<tr><td colspan="4" class="empty-note">Cargando sucursales...</td></tr>';
+  try{
+    await ensureApiBase();
+  }catch(_){ }
+  const scope = getScopedOrderCustomerType();
+  const list = await safeFetch(`${API_BASE}/admin/branches?business_scope=${encodeURIComponent(scope)}`).catch(() => []);
+  branchesCache = Array.isArray(list) ? list : [];
+  try{
+    const ready = await initBranchesMap();
+    if (ready) renderBranchesMap(branchesCache);
+  }catch(_){ }
+  branchesTableBody.innerHTML = '';
+  if (!branchesCache.length){
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td colspan="4" class="empty-note">Todav\u00eda no hay sucursales para este rubro.</td>';
+    branchesTableBody.appendChild(tr);
+    return;
+  }
+  branchesCache.forEach((branch) => {
+    const tr = document.createElement('tr');
+    const lat = Number(branch && branch.lat);
+    const lon = Number(branch && branch.lon);
+    const coordsLabel = Number.isFinite(lat) && Number.isFinite(lon)
+      ? `${lat.toFixed(6)}, ${lon.toFixed(6)}`
+      : 'Sin coordenadas';
+    tr.innerHTML = `
+      <td>${escapeHtml(branch && branch.name || 'Sucursal')}</td>
+      <td>${escapeHtml(branch && branch.address_line || `${branch && branch.street || ''} ${branch && branch.street_number || ''}`.trim())}</td>
+      <td>${escapeHtml(coordsLabel)}</td>
+      <td>
+        <div class="user-zone-control">
+          <button type="button" class="btn small branch-focus-btn" data-branch-id="${escapeHtml(String(branch && branch.id || ''))}">Ver en mapa</button>
+          <button type="button" class="btn danger small branch-delete-btn" data-branch-id="${escapeHtml(String(branch && branch.id || ''))}">Eliminar</button>
+        </div>
+      </td>
+    `;
+    branchesTableBody.appendChild(tr);
+  });
+}
+
+function handleBranchFormSubmit(ev){
+  ev.preventDefault();
+  if (!currentAdminUser || currentAdminUser.role !== 'owner'){
+    setBranchFormMessage('Solo el owner puede crear sucursales.', 'error');
+    return;
+  }
+  const name = branchNameInput ? String(branchNameInput.value || '').trim() : '';
+  const street = branchStreetInput ? String(branchStreetInput.value || '').trim() : '';
+  const streetNumber = branchStreetNumberInput ? String(branchStreetNumberInput.value || '').trim() : '';
+  const lat = branchLatInput ? Number(branchLatInput.value) : NaN;
+  const lon = branchLonInput ? Number(branchLonInput.value) : NaN;
+  if (!name || !street || !streetNumber){
+    setBranchFormMessage('Complet\u00e1 nombre, calle y n\u00famero.', 'error');
+    return;
+  }
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)){
+    setBranchFormMessage('Ingres\u00e1 coordenadas v\u00e1lidas.', 'error');
+    return;
+  }
+  (async () => {
+    try{
+      await ensureApiBase();
+    }catch(_){ }
+    try{
+      await safeFetch(`${API_BASE}/admin/branches`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name,
+          street,
+          street_number: streetNumber,
+          lat,
+          lon,
+          business_scope: getScopedOrderCustomerType(),
+        }),
+      });
+      setBranchFormMessage('Sucursal creada correctamente.', 'success');
+      if (branchForm) branchForm.reset();
+      await renderBranches();
+    }catch(e){
+      const msg = (e && e.payload && (e.payload.detail || e.payload.error)) ? String(e.payload.detail || e.payload.error) : 'No se pudo crear la sucursal.';
+      setBranchFormMessage(msg, 'error');
+    }
+  })();
+}
+
+function setupBranchesSection(){
+  if (branchForm){
+    branchForm.addEventListener('submit', handleBranchFormSubmit);
+    branchForm.addEventListener('input', () => setBranchFormMessage(''));
+  }
+  if (branchesTableBody){
+    branchesTableBody.addEventListener('click', (ev) => {
+      const focusBtn = ev.target && ev.target.closest ? ev.target.closest('.branch-focus-btn') : null;
+      if (focusBtn){
+        const branchId = String(focusBtn.dataset.branchId || '').trim();
+        const branch = (branchesCache || []).find((item) => String(item && item.id || '') === branchId);
+        if (branch) focusBranchOnMap(branch);
+        return;
+      }
+      const deleteBtn = ev.target && ev.target.closest ? ev.target.closest('.branch-delete-btn') : null;
+      if (!deleteBtn) return;
+      if (!currentAdminUser || currentAdminUser.role !== 'owner') return;
+      const branchId = String(deleteBtn.dataset.branchId || '').trim();
+      if (!branchId) return;
+      const branch = (branchesCache || []).find((item) => String(item && item.id || '') === branchId);
+      const label = branch && branch.name ? branch.name : `#${branchId}`;
+      if (!confirm(`Eliminar sucursal "${label}"?`)) return;
+      (async () => {
+        try{
+          await ensureApiBase();
+        }catch(_){ }
+        try{
+          await safeFetch(`${API_BASE}/admin/branches/${encodeURIComponent(branchId)}`, { method: 'DELETE' });
+          await renderBranches();
+          setBranchFormMessage('Sucursal eliminada.', 'success');
+        }catch(e){
+          const msg = (e && e.payload && (e.payload.detail || e.payload.error)) ? String(e.payload.detail || e.payload.error) : 'No se pudo eliminar la sucursal.';
+          setBranchFormMessage(msg, 'error');
+        }
+      })();
+    });
+  }
+}
+
+setupBranchesSection();
 
 const moneyFmt0 = new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', minimumFractionDigits: 0, maximumFractionDigits: 0 });
 const moneyFmt2 = new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -3618,15 +4306,30 @@ function renderSalesStats(stats){
 
 async function refreshSalesStats({ force = false, quiet = true, days = 30 } = {}){
   const now = Date.now();
-  if (!force && salesStatsCache && (now - salesStatsTs) < SALES_STATS_TTL_MS) {
+  const d = Math.max(1, Math.min(365, Number(days || 30)));
+  const scope = getScopedOrderCustomerType();
+  const cacheKey = `${scope}:${d}`;
+  if (!force && salesStatsCache && salesStatsCacheKey === cacheKey && (now - salesStatsTs) < SALES_STATS_TTL_MS) {
     try{ renderSalesStats(salesStatsCache); }catch(_){ }
     return salesStatsCache;
   }
   try{
-    const d = Math.max(1, Math.min(365, Number(days || 30)));
-    const stats = await safeFetch(`${API_BASE}/sales/stats?days=${encodeURIComponent(String(d))}`, { cache: 'no-store' });
+    const params = new URLSearchParams();
+    params.set('days', String(d));
+    params.set('customer_type', scope);
+    let stats = null;
+    try{
+      stats = await safeFetch(`${API_BASE}/admin/sales/stats?${params.toString()}`, { cache: 'no-store' });
+    }catch(err){
+      if (err && Number(err.status) === 404){
+        stats = await safeFetch(`${API_BASE}/sales/stats?${params.toString()}`, { cache: 'no-store' });
+      } else {
+        throw err;
+      }
+    }
     salesStatsCache = stats;
     salesStatsTs = now;
+    salesStatsCacheKey = cacheKey;
     renderSalesStats(stats);
     return stats;
   }catch(e){
@@ -3635,7 +4338,7 @@ async function refreshSalesStats({ force = false, quiet = true, days = 30 } = {}
     if (!salesStatsCache) {
       try{ renderSalesStats(null); }catch(_){ }
     }
-    throw e;
+    return null;
   }
 }
 
@@ -3712,28 +4415,23 @@ async function applyBulk(){
         showToast('Valor inválido', 'error');
         return;
       }
+      const scopedPriceField = getScopedProductPriceField();
       for (const id of ids){
         const pid = String(id || '').trim();
         if (!pid) continue;
         const prod = getCachedProductById(pid) || null;
         if (!prod) continue;
-        const basePrice = Number(prod.price || 0);
-        const retailExists = !(prod.price_retail === null || prod.price_retail === undefined || prod.price_retail === '');
-        const baseRetail = retailExists ? Number(prod.price_retail) : null;
+        const basePrice = Number(getScopedProductPrice(prod) || 0);
 
         const payload = { id: Number(pid) };
         if (!Number.isFinite(payload.id)) continue;
 
         if (mode === 'percent'){
           const factor = 1 + (num / 100);
-          if (target === 'price' || target === 'both_prices') payload.price = round2(basePrice * factor);
-          if (target === 'price_retail' || target === 'both_prices') {
-            if (baseRetail !== null && Number.isFinite(baseRetail)) payload.price_retail = round2(baseRetail * factor);
-          }
+          if (target === 'price') payload[scopedPriceField] = round2(basePrice * factor);
         } else {
           // set
-          if (target === 'price' || target === 'both_prices') payload.price = round2(num);
-          if (target === 'price_retail' || target === 'both_prices') payload.price_retail = round2(num);
+          if (target === 'price') payload[scopedPriceField] = round2(num);
         }
         updates.push(payload);
       }
@@ -3813,6 +4511,38 @@ function parseCsvNumber(raw){
   return n;
 }
 
+function normalizeImportColumnKey(value){
+  try{
+    return String(value || '')
+      .trim()
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+  }catch(_){ return ''; }
+}
+
+function getImportRowValueByAliases(row, aliases){
+  const source = row && typeof row === 'object' ? row : {};
+  const lookup = {};
+  Object.keys(source).forEach((key) => {
+    lookup[normalizeImportColumnKey(key)] = source[key];
+  });
+  for (const alias of (aliases || [])){
+    const val = lookup[normalizeImportColumnKey(alias)];
+    if (val !== null && typeof val !== 'undefined' && String(val).trim() !== '') return val;
+  }
+  return '';
+}
+
+function getScopedImportedPriceNumber(row){
+  const aliases = isRetailBusinessScope()
+    ? ['price_retail', 'precio_minorista', 'minorista', 'precio_minor', 'precio_retail', 'precio_venta', 'precio_menudeo', 'lista_2', 'lista2', 'precio_lista_2', 'precio2', 'lista_n_2']
+    : ['price', 'precio', 'precio_mayorista', 'mayorista', 'precio_may', 'precio_wholesale', 'precio_mayoreo', 'lista_1', 'lista1', 'precio_lista_1', 'precio1', 'lista_n_1'];
+  return parseCsvNumber(getImportRowValueByAliases(row, aliases));
+}
+
 async function importCsvFile(file){
   if (!file) return;
   try{
@@ -3837,13 +4567,11 @@ async function importCsvFile(file){
       if (!prod || !prod.id) { missing.push(code); continue; }
       const u = { id: Number(prod.id) };
       if (!Number.isFinite(u.id)) continue;
-      const price = parseCsvNumber(r.price || r.precio);
-      const retail = parseCsvNumber(r.price_retail || r.precio_minorista || r.minorista);
+      const scopedPrice = getScopedImportedPriceNumber(r);
       const cost = parseCsvNumber(r.cost || r.costo);
       const stock = parseCsvNumber(r.stock);
       const minStock = parseCsvNumber(r.min_stock || r.stock_min || r['stock mínimo']);
-      if (price !== null) u.price = round2(price);
-      if (retail !== null) u.price_retail = round2(retail);
+      if (scopedPrice !== null) u[getScopedProductPriceField()] = round2(scopedPrice);
       if (cost !== null) u.cost = round2(cost);
       if (stock !== null) u.stock = Math.max(0, Math.round(stock));
       if (minStock !== null) u.min_stock = Math.max(0, Math.round(minStock));
@@ -3876,6 +4604,7 @@ async function importExcelFile(file){
     fd.append('file', file, file.name || 'import.xlsx');
     const res = await safeFetch(`${API_BASE}/products/import-excel`, {
       method: 'POST',
+      headers: { 'X-Business-Scope': getScopedOrderCustomerType() },
       body: fd,
     });
     const created = Number(res && res.created != null ? res.created : 0) || 0;
@@ -4479,7 +5208,7 @@ function syncProductUnitFields(){
 
     if (kgPerUnitField) kgPerUnitField.style.display = isKg ? '' : 'none';
     if (stockLabel) stockLabel.textContent = isKg ? 'Stock disponible (kg)' : 'Stock';
-    if (priceLabel) priceLabel.textContent = isKg ? 'Precio mayorista (unidad completa)' : 'Precio mayorista';
+    if (priceLabel) priceLabel.textContent = getScopedProductPriceLabel(currentBusinessScope, { kg: isKg });
 
     if (stockInput){
       stockInput.step = isKg ? '0.01' : '1';
@@ -4500,18 +5229,16 @@ function syncProductUnitFields(){
 function validateForm(){
   const name = productForm.name.value.trim();
   const price = productForm.price.value;
-  const retailPrice = retailPriceInput ? retailPriceInput.value : '';
-  const desc = productForm.description.value.trim();
   const saleUnit = normalizeSaleUnit((productForm.sale_unit && productForm.sale_unit.value) ? productForm.sale_unit.value : 'unit');
   const kgPerUnit = Number(productForm.kg_per_unit && productForm.kg_per_unit.value ? productForm.kg_per_unit.value : 1);
-  const retailPriceOk = (retailPrice === '' || (!isNaN(Number(retailPrice)) && Number(retailPrice) >= 0));
   // Basic form checks for product creation/update
   // Allow empty description (legacy products may not have descriptions)
-  const ok = name.length > 0 && price !== '' && !isNaN(Number(price)) && Number(price) >= 0 && retailPriceOk && (saleUnit !== 'kg' || (!isNaN(kgPerUnit) && kgPerUnit > 0));
+  const ok = name.length > 0 && price !== '' && !isNaN(Number(price)) && Number(price) >= 0 && (saleUnit !== 'kg' || (!isNaN(kgPerUnit) && kgPerUnit > 0));
   // Log last product form change (do not pollute with promotion variables)
   try{
     const timestamp = new Date().toISOString();
-    const logEntry = { action: currentEditId ? 'update' : 'create', timestamp, name, price: Number(price), price_retail: (retailPrice === '' ? null : Number(retailPrice)) };
+    const scopedField = getScopedProductPriceField();
+    const logEntry = { action: currentEditId ? 'update' : 'create', timestamp, name, [scopedField]: Number(price) };
     localStorage.setItem('productFormLog', JSON.stringify(logEntry));
     localStorage.setItem('admin_products_v1_lastUpdated', timestamp);
   }catch(e){ console.warn('Failed to write product log or lastUpdated to localStorage', e); }
@@ -4671,6 +5398,14 @@ async function fetchProductsPaged(q = '', category = '', sort = '', skip = 0, li
   return { total: Array.isArray(items) ? items.length : 0, skip: 0, limit: Array.isArray(items) ? items.length : 0, items: Array.isArray(items) ? items : [] };
 }
 
+function getScopedCatalogSortValue(sortValue){
+  const currentSort = String(sortValue || '').trim();
+  if (!isRetailBusinessScope()) return currentSort;
+  if (currentSort === 'price_asc') return 'price_retail_asc';
+  if (currentSort === 'price_desc') return 'price_retail_desc';
+  return currentSort;
+}
+
 async function ensureAllProductsCache({ force = false } = {}){
   const freshMs = 1000 * 60 * 5;
   const now = Date.now();
@@ -4751,7 +5486,7 @@ async function deleteProduct(id){
 async function refresh(){
   const q = searchInput.value.trim();
   const cat = categoryFilter.value;
-  const sort = sortSelect.value;
+  const sort = getScopedCatalogSortValue(sortSelect.value);
   const prevText = refreshBtn.textContent;
   refreshBtn.disabled = true; refreshBtn.textContent = 'Cargando...';
   try{
@@ -4837,7 +5572,7 @@ function renderProducts(products){
       : '';
 
     const brand = String(p.brand || '').trim();
-    const price = Number(p.price ?? 0);
+    const price = getScopedProductPrice(p);
     const retail = (p.price_retail === null || p.price_retail === undefined || p.price_retail === '') ? null : Number(p.price_retail);
     const cost = (p.cost === null || p.cost === undefined || p.cost === '') ? null : Number(p.cost);
     const minStock = Number(p.min_stock ?? 0);
@@ -4866,7 +5601,7 @@ function renderProducts(products){
       <td>${productCode ? (escapeHtml(productCode) + (isDupSku ? ' <span class="cell-danger">Duplicado</span>' : '')) : '<span class="cell-warn">Falta</span>'}</td>
       <td>${catsDisplay}</td>
       <td>${formatMoney(price)}${unitSuffix}</td>
-      <td>${retail === null || !Number.isFinite(retail) ? '<span class="cell-muted">—</span>' : (formatMoney(retail) + unitSuffix)}</td>
+      <td class="product-retail-price-cell">${retail === null || !Number.isFinite(retail) ? '<span class="cell-muted">—</span>' : (formatMoney(retail) + unitSuffix)}</td>
       <td>${cost === null || !Number.isFinite(cost) ? '<span class="cell-muted">—</span>' : formatMoney(cost)}</td>
       <td><span class="${marginClass}">${escapeHtml(marginLabel)}</span></td>
       <td>${stockDisplay}${stockSuffix}${kgPerUnitHint}</td>
@@ -4913,6 +5648,7 @@ function renderProducts(products){
     }
   }catch(_){ }
   updateBulkBar();
+  syncScopeSensitiveProductUi();
 }
 
 function parseRetailPriceInput(rawValue){
@@ -5024,6 +5760,7 @@ async function saveAllRetailPrices(){
 
 async function refreshRetailPrices(){
   if (!retailPricesTableBody) return;
+  if (!isRetailBusinessScope()) return;
   const q = retailPriceSearch ? retailPriceSearch.value.trim() : '';
   const oldText = retailRefreshBtn ? retailRefreshBtn.textContent : '';
   if (retailRefreshBtn) { retailRefreshBtn.disabled = true; retailRefreshBtn.textContent = 'Cargando...'; }
@@ -5411,7 +6148,7 @@ function updateStats(products){
   const totalActive = list.filter(p => p && p.active).length;
   document.getElementById('totalActive').textContent = formatNumber(totalActive);
   try{ if (dashboardTotalActiveEl) dashboardTotalActiveEl.textContent = formatNumber(totalActive); }catch(_){ }
-  const avg = list.reduce((s,p)=> s + Number((p && p.price) || 0), 0) / (list.length || 1);
+  const avg = list.reduce((sum, product) => sum + getScopedProductPrice(product), 0) / (list.length || 1);
   document.getElementById('avgPrice').textContent = formatMoney(avg);
   try{ if (dashboardAvgPriceEl) dashboardAvgPriceEl.textContent = formatMoney(avg); }catch(_){ }
   dashboardState.totalActive = totalActive;
@@ -5549,11 +6286,19 @@ async function handleSave(ev){
     }
   }catch(_){ parsedMinStock = 0; }
 
+  const scopedPriceField = getScopedProductPriceField();
+  const scopedPriceRaw = String(productForm.price.value || '').trim();
+  const scopedPriceValue = Number(scopedPriceRaw);
+  if (scopedPriceRaw === '' || !Number.isFinite(scopedPriceValue) || scopedPriceValue < 0){
+    showToast(`${getScopedProductPriceLabel()} inválido`, 'error');
+    saveBtn.disabled = false;
+    return;
+  }
+
   const payload = {
     code: normalizeProductCode(productCodeInput ? productCodeInput.value : '') || null,
     name: productForm.name.value.trim(),
     brand: (brandInput && String(brandInput.value || '').trim()) ? String(brandInput.value || '').trim() : null,
-    price: Number(productForm.price.value),
     cost: parsedCost,
     description: productForm.description.value.trim(),
     category: productForm.category.value.trim() || null,
@@ -5561,15 +6306,10 @@ async function handleSave(ev){
     active: (activeSelect ? String(activeSelect.value) !== 'false' : true),
     min_stock: parsedMinStock
   };
-  try{
-    const retailRaw = retailPriceInput ? String(retailPriceInput.value || '').trim() : '';
-    payload.price_retail = retailRaw === '' ? null : Number(retailRaw);
-    if (payload.price_retail !== null && (isNaN(payload.price_retail) || payload.price_retail < 0)) {
-      showToast('Precio minorista inválido', 'error');
-      saveBtn.disabled = false;
-      return;
-    }
-  }catch(_){ payload.price_retail = null; }
+  payload[scopedPriceField] = scopedPriceValue;
+  if (!currentEditId && scopedPriceField === 'price_retail'){
+    payload.price = scopedPriceValue;
+  }
   try{
     const su = normalizeSaleUnit((productForm.sale_unit && productForm.sale_unit.value) ? productForm.sale_unit.value : 'unit');
     payload.sale_unit = su;
@@ -5669,7 +6409,7 @@ async function onEdit(id){
     productForm.name.value = p.name;
     if (productCodeInput) productCodeInput.value = normalizeProductCode(p.code || p.codigo);
     if (brandInput) brandInput.value = String(p.brand || '');
-    productForm.price.value = p.price;
+    productForm.price.value = String(getScopedProductPrice(p) || 0);
     if (retailPriceInput) retailPriceInput.value = (p.price_retail === null || p.price_retail === undefined || p.price_retail === '') ? '' : String(p.price_retail);
     try{ if (costInput) costInput.value = (p.cost === null || p.cost === undefined || p.cost === '') ? '' : String(p.cost); }catch(_){ }
     try{ if (minStockInput) minStockInput.value = (p.min_stock === null || p.min_stock === undefined || p.min_stock === '') ? '0' : String(p.min_stock); }catch(_){ }
@@ -5732,7 +6472,7 @@ async function onDuplicate(id){
     productForm.name.value = String(p.name || '').trim() ? (String(p.name).trim() + ' (Copia)') : 'Producto (Copia)';
     if (productCodeInput) productCodeInput.value = '';
     if (brandInput) brandInput.value = String(p.brand || '');
-    productForm.price.value = (p.price != null) ? String(p.price) : '';
+    productForm.price.value = String(getScopedProductPrice(p) || 0);
     if (retailPriceInput) retailPriceInput.value = (p.price_retail == null || p.price_retail === '') ? '' : String(p.price_retail);
     if (costInput) costInput.value = (p.cost == null || p.cost === '') ? '' : String(p.cost);
     if (minStockInput) minStockInput.value = (p.min_stock == null || p.min_stock === '') ? '0' : String(p.min_stock);
@@ -5881,7 +6621,7 @@ const clearPreparationsDate = document.getElementById('clearPreparationsDate');
 const markAllPreparedBtn = document.getElementById('markAllPreparedBtn');
 const refreshPreparationsBtn = document.getElementById('refreshPreparationsBtn');
 const preparationsList = document.getElementById('preparationsList');
-let currentOrderCustomerType = 'mayorista';
+let currentOrderCustomerType = BUSINESS_SCOPE_DEFAULT;
 let lastOrdersBaseWeb = [];
 let lastPreparationsBase = [];
 let ordersRefreshRequestSeq = 0;
@@ -6148,6 +6888,7 @@ function mergeOrderRecord(existing, incoming){
 
 function applyOrdersCustomerTypeTabState(){
   try{
+    currentOrderCustomerType = getScopedOrderCustomerType();
     const isMinorista = currentOrderCustomerType === 'minorista';
     if (ordersTypeTabMayorista) ordersTypeTabMayorista.classList.toggle('active', !isMinorista);
     if (ordersTypeTabMinorista) ordersTypeTabMinorista.classList.toggle('active', isMinorista);
@@ -6185,8 +6926,9 @@ async function fetchOrders(q = '', date = '', source = '', limit = 0, fetchOptio
   if(q) params.append('q', q);
   if(date) params.append('date', date);
   if(source) params.append('source', source);
+  params.append('customer_type', getScopedOrderCustomerType());
   if(limit !== '' && limit !== null && typeof limit !== 'undefined') params.append('limit', String(limit));
-  const url = `${API_BASE}/orders` + (params.toString() ? ('?'+params.toString()) : '');
+  const url = `${API_BASE}/admin/orders` + (params.toString() ? ('?'+params.toString()) : '');
   try{
     // Prevent browser caching (304) from returning stale snapshots for orders
     const requestOptions = Object.assign({ cache: 'no-store' }, fetchOptions || {});
@@ -6203,6 +6945,7 @@ async function fetchOrders(q = '', date = '', source = '', limit = 0, fetchOptio
     else if(data && Array.isArray(data.data)) arr = data.data;
     else if(data && Array.isArray(data.results)) arr = data.results;
     else { console.warn('fetchOrders: unexpected payload shape', data); return null; }
+    arr = (arr || []).filter(matchesCurrentBusinessScope);
     try{ console.debug('[admin] fetchOrders returned ids', arr.slice(0,20).map(x=>x.id)); }catch(_){ }
     const needsTokenPreviewMerge = (arr || []).some((o) => {
       try{ return !o.user_full_name && !o.user_email; }catch(_){ return false; }
@@ -6262,15 +7005,18 @@ async function fetchPreparationsOrders(){
     await ensureApiBase();
   }catch(_){ }
   try{
-    const data = await safeFetch(`${API_BASE}/admin/orders?status=visto,preparado`, { cache: 'no-store' }).catch((err) => {
+    const params = new URLSearchParams();
+    params.set('status', 'visto,preparado');
+    params.set('customer_type', getScopedOrderCustomerType());
+    const data = await safeFetch(`${API_BASE}/admin/orders?${params.toString()}`, { cache: 'no-store' }).catch((err) => {
       console.warn('fetchPreparationsOrders failed', err);
       return null;
     });
     if (data === null) return null;
-    if (Array.isArray(data)) return data;
-    if (data && Array.isArray(data.orders)) return data.orders;
-    if (data && Array.isArray(data.data)) return data.data;
-    if (data && Array.isArray(data.results)) return data.results;
+    if (Array.isArray(data)) return data.filter(matchesCurrentBusinessScope);
+    if (data && Array.isArray(data.orders)) return data.orders.filter(matchesCurrentBusinessScope);
+    if (data && Array.isArray(data.data)) return data.data.filter(matchesCurrentBusinessScope);
+    if (data && Array.isArray(data.results)) return data.results.filter(matchesCurrentBusinessScope);
     console.warn('fetchPreparationsOrders: unexpected payload shape', data);
     return null;
   }catch(e){
@@ -6779,12 +7525,8 @@ function renderOrders(list, source, dateFilter){
   // No ocultar pedidos por `source`: si entran clasificados distinto igual
   // tienen que aparecer en el panel único de pedidos.
   try{
-    const activeSearch = orderSearch_web && orderSearch_web.value ? String(orderSearch_web.value).trim() : '';
-    const shouldFilterByType = !activeSearch;
-    if (shouldFilterByType){
-      const selectedType = normalizeOrderCustomerType(currentOrderCustomerType);
-      list = (list || []).filter(o => normalizeOrderCustomerType(o && o.customer_type) === selectedType);
-    }
+    const selectedType = getScopedOrderCustomerType();
+    list = (list || []).filter(o => normalizeOrderCustomerType(o && o.customer_type) === selectedType);
   }catch(_){ }
   // Agrupar por día y deduplicar por id (siempre mostrar solo una vez por tabla)
   const groups = new Map();
@@ -7769,6 +8511,7 @@ function renderPreparations(list){
   rows.forEach((order) => {
     const statusNorm = normalizeOrderStatus(order && order.status);
     if (statusNorm !== 'visto' && statusNorm !== 'preparado') return;
+    if (!matchesCurrentBusinessScope(order)) return;
     const scheduleInfo = resolveOrderScheduleInfo(order);
     const scheduleDateKey = normalizeIsoDateKey(scheduleInfo && scheduleInfo.dateKey);
     if (dateFilter && scheduleDateKey !== dateFilter) return;
@@ -7835,13 +8578,11 @@ function renderPreparations(list){
       const card = document.createElement('article');
       card.className = 'preparation-card';
       const scheduleLabel = formatScheduleInfoLabel(entry.scheduleInfo) || (key === 'sin_fecha' ? 'Sin fecha de salida' : formatIsoDateKeyWithWeekday(key));
-      const customerTypeLabel = normalizeOrderCustomerType(order.customer_type) === 'minorista' ? 'Minorista' : 'Mayorista';
       const mapsLinkHtml = getOrderGoogleMapsLinkHtml(order, 'Abrir en Maps', 'prep-map-link');
       card.innerHTML = `
         <div class="preparation-card-top">
           <div class="preparation-card-identity">
             <span class="order-id">#${escapeHtml(order.id)}</span>
-            <span class="prep-profile-chip">${escapeHtml(customerTypeLabel)}</span>
           </div>
           <span class="order-date">${escapeHtml(getOrderCreatedAtLabel(order))}</span>
         </div>
@@ -7997,7 +8738,11 @@ async function fetchRouteDrivers(){
   }catch(_){ }
   const list = await safeFetch(`${API_BASE}/admin/users`).catch(() => []);
   const arr = Array.isArray(list) ? list : [];
-  routesDriversCache = arr.filter(u => String(u.role || '').toLowerCase() === 'repartidor');
+  const activeScope = getScopedOrderCustomerType();
+  routesDriversCache = arr.filter((u) => (
+    String(u.role || '').toLowerCase() === 'repartidor' &&
+    normalizeBusinessScope(u && u.business_scope) === activeScope
+  ));
   return routesDriversCache;
 }
 
@@ -8142,6 +8887,7 @@ function renderRoutesAssigned(list, optimized){
 async function refreshRoutes(forceFetch){
   try{
     if (!routesDriverSelect || !routesUnassigned || !routesAssigned) return;
+    const customerType = getScopedOrderCustomerType();
     if (forceFetch || !routesDriversCache.length){
       await fetchRouteDrivers();
     }
@@ -8157,19 +8903,20 @@ async function refreshRoutes(forceFetch){
         await safeFetch(`${API_BASE}/admin/routes/auto-assign`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ driver_id: driver.id, include_assigned: true }),
+          body: JSON.stringify({ driver_id: driver.id, include_assigned: true, customer_type: customerType }),
         });
       }catch(_){ }
     }
     routesUnassigned.innerHTML = '<div class="empty-note">Cargando pedidos...</div>';
     routesAssigned.innerHTML = '<div class="empty-note">Cargando pedidos...</div>';
     const zoneParam = driver.zone ? `&zone=${encodeURIComponent(driver.zone)}` : '';
-    const unassignedAll = await safeFetch(`${API_BASE}/admin/orders?status=preparado${zoneParam}`).catch(() => []);
-    const unassignedRows = (Array.isArray(unassignedAll) ? unassignedAll : []).filter(o => !o.assigned_driver_id && !o.assigned_driver_username);
+    const scopeParam = `&customer_type=${encodeURIComponent(customerType)}`;
+    const unassignedAll = await safeFetch(`${API_BASE}/admin/orders?status=preparado${zoneParam}${scopeParam}`).catch(() => []);
+    const unassignedRows = (Array.isArray(unassignedAll) ? unassignedAll : []).filter(o => matchesCurrentBusinessScope(o) && !o.assigned_driver_id && !o.assigned_driver_username);
     routesUnassignedBase = unassignedRows;
     renderRoutesUnassigned(unassignedRows, driver);
-    const assignedRows = await safeFetch(`${API_BASE}/admin/orders?status=preparado,enviado&driver_id=${encodeURIComponent(driver.id)}`).catch(() => []);
-    routesAssignedBase = Array.isArray(assignedRows) ? assignedRows : [];
+    const assignedRows = await safeFetch(`${API_BASE}/admin/orders?status=preparado,enviado&driver_id=${encodeURIComponent(driver.id)}${scopeParam}`).catch(() => []);
+    routesAssignedBase = Array.isArray(assignedRows) ? assignedRows.filter(matchesCurrentBusinessScope) : [];
     renderRoutesAssigned(routesAssignedBase, false);
   }catch(e){
     console.error('refreshRoutes failed', e);
@@ -8201,7 +8948,7 @@ if (routesAutoAssignBtn){
       await safeFetch(`${API_BASE}/admin/routes/auto-assign`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ include_assigned: true }),
+        body: JSON.stringify({ include_assigned: true, customer_type: getScopedOrderCustomerType() }),
       });
       showToast('Rutas optimizadas por zona');
       await refreshRoutes(true);
@@ -8331,9 +9078,10 @@ async function refreshDeliveries(force){
     if (driverId) params.push('driver_id=' + encodeURIComponent(driverId));
     if (from) params.push('date_from=' + encodeURIComponent(from));
     if (to) params.push('date_to=' + encodeURIComponent(to));
+    params.push('customer_type=' + encodeURIComponent(getScopedOrderCustomerType()));
     const url = `${API_BASE}/admin/deliveries${params.length ? '?' + params.join('&') : ''}`;
     const list = await safeFetch(url).catch(() => []);
-    renderDeliveries(list);
+    renderDeliveries((Array.isArray(list) ? list : []).filter(matchesCurrentBusinessScope));
   }catch(e){
     console.error('refreshDeliveries failed', e);
     if (deliveriesTableBody){
@@ -8371,8 +9119,6 @@ function orderRowFor(o){
   const address = getOrderAddress(o);
   const deliveryNotes = getOrderDeliveryNotes(o);
   const scheduledDeliveryLabel = formatOrderScheduledDelivery(o);
-  const orderCustomerType = normalizeOrderCustomerType(o.customer_type);
-  const orderCustomerTypeLabel = orderCustomerType === 'minorista' ? 'Minorista' : 'Mayorista';
   const orderStatusNorm = normalizeOrderStatus(o && o.status);
   const statusLabel = formatOrderStatusLabel(orderStatusNorm);
   const statusRank = orderStatusRank(orderStatusNorm);
@@ -8410,7 +9156,6 @@ function orderRowFor(o){
         <div class="order-row-progress">${buildOrderStepperHtml(orderStatusNorm)}</div>
         <div class="order-row-items"><strong>Artículos:</strong><ul class="order-items-list">${itemsList}</ul></div>
         <div class="order-row-user"><strong>Cliente:</strong> ${escapeHtml(userDisplay)}</div>
-        <div class="order-row-customer-type"><strong>Perfil:</strong> ${escapeHtml(orderCustomerTypeLabel)}</div>
         <div class="order-row-address"><strong>Dirección:</strong> ${escapeHtml(address || '—')}</div>
         ${deliveryNotes ? `<div class="order-row-notes"><strong>Instrucciones:</strong> ${escapeHtml(deliveryNotes)}</div>` : ''}
         ${mapsLinkHtml ? `<div class="order-row-map">${mapsLinkHtml}</div>` : ''}
@@ -8539,7 +9284,6 @@ function showOrderDetail(order){
   const paymentReference = String((order && order.payment_reference) || '').trim();
   const scheduledDeliveryLabel = formatOrderScheduledDelivery(order);
   const deliveryNotes = getOrderDeliveryNotes(order);
-  const customerTypeLabel = normalizeOrderCustomerType(order && order.customer_type) === 'minorista' ? 'Minorista' : 'Mayorista';
   const mapsLinkHtml = getOrderGoogleMapsLinkHtml(order, 'Abrir en Google Maps', 'order-map-link-modal');
   const statusNorm = normalizeOrderStatus(order && order.status);
   const statusLabel = formatOrderStatusLabel(statusNorm);
@@ -8549,7 +9293,6 @@ function showOrderDetail(order){
   body.innerHTML = `
     <div class="modal-order-body">
       <div><strong>Usuario:</strong> ${escapeHtml(displayName)} ${order.user_email && displayName !== order.user_email ? ' / ' + escapeHtml(order.user_email) : ''}</div>
-      <div><strong>Perfil:</strong> ${escapeHtml(customerTypeLabel)}</div>
       <div><strong>Dirección:</strong> ${escapeHtml(address || '—')}</div>
       ${deliveryNotes ? `<div><strong>Instrucciones:</strong> ${escapeHtml(deliveryNotes)}</div>` : ''}
       ${mapsLinkHtml ? `<div><strong>Ubicación:</strong> ${mapsLinkHtml}</div>` : ''}
@@ -8741,7 +9484,7 @@ if(refreshCustomersBtn) refreshCustomersBtn.addEventListener('click', ()=> refre
 ensureCustomersMonthDefault();
 
 function setOrdersCustomerType(type){
-  currentOrderCustomerType = normalizeOrderCustomerType(type);
+  currentOrderCustomerType = getScopedOrderCustomerType();
   applyOrdersCustomerTypeTabState();
   if(Array.isArray(lastOrdersBaseWeb) && lastOrdersBaseWeb.length){
     renderOrders(lastOrdersBaseWeb, 'web', (orderDate_web && orderDate_web.value) ? orderDate_web.value : '');
@@ -8851,8 +9594,10 @@ async function fetchAndSyncPromotionsFromServer(){
   const tryUrls = [
     `${API_BASE}/promotions`,
     `${API_BASE}/catalogo/promotions.json`,
-    '/promotions',
-    '/catalogo/promotions.json',
+    ...buildOptionalSameOriginUrls([
+      '/promotions',
+      '/catalogo/promotions.json',
+    ]),
   ];
   for(const url of tryUrls){
     try{
@@ -8975,8 +9720,10 @@ async function fetchAndSyncFiltersFromServer(){
   const tryUrls = [
     `${API_BASE}/filters.json`,
     `${API_BASE}/filters`,
-    '/filters.json',
-    '/filters',
+    ...buildOptionalSameOriginUrls([
+      '/filters.json',
+      '/filters',
+    ]),
   ];
   for(const url of tryUrls){
     try{
@@ -9058,7 +9805,14 @@ function loadProductCategories(){
   try{ const raw = localStorage.getItem(PRODUCT_CATEGORIES_KEY) || '{}'; const parsed = JSON.parse(raw); return (parsed && typeof parsed === 'object') ? parsed : {}; }catch(e){ console.warn('loadProductCategories failed', e); return {}; }
 }
 async function fetchAndSyncProductCategories(){
-  const tryUrls = [`${API_BASE}/product-categories.json`, `${API_BASE}/admin/product-categories.json`, '/product-categories.json', '/admin/product-categories.json'];
+  const tryUrls = [
+    `${API_BASE}/product-categories.json`,
+    `${API_BASE}/admin/product-categories.json`,
+    ...buildOptionalSameOriginUrls([
+      '/product-categories.json',
+      '/admin/product-categories.json',
+    ]),
+  ];
   for(const url of tryUrls){
     try{
       const data = await safeFetch(url, { cache: 'no-store' }).catch(err => { console.warn('fetch product-categories failed for', url, err); return null; });
@@ -9070,7 +9824,14 @@ async function fetchAndSyncProductCategories(){
   }
   // If no categories file found, attempt to seed filters from admin static filters.json
   try{
-    const furls = [`${API_BASE}/admin/filters.json`, `${API_BASE}/filters.json`, '/admin/filters.json', '/filters.json'];
+    const furls = [
+      `${API_BASE}/admin/filters.json`,
+      `${API_BASE}/filters.json`,
+      ...buildOptionalSameOriginUrls([
+        '/admin/filters.json',
+        '/filters.json',
+      ]),
+    ];
     for(const fu of furls){
       try{
         const fdata = await safeFetch(fu, { cache: 'no-store' }).catch(()=>null);
@@ -9249,13 +10010,19 @@ if(autoCategorizeCatalogBtn) autoCategorizeCatalogBtn.addEventListener('click', 
 try{ if(window.BroadcastChannel){ const bcpc = new BroadcastChannel('product_categories_channel'); bcpc.onmessage = (ev) => { try{ if(ev.data && ev.data.action === 'product-categories-updated'){ console.log('[admin] product-categories updated via BroadcastChannel'); fetchAndSyncProductCategories().then(()=>refresh()).catch(()=>refresh()); } }catch(e){} }; } }catch(e){}
 
 async function bootstrapAdmin(){
-  try{ await ensureApiBase(); }catch(e){ console.warn('ensureApiBase failed', e); }
+  // ensure filters UI is initialized
+  try{ renderFilters(); }catch(e){ console.warn('initial renderFilters failed', e); }
+  try{ renderPromotions(); }catch(e){ console.warn('initial renderPromotions failed', e); }
+  let apiReady = false;
+  try{ apiReady = !!(await ensureApiBase()); }catch(e){ console.warn('ensureApiBase failed', e); }
+  if (!apiReady){
+    return;
+  }
   // Pull latest server snapshots first so a fresh browser does not start empty.
   try{ await fetchAndSyncFiltersFromServer(); }catch(e){ console.warn('initial filters sync failed', e); }
   // If server has no filters snapshot yet, seed from current product categories.
   try{ await seedFiltersFromProductsIfMissing(); }catch(e){ console.warn('initial filter seed failed', e); }
   try{ await fetchAndSyncPromotionsFromServer(); }catch(e){ console.warn('initial promotions sync failed', e); }
-  // ensure filters UI is initialized
   try{ renderFilters(); }catch(e){ console.warn('initial renderFilters failed', e); }
   try{ renderPromotions(); }catch(e){ console.warn('initial renderPromotions failed', e); }
   // fetch product-categories snapshot (best-effort)
@@ -9359,6 +10126,7 @@ function regroupOrdersForTable(source){
 // Add periodic polling as a fallback so the orders table refreshes even if WS fails
 try{
   setInterval(()=>{
+    if (!currentAdminUser || !hasApiConnection()) return;
     const section = String(currentSectionId || '');
     if (['dashboard', 'orders', 'preparations'].includes(section)){
       refreshOrders('web');
@@ -9375,9 +10143,13 @@ try{
 
 // websocket to refresh list live with reconnection/backoff
 function setupSocket(attempt = 0){
+  if(!currentAdminUser || !hasApiConnection()) return;
   if(!location.protocol || !location.protocol.startsWith('http')) return;
-  const proto = (location.protocol === 'https:') ? 'wss://' : 'ws://';
-  const wsUrl = `${proto}${location.host}/ws/products`;
+  let apiUrl;
+  try{ apiUrl = new URL(API_BASE, location.origin); }catch(_){ apiUrl = null; }
+  if(!apiUrl || !apiUrl.protocol || !/^https?:$/i.test(apiUrl.protocol)) return;
+  const proto = (apiUrl.protocol === 'https:') ? 'wss://' : 'ws://';
+  const wsUrl = `${proto}${apiUrl.host}/ws/products`;
   let socket;
   try{ socket = new WebSocket(wsUrl); }catch(e){ socket = null; }
   if(!socket){ const delay = Math.min(30000, Math.pow(2, attempt) * 1000 + Math.random()*1000); setTimeout(()=> setupSocket(attempt + 1), delay); return; }
