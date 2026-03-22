@@ -2507,6 +2507,7 @@ function getAdminConsoleErrorMessage(err, fallback = 'Error'){
     if (normalized === 'stress_test_session_missing') return 'No encontre una sesion QA activa.';
     if (normalized === 'stress_test_session_changed') return 'La sesion QA cambio mientras intentabamos arrancarla.';
     if (normalized === 'stress_test_no_ready_orders') return 'Todavia no hay pedidos QA preparados para arrancar.';
+    if (normalized === 'stress_test_not_running') return 'No hay una simulacion QA activa para cancelar.';
     return raw || fallback || 'Error';
   }catch(_){
     return fallback || 'Error';
@@ -2568,7 +2569,7 @@ async function runAdminStressStart(count){
   logAdminConsole(`Largando stress test QA de ${count} pedidos...`, 'note');
   const resp = await safeFetch(`${API_BASE}/admin/stress-test/start`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: getScopedRequestHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify({ count }),
   });
   adminConsoleState.prompt = null;
@@ -2581,7 +2582,21 @@ async function runAdminStressStart(count){
 async function runAdminStressReady(){
   await ensureApiBase();
   logAdminConsole('Arrancando simulacion de repartidores QA...', 'note');
-  await safeFetch(`${API_BASE}/admin/stress-test/ready`, { method: 'POST' });
+  await safeFetch(`${API_BASE}/admin/stress-test/ready`, {
+    method: 'POST',
+    headers: getScopedRequestHeaders(),
+  });
+  await pollAdminStressStatus({ silent: false, logSummary: true });
+}
+
+async function runAdminStressCancel(){
+  await ensureApiBase();
+  logAdminConsole('Cancelando simulacion QA en curso...', 'note');
+  adminConsoleState.prompt = null;
+  await safeFetch(`${API_BASE}/admin/stress-test/cancel`, {
+    method: 'POST',
+    headers: getScopedRequestHeaders(),
+  });
   await pollAdminStressStatus({ silent: false, logSummary: true });
 }
 
@@ -2594,7 +2609,7 @@ function ensureAdminConsole(){
   adminConsoleState.help = adminConsoleState.section ? adminConsoleState.section.querySelector('.admin-console-help') : null;
   adminConsoleState.ready = true;
   if (adminConsoleState.help) {
-    adminConsoleState.help.innerHTML = 'Comandos: <code>/stresstest</code>, <code>.ready</code>, <code>/stressstatus</code>, <code>/clear @1</code>, <code>/clear @2</code>, <code>/clear @3</code>, <code>/clear @4</code>, <code>/clear @5</code>. <code>/help</code> para ayuda.';
+    adminConsoleState.help.innerHTML = 'Comandos: <code>/stresstest</code>, <code>.ready</code>, <code>/cancel</code>, <code>/stressstatus</code>, <code>/clear @1</code>, <code>/clear @2</code>, <code>/clear @3</code>, <code>/clear @4</code>, <code>/clear @5</code>. <code>/help</code> para ayuda.';
   }
   ensureAdminStressPolling();
   try{ pollAdminStressStatus({ silent: true }); }catch(_){ }
@@ -2715,6 +2730,7 @@ async function handleAdminConsoleCommand(raw){
     logAdminConsole('Comandos disponibles:', 'note');
     logAdminConsole('/stresstest inicia una corrida QA y te pide la cantidad.', 'note');
     logAdminConsole('.ready arranca repartidores y entregas sobre los QA preparados.', 'note');
+    logAdminConsole('/cancel corta una corrida QA en curso.', 'note');
     logAdminConsole('/stressstatus muestra el estado actual de la corrida QA.', 'note');
     logAdminConsole('/clear @1 Catalogo', 'note');
     logAdminConsole('/clear @2 Filtros', 'note');
@@ -2734,6 +2750,14 @@ async function handleAdminConsoleCommand(raw){
       await runAdminStressReady();
     }catch(err){
       logAdminConsole(getAdminConsoleErrorMessage(err, 'No pude arrancar la simulacion QA.'), 'err');
+    }
+    return;
+  }
+  if (cmd === '/cancel' || cmd === 'cancel'){
+    try{
+      await runAdminStressCancel();
+    }catch(err){
+      logAdminConsole(getAdminConsoleErrorMessage(err, 'No pude cancelar la simulacion QA.'), 'err');
     }
     return;
   }

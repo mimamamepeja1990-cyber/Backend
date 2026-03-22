@@ -283,6 +283,7 @@ _GEOCODE_CACHE_DIRTY = False
 _ROUTE_START_CACHE: Dict[str, Any] = {}
 DRIVER_LOCATIONS: Dict[str, Dict[str, Any]] = {}
 DRIVER_LOCATIONS_LOCK = threading.Lock()
+APP_EVENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
 ADMIN_STRESS_TEST_LOCK = threading.Lock()
 ADMIN_STRESS_TEST_STATE: Dict[str, Any] = {
     'session_id': None,
@@ -290,6 +291,7 @@ ADMIN_STRESS_TEST_STATE: Dict[str, Any] = {
     'message': None,
     'prefix': None,
     'payment_reference': None,
+    'business_scope': 'mayorista',
     'requested_count': 0,
     'created_count': 0,
     'failed_count': 0,
@@ -307,6 +309,9 @@ ADMIN_STRESS_TEST_STATE: Dict[str, Any] = {
     'started_at': None,
     'updated_at': None,
     'last_error': None,
+    'cancel_requested': False,
+    'cancelled_at': None,
+    'cancelled_by': None,
 }
 
 
@@ -839,9 +844,15 @@ def _startup_bootstrap_sync() -> None:
 # -------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global APP_EVENT_LOOP
+    try:
+        APP_EVENT_LOOP = asyncio.get_running_loop()
+    except Exception:
+        APP_EVENT_LOOP = None
     if _startup_skip_enabled():
         logger.warning('Skipping startup bootstrap (SKIP_STARTUP_BOOTSTRAP enabled).')
         yield
+        APP_EVENT_LOOP = None
         return
 
     if _startup_background_enabled():
@@ -858,10 +869,12 @@ async def lifespan(app: FastAPI):
         except Exception:
             asyncio.create_task(_run_background())
         yield
+        APP_EVENT_LOOP = None
         return
 
     await asyncio.to_thread(_startup_bootstrap_sync)
     yield
+    APP_EVENT_LOOP = None
     # Shutdown (nada)
 
 # -------------------------------------------------------------------
@@ -6641,6 +6654,16 @@ async def push_event(data: dict):
     except Exception:
         pass
 
+
+def _push_event_threadsafe(data: Dict[str, Any]) -> None:
+    loop = APP_EVENT_LOOP
+    if loop is None or not getattr(loop, 'is_running', lambda: False)():
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(push_event(dict(data or {})), loop)
+    except Exception:
+        logger.exception('threadsafe push_event failed')
+
 @app.websocket("/ws/products")
 async def ws_products(ws: WebSocket):
     await ws.accept()
@@ -7481,7 +7504,17 @@ def _admin_stress_touch_locked() -> None:
 def _admin_stress_session_matches(session_id: Optional[str]) -> bool:
     with ADMIN_STRESS_TEST_LOCK:
         current_id = str(ADMIN_STRESS_TEST_STATE.get('session_id') or '').strip()
-    return bool(current_id) and current_id == str(session_id or '').strip()
+        cancel_requested = bool(ADMIN_STRESS_TEST_STATE.get('cancel_requested'))
+    return bool(current_id) and current_id == str(session_id or '').strip() and not cancel_requested
+
+
+def _admin_stress_session_cancel_requested(session_id: Optional[str] = None) -> bool:
+    with ADMIN_STRESS_TEST_LOCK:
+        current_id = str(ADMIN_STRESS_TEST_STATE.get('session_id') or '').strip()
+        cancel_requested = bool(ADMIN_STRESS_TEST_STATE.get('cancel_requested'))
+    if session_id is None:
+        return cancel_requested
+    return cancel_requested and current_id == str(session_id or '').strip()
 
 
 def _admin_stress_append_event(message: str, tone: str = 'note') -> None:
@@ -7519,7 +7552,13 @@ def _admin_stress_snapshot(include_order_ids: bool = False) -> Dict[str, Any]:
         return snapshot
 
 
-def _admin_stress_reset_session(session_id: str, prefix: str, payment_reference: str, requested_count: int) -> None:
+def _admin_stress_reset_session(
+    session_id: str,
+    prefix: str,
+    payment_reference: str,
+    requested_count: int,
+    business_scope: str = 'mayorista',
+) -> None:
     with ADMIN_STRESS_TEST_LOCK:
         ADMIN_STRESS_TEST_STATE.clear()
         ADMIN_STRESS_TEST_STATE.update({
@@ -7528,6 +7567,7 @@ def _admin_stress_reset_session(session_id: str, prefix: str, payment_reference:
             'message': 'Creando pedidos QA sin mail.',
             'prefix': prefix,
             'payment_reference': payment_reference,
+            'business_scope': _normalize_admin_customer_type_filter(business_scope) or 'mayorista',
             'requested_count': int(requested_count or 0),
             'created_count': 0,
             'failed_count': 0,
@@ -7545,7 +7585,40 @@ def _admin_stress_reset_session(session_id: str, prefix: str, payment_reference:
             'started_at': _admin_stress_now_utc(),
             'updated_at': _admin_stress_now_utc(),
             'last_error': None,
+            'cancel_requested': False,
+            'cancelled_at': None,
+            'cancelled_by': None,
         })
+
+
+def _admin_stress_cancel_session(cancelled_by: Optional[str] = None) -> Dict[str, Any]:
+    with ADMIN_STRESS_TEST_LOCK:
+        session_id = str(ADMIN_STRESS_TEST_STATE.get('session_id') or '').strip()
+        phase = str(ADMIN_STRESS_TEST_STATE.get('phase') or '').strip().lower()
+        if not session_id or phase in ('idle', 'completed', 'error', 'cancelled'):
+            return _admin_stress_snapshot()
+        ADMIN_STRESS_TEST_STATE['cancel_requested'] = True
+        ADMIN_STRESS_TEST_STATE['phase'] = 'cancelled'
+        ADMIN_STRESS_TEST_STATE['message'] = 'Simulacion QA cancelada por el owner.'
+        ADMIN_STRESS_TEST_STATE['cancelled_at'] = _admin_stress_now_utc()
+        ADMIN_STRESS_TEST_STATE['cancelled_by'] = str(cancelled_by or '').strip() or None
+        _admin_stress_touch_locked()
+    _admin_stress_append_event(
+        f"Simulacion QA cancelada por {str(cancelled_by or 'owner').strip() or 'owner'}.",
+        'note',
+    )
+    return _admin_stress_snapshot()
+
+
+def _admin_stress_wait(session_id: Optional[str], seconds: float, step: float = 0.25) -> bool:
+    total = max(0.0, float(seconds or 0.0))
+    interval = max(0.05, float(step or 0.25))
+    end_time = time.time() + total
+    while time.time() < end_time:
+        if not _admin_stress_session_matches(session_id):
+            return False
+        time.sleep(min(interval, max(0.0, end_time - time.time())))
+    return _admin_stress_session_matches(session_id)
 
 
 def _admin_stress_set_error(session_id: Optional[str], message: str) -> None:
@@ -7741,6 +7814,7 @@ def _admin_stress_build_order_payload(
     prefix: str,
     payment_reference: str,
     product_pool: List[Dict[str, Any]],
+    business_scope: str = 'mayorista',
 ) -> schemas.OrderCreate:
     if not product_pool:
         raise RuntimeError('No hay productos para stress test')
@@ -7758,7 +7832,7 @@ def _admin_stress_build_order_payload(
             )
         ],
         total=float(product.get('price') or 0),
-        customer_type='mayorista',
+        customer_type=_normalize_admin_customer_type_filter(business_scope) or 'mayorista',
         source='web',
         user_full_name=address['user_full_name'],
         user_email=address['user_email'],
@@ -7784,13 +7858,14 @@ def _run_admin_stress_seed_worker(
     prefix: str,
     payment_reference: str,
     product_pool: List[Dict[str, Any]],
+    business_scope: str = 'mayorista',
 ) -> None:
     for index in (indices or []):
         if not _admin_stress_session_matches(session_id):
             return
         db_local = SessionLocal()
         try:
-            payload = _admin_stress_build_order_payload(index, prefix, payment_reference, product_pool)
+            payload = _admin_stress_build_order_payload(index, prefix, payment_reference, product_pool, business_scope=business_scope)
             order = crud.create_order(db_local, payload, current_user=None)
             order_id = getattr(order, 'id', None)
             department = str(getattr(payload, 'user_department', '') or '').strip()
@@ -7833,7 +7908,13 @@ def _run_admin_stress_seed_worker(
                 pass
 
 
-def _run_admin_stress_seed(session_id: str, prefix: str, payment_reference: str, requested_count: int) -> None:
+def _run_admin_stress_seed(
+    session_id: str,
+    prefix: str,
+    payment_reference: str,
+    requested_count: int,
+    business_scope: str = 'mayorista',
+) -> None:
     try:
         db_local = SessionLocal()
         try:
@@ -7849,7 +7930,7 @@ def _run_admin_stress_seed(session_id: str, prefix: str, payment_reference: str,
             return
 
         _admin_stress_append_event(
-            f"Iniciando stress test: {requested_count} pedidos QA en Ciudad, Godoy Cruz, Las Heras y Maipu.",
+            f"Iniciando stress test {(_normalize_admin_customer_type_filter(business_scope) or 'mayorista')}: {requested_count} pedidos QA en Ciudad, Godoy Cruz, Las Heras y Maipu.",
             'note',
         )
 
@@ -7861,7 +7942,7 @@ def _run_admin_stress_seed(session_id: str, prefix: str, payment_reference: str,
                 continue
             thread = threading.Thread(
                 target=_run_admin_stress_seed_worker,
-                args=(session_id, bucket, prefix, payment_reference, product_pool),
+                args=(session_id, bucket, prefix, payment_reference, product_pool, business_scope),
                 daemon=True,
             )
             threads.append(thread)
@@ -7900,7 +7981,8 @@ def _run_admin_stress_seed(session_id: str, prefix: str, payment_reference: str,
         _admin_stress_set_error(session_id, f'No se pudo completar la siembra QA: {exc}')
 
 
-def _admin_stress_list_drivers(db: Session) -> List[Any]:
+def _admin_stress_list_drivers(db: Session, business_scope: Optional[str] = None) -> List[Any]:
+    scope_filter = _normalize_admin_customer_type_filter(business_scope)
     try:
         users = crud.list_admin_users(db) or []
     except Exception:
@@ -7909,9 +7991,13 @@ def _admin_stress_list_drivers(db: Session) -> List[Any]:
         user for user in (users or [])
         if str(getattr(user, 'role', '') or '').strip().lower() == 'repartidor'
         and bool(getattr(user, 'is_active', True))
+        and (
+            not scope_filter
+            or _get_admin_assigned_business_scope(user) == scope_filter
+        )
     ]
     drivers.sort(key=lambda user: (str(getattr(user, 'zone', '') or ''), str(getattr(user, 'username', '') or '')))
-    return drivers[:4]
+    return drivers[:8]
 
 
 def _admin_stress_set_driver_location(
@@ -7939,11 +8025,47 @@ def _admin_stress_set_driver_location(
     key = str(driver_id if driver_id is not None else driver_username or 'unknown')
     with DRIVER_LOCATIONS_LOCK:
         DRIVER_LOCATIONS[key] = dict(payload, updated_at=time.time())
+    try:
+        db_local = SessionLocal()
+        try:
+            db_local.add(models.AdminDriverLocation(
+                admin_user_id=int(driver_id) if driver_id is not None else None,
+                username=driver_username,
+                full_name=driver_name,
+                lat=float(lat),
+                lon=float(lon),
+                accuracy=8.0,
+                speed=float(speed) if speed is not None else None,
+                heading=None,
+                battery=100.0,
+                recorded_at=payload['recorded_at'],
+            ))
+            db_local.commit()
+        except Exception:
+            try:
+                db_local.rollback()
+            except Exception:
+                pass
+        finally:
+            try:
+                db_local.close()
+            except Exception:
+                pass
+    except Exception:
+        logger.exception('admin stress driver location persistence failed')
+    try:
+        event_payload = dict(payload)
+        if isinstance(event_payload.get('recorded_at'), datetime.datetime):
+            event_payload['recorded_at'] = event_payload['recorded_at'].isoformat()
+        _push_event_threadsafe({"action": "driver_location", "driver": event_payload})
+    except Exception:
+        logger.exception('admin stress driver location event failed')
 
 
 def _admin_stress_clear_driver_location(driver: Any) -> None:
     driver_id = getattr(driver, 'id', None)
     driver_username = str(getattr(driver, 'username', '') or '').strip() or None
+    driver_name = str(getattr(driver, 'full_name', '') or driver_username or '').strip() or driver_username
     key = str(driver_id if driver_id is not None else driver_username or 'unknown')
     with DRIVER_LOCATIONS_LOCK:
         DRIVER_LOCATIONS.pop(key, None)
@@ -7951,6 +8073,131 @@ def _admin_stress_clear_driver_location(driver: Any) -> None:
             for current_key, payload in list(DRIVER_LOCATIONS.items()):
                 if str((payload or {}).get('driver_username') or '').strip() == driver_username:
                     DRIVER_LOCATIONS.pop(current_key, None)
+    try:
+        _push_event_threadsafe({
+            "action": "driver_location_offline",
+            "driver": {
+                "driver_id": driver_id,
+                "driver_username": driver_username,
+                "driver_name": driver_name,
+            },
+        })
+    except Exception:
+        logger.exception('admin stress driver offline event failed')
+
+
+def _admin_stress_driver_can_take_order(driver: Any, order: Optional[Dict[str, Any]]) -> bool:
+    if driver is None or not isinstance(order, dict):
+        return False
+    driver_scope = _get_admin_assigned_business_scope(driver)
+    order_scope = _normalize_admin_customer_type_filter(order.get('customer_type'))
+    if driver_scope in ('mayorista', 'minorista') and order_scope and order_scope != driver_scope:
+        return False
+    zone_tokens = _parse_admin_zones(getattr(driver, 'zone', None))
+    if not zone_tokens:
+        return True
+    try:
+        snapshot = _extract_order_address_snapshot(order)
+        has_hint = bool(
+            str(snapshot.get('department') or '').strip()
+            or str(snapshot.get('barrio') or '').strip()
+            or str(snapshot.get('raw_address') or '').strip()
+            or str(snapshot.get('postal_code') or '').strip()
+        )
+        if not has_hint:
+            return True
+    except Exception:
+        return True
+    return _order_matches_zone(order, zone_tokens)
+
+
+def _admin_stress_assign_order_to_driver(order_data: Optional[Dict[str, Any]], driver: Any) -> bool:
+    payload = order_data if isinstance(order_data, dict) else {}
+    order_id = payload.get('id')
+    if order_id is None or driver is None:
+        return False
+    assigned_at = _admin_stress_now_utc()
+    params = {
+        'assigned_driver_id': int(getattr(driver, 'id')),
+        'assigned_driver_username': str(getattr(driver, 'username') or '').strip(),
+        'assigned_driver_name': str(getattr(driver, 'full_name') or getattr(driver, 'username') or '').strip() or None,
+        'assigned_driver_zone': str(getattr(driver, 'zone', '') or '').strip() or None,
+        'assigned_at': assigned_at,
+        'id': int(order_id) if str(order_id).isdigit() else str(order_id),
+    }
+    where_order = 'id = :id' if str(order_id).isdigit() else 'CAST(id AS TEXT) = :id'
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE orders SET assigned_driver_id = :assigned_driver_id, "
+                    "assigned_driver_username = :assigned_driver_username, "
+                    "assigned_driver_name = :assigned_driver_name, "
+                    "assigned_driver_zone = :assigned_driver_zone, "
+                    "assigned_at = :assigned_at, "
+                    "route_id = NULL, route_order = NULL, route_generated_at = NULL "
+                    f"WHERE {where_order}"
+                ),
+                params,
+            )
+        payload['assigned_driver_id'] = params['assigned_driver_id']
+        payload['assigned_driver_username'] = params['assigned_driver_username']
+        payload['assigned_driver_name'] = params['assigned_driver_name']
+        payload['assigned_driver_zone'] = params['assigned_driver_zone']
+        payload['assigned_at'] = assigned_at
+        payload['route_id'] = None
+        payload['route_order'] = None
+        payload['route_generated_at'] = None
+        return True
+    except Exception:
+        logger.exception('admin stress assignment update failed for order id=%s', order_id)
+        return False
+
+
+def _admin_stress_balance_ready_orders(
+    ready_orders: List[Dict[str, Any]],
+    drivers: List[Any],
+) -> Tuple[Dict[int, List[Dict[str, Any]]], Dict[int, int]]:
+    grouped: Dict[int, List[Dict[str, Any]]] = {}
+    loads: Dict[int, int] = {}
+    candidates = [driver for driver in (drivers or []) if getattr(driver, 'id', None) is not None]
+    for driver in candidates:
+        grouped[int(getattr(driver, 'id'))] = []
+        loads[int(getattr(driver, 'id'))] = 0
+    if not candidates:
+        return grouped, loads
+
+    def order_sort_key(order: Dict[str, Any]) -> Tuple[str, str, str]:
+        try:
+            snapshot = _extract_order_address_snapshot(order)
+        except Exception:
+            snapshot = {}
+        return (
+            _normalize_region_token(snapshot.get('department')) or '',
+            _normalize_region_token(snapshot.get('barrio')) or '',
+            str(order.get('id') or ''),
+        )
+
+    for order in sorted((ready_orders or []), key=order_sort_key):
+        eligible = [driver for driver in candidates if _admin_stress_driver_can_take_order(driver, order)]
+        if not eligible:
+            eligible = list(candidates)
+        eligible.sort(
+            key=lambda driver: (
+                loads.get(int(getattr(driver, 'id')), 0),
+                len(_parse_admin_zones(getattr(driver, 'zone', None))) == 0,
+                str(getattr(driver, 'username', '') or ''),
+            )
+        )
+        selected = eligible[0] if eligible else None
+        if selected is None:
+            continue
+        if not _admin_stress_assign_order_to_driver(order, selected):
+            continue
+        driver_key = int(getattr(selected, 'id'))
+        loads[driver_key] = int(loads.get(driver_key) or 0) + 1
+        grouped.setdefault(driver_key, []).append(order)
+    return grouped, loads
 
 
 def _admin_stress_mark_driver_orders_sent(payment_reference: str, driver: Any) -> int:
@@ -8133,6 +8380,7 @@ def _run_admin_stress_driver_simulation(
     db_local = SessionLocal()
     driver = None
     delivered_local = 0
+    cancel_logged = False
     try:
         try:
             driver = crud.get_admin_user_by_id(db_local, int(driver_id))
@@ -8166,9 +8414,23 @@ def _run_admin_stress_driver_simulation(
             f"{getattr(driver, 'username', 'driver')}: arranco la simulacion con {len(driver_orders)} entregas.",
             'note',
         )
+        if not _admin_stress_wait(session_id, random.uniform(0.9, 1.6)):
+            if _admin_stress_session_cancel_requested(session_id) and not cancel_logged:
+                cancel_logged = True
+                _admin_stress_append_event(
+                    f"{getattr(driver, 'username', 'driver')}: simulacion cancelada antes de salir.",
+                    'note',
+                )
+            return
 
         for order in driver_orders:
             if not _admin_stress_session_matches(session_id):
+                if _admin_stress_session_cancel_requested(session_id) and not cancel_logged:
+                    cancel_logged = True
+                    _admin_stress_append_event(
+                        f"{getattr(driver, 'username', 'driver')}: ruta cancelada con {delivered_local}/{len(driver_orders)} entregas.",
+                        'note',
+                    )
                 return
             point = _extract_driver_order_point(order)
             if not point:
@@ -8181,12 +8443,26 @@ def _run_admin_stress_driver_simulation(
             if not point:
                 continue
 
-            segment_points = _admin_stress_build_segment_points(current_lat, current_lon, point['lat'], point['lon'], max_points=6)
+            try:
+                leg_distance_km = max(0.0, float(_haversine_km(current_lat, current_lon, point['lat'], point['lon']) or 0.0))
+            except Exception:
+                leg_distance_km = 0.0
+            travel_seconds = max(4.5, min(18.0, max(leg_distance_km, 0.35) * 4.0))
+            max_points = max(8, min(24, int(math.ceil(max(leg_distance_km, 0.6) * 4.0))))
+            segment_points = _admin_stress_build_segment_points(current_lat, current_lon, point['lat'], point['lon'], max_points=max_points)
             if not segment_points:
                 segment_points = [{'lat': float(point['lat']), 'lon': float(point['lon'])}]
+            step_delay = max(0.55, min(1.4, travel_seconds / max(1, len(segment_points))))
+            speed_hint = max(14.0, min(32.0, max(leg_distance_km, 0.5) * 7.0))
 
             for path_point in segment_points:
                 if not _admin_stress_session_matches(session_id):
+                    if _admin_stress_session_cancel_requested(session_id) and not cancel_logged:
+                        cancel_logged = True
+                        _admin_stress_append_event(
+                            f"{getattr(driver, 'username', 'driver')}: ruta cancelada en movimiento ({delivered_local}/{len(driver_orders)} entregas).",
+                            'note',
+                        )
                     return
                 if not sent_started:
                     updated_sent = _admin_stress_mark_driver_orders_sent(payment_reference, driver)
@@ -8199,9 +8475,26 @@ def _run_admin_stress_driver_simulation(
                             f"{getattr(driver, 'username', 'driver')}: salio del deposito con {updated_sent} pedidos enviados.",
                             'note',
                         )
+                        _push_event_threadsafe({"action": "orders_changed", "reason": "stress_driver_departure"})
                     sent_started = True
-                _admin_stress_set_driver_location(driver, path_point['lat'], path_point['lon'], speed=7.5)
-                time.sleep(0.35)
+                _admin_stress_set_driver_location(driver, path_point['lat'], path_point['lon'], speed=speed_hint)
+                if not _admin_stress_wait(session_id, step_delay):
+                    if _admin_stress_session_cancel_requested(session_id) and not cancel_logged:
+                        cancel_logged = True
+                        _admin_stress_append_event(
+                            f"{getattr(driver, 'username', 'driver')}: ruta cancelada en movimiento ({delivered_local}/{len(driver_orders)} entregas).",
+                            'note',
+                        )
+                    return
+
+            if not _admin_stress_wait(session_id, random.uniform(1.2, 2.3)):
+                if _admin_stress_session_cancel_requested(session_id) and not cancel_logged:
+                    cancel_logged = True
+                    _admin_stress_append_event(
+                        f"{getattr(driver, 'username', 'driver')}: simulacion cancelada durante una parada.",
+                        'note',
+                    )
+                return
 
             if _admin_stress_mark_order_delivered(payment_reference, order, driver):
                 delivered_local += 1
@@ -8209,7 +8502,8 @@ def _run_admin_stress_driver_simulation(
                     if str(ADMIN_STRESS_TEST_STATE.get('session_id') or '').strip() == str(session_id):
                         ADMIN_STRESS_TEST_STATE['delivered_count'] = int(ADMIN_STRESS_TEST_STATE.get('delivered_count') or 0) + 1
                         _admin_stress_touch_locked()
-                if delivered_local == 1 or delivered_local == len(driver_orders) or (delivered_local % 10) == 0:
+                _push_event_threadsafe({"action": "orders_changed", "reason": "stress_delivery"})
+                if delivered_local == 1 or delivered_local == len(driver_orders) or (delivered_local % 5) == 0:
                     _admin_stress_append_event(
                         f"{getattr(driver, 'username', 'driver')}: {delivered_local}/{len(driver_orders)} entregados.",
                         'note',
@@ -8217,10 +8511,38 @@ def _run_admin_stress_driver_simulation(
 
             current_lat = float(point['lat'])
             current_lon = float(point['lon'])
-            time.sleep(0.6)
+            if delivered_local < len(driver_orders):
+                if not _admin_stress_wait(session_id, random.uniform(0.7, 1.4)):
+                    if _admin_stress_session_cancel_requested(session_id) and not cancel_logged:
+                        cancel_logged = True
+                        _admin_stress_append_event(
+                            f"{getattr(driver, 'username', 'driver')}: ruta cancelada despues de una entrega.",
+                            'note',
+                        )
+                    return
+
+        return_points = _admin_stress_build_segment_points(current_lat, current_lon, depot_lat, depot_lon, max_points=8)
+        for return_point in (return_points or []):
+            if not _admin_stress_session_matches(session_id):
+                if _admin_stress_session_cancel_requested(session_id) and not cancel_logged:
+                    cancel_logged = True
+                    _admin_stress_append_event(
+                        f"{getattr(driver, 'username', 'driver')}: regreso cancelado con {delivered_local} entregas hechas.",
+                        'note',
+                    )
+                return
+            _admin_stress_set_driver_location(driver, return_point['lat'], return_point['lon'], speed=11.0)
+            if not _admin_stress_wait(session_id, 0.7):
+                if _admin_stress_session_cancel_requested(session_id) and not cancel_logged:
+                    cancel_logged = True
+                    _admin_stress_append_event(
+                        f"{getattr(driver, 'username', 'driver')}: regreso cancelado con {delivered_local} entregas hechas.",
+                        'note',
+                    )
+                return
 
         _admin_stress_append_event(
-            f"{getattr(driver, 'username', 'driver')}: ruta completada ({delivered_local} entregas).",
+            f"{getattr(driver, 'username', 'driver')}: ruta completada y vuelta al deposito ({delivered_local} entregas).",
             'ok',
         )
     except Exception as exc:
@@ -8246,7 +8568,8 @@ def _run_admin_stress_ready_simulation(session_id: str, payment_reference: str) 
     try:
         db_local = SessionLocal()
         try:
-            drivers = _admin_stress_list_drivers(db_local)
+            stress_scope = _normalize_admin_customer_type_filter(_admin_stress_snapshot().get('business_scope')) or 'mayorista'
+            drivers = _admin_stress_list_drivers(db_local, business_scope=stress_scope)
             session_orders = _admin_stress_load_orders(payment_reference, db_local)
             ready_orders = [
                 order for order in session_orders
@@ -8256,20 +8579,23 @@ def _run_admin_stress_ready_simulation(session_id: str, payment_reference: str) 
                 _admin_stress_set_error(session_id, 'No hay pedidos QA preparados para arrancar la simulacion.')
                 return
             if not drivers:
-                _admin_stress_set_error(session_id, 'No hay repartidores activos para la simulacion.')
+                _admin_stress_set_error(session_id, f'No hay repartidores activos del rubro {stress_scope} para la simulacion.')
                 return
 
+            grouped_orders, driver_loads = _admin_stress_balance_ready_orders(ready_orders, drivers)
             for driver in drivers:
                 if not _admin_stress_session_matches(session_id):
                     return
                 try:
-                    _auto_assign_routes_for_driver(driver, ready_orders, include_assigned=False, db=db_local)
-                    ready_orders = [
-                        order for order in _admin_stress_load_orders(payment_reference, db_local)
-                        if _normalize_order_status(order.get('status')) in ('preparado', 'enviado')
-                    ]
+                    driver_orders = grouped_orders.get(int(getattr(driver, 'id')), []) or []
                 except Exception:
-                    logger.exception('admin stress auto-assign failed for driver=%s', getattr(driver, 'username', None))
+                    driver_orders = []
+                if not driver_orders:
+                    continue
+                try:
+                    _auto_assign_routes_for_driver(driver, driver_orders, include_assigned=True, db=db_local)
+                except Exception:
+                    logger.exception('admin stress route optimization failed for driver=%s', getattr(driver, 'username', None))
 
             assigned_ready_orders = [
                 order for order in _admin_stress_load_orders(payment_reference, db_local)
@@ -8315,6 +8641,18 @@ def _run_admin_stress_ready_simulation(session_id: str, payment_reference: str) 
                 f"Simulacion en marcha: {len(assigned_ready_orders)} pedidos QA sobre {len(grouped_driver_ids)} repartidores.",
                 'ok',
             )
+            try:
+                distribution_parts = []
+                for driver in drivers:
+                    driver_key = int(getattr(driver, 'id'))
+                    load_value = int(driver_loads.get(driver_key) or 0)
+                    if load_value <= 0:
+                        continue
+                    distribution_parts.append(f"{getattr(driver, 'username', 'driver')}={load_value}")
+                if distribution_parts:
+                    _admin_stress_append_event('Distribucion QA: ' + ', '.join(distribution_parts), 'note')
+            except Exception:
+                pass
             if unassigned_count > 0:
                 _admin_stress_append_event(
                     f'Quedaron {unassigned_count} pedidos QA sin asignar y no entran en esta corrida.',
@@ -8365,7 +8703,7 @@ def _run_admin_stress_ready_simulation(session_id: str, payment_reference: str) 
 def admin_stress_test_status(current_owner=Depends(require_admin_owner)):
     snapshot = _admin_stress_snapshot()
     phase = str(snapshot.get('phase') or '').strip().lower()
-    if phase in ('awaiting_ready', 'completed', 'error'):
+    if phase in ('awaiting_ready', 'completed', 'error', 'cancelled'):
         counts = _admin_stress_refresh_counts_from_db(snapshot.get('payment_reference'))
         snapshot.update(counts)
     return snapshot
@@ -8392,14 +8730,15 @@ async def admin_stress_test_start(request: Request, current_owner=Depends(requir
     session_id = uuid.uuid4().hex[:12]
     prefix = f"qa.console.{session_id}"
     payment_reference = f"stress:{session_id}"
-    _admin_stress_reset_session(session_id, prefix, payment_reference, requested_count)
+    stress_scope = _resolve_admin_customer_type_filter(current_owner) or 'mayorista'
+    _admin_stress_reset_session(session_id, prefix, payment_reference, requested_count, business_scope=stress_scope)
     _admin_stress_append_event(
-        f"Sesion {session_id} creada por {getattr(current_owner, 'username', 'owner')}.",
+        f"Sesion {session_id} creada por {getattr(current_owner, 'username', 'owner')} para {stress_scope}.",
         'note',
     )
     thread = threading.Thread(
         target=_run_admin_stress_seed,
-        args=(session_id, prefix, payment_reference, requested_count),
+        args=(session_id, prefix, payment_reference, requested_count, stress_scope),
         daemon=True,
     )
     thread.start()
@@ -8447,6 +8786,22 @@ def admin_stress_test_ready(current_owner=Depends(require_admin_owner)):
         daemon=True,
     )
     thread.start()
+    return _admin_stress_snapshot()
+
+
+@app.post('/admin/stress-test/cancel')
+def admin_stress_test_cancel(current_owner=Depends(require_admin_owner)):
+    snapshot = _admin_stress_snapshot()
+    phase = str(snapshot.get('phase') or '').strip().lower()
+    if phase in ('idle', 'completed', 'error', 'cancelled'):
+        raise HTTPException(status_code=409, detail='stress_test_not_running')
+
+    payment_reference = str(snapshot.get('payment_reference') or '').strip()
+    _admin_stress_cancel_session(getattr(current_owner, 'username', None))
+    try:
+        _admin_stress_refresh_counts_from_db(payment_reference)
+    except Exception:
+        pass
     return _admin_stress_snapshot()
 
 
