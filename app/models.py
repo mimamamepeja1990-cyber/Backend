@@ -230,5 +230,6 @@ class PromoImage(Base):
     filename = Column(String(256), nullable=False)
     url = Column(String(512), nullable=True)
     alt = Column(String(256), nullable=True)
+    business_scope = Column(String(20), nullable=False, default='mayorista', index=True)
     selected = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

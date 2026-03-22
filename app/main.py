@@ -205,6 +205,41 @@ def _is_truthy(value: Optional[str]) -> bool:
         return False
 
 
+def _normalize_catalog_business_scope(value: Any, default: str = 'mayorista') -> str:
+    try:
+        scope = str(value or '').strip().lower()
+    except Exception:
+        scope = ''
+    return scope if scope in ('mayorista', 'minorista') else default
+
+
+def _resolve_request_business_scope(request: Optional[Request] = None, fallback: Optional[str] = None) -> str:
+    candidate = fallback
+    if request is not None:
+        try:
+            candidate = candidate or request.query_params.get('business_scope')
+        except Exception:
+            pass
+        try:
+            candidate = candidate or request.headers.get('x-business-scope') or request.headers.get('X-Business-Scope')
+        except Exception:
+            pass
+    return _normalize_catalog_business_scope(candidate)
+
+
+def _scoped_setting_key(base_key: str, business_scope: Optional[str] = None) -> str:
+    scope = _normalize_catalog_business_scope(business_scope)
+    return base_key if scope == 'mayorista' else f'{base_key}:{scope}'
+
+
+def _scoped_snapshot_filename(filename: str, business_scope: Optional[str] = None) -> str:
+    scope = _normalize_catalog_business_scope(business_scope)
+    if scope == 'mayorista':
+        return filename
+    root, ext = os.path.splitext(filename)
+    return f'{root}.{scope}{ext}'
+
+
 # --- Geocoding (optional, for delivery route optimization) ---
 GEOCODE_PROVIDER = str(os.environ.get('GEOCODE_PROVIDER') or '').strip().lower() or 'nominatim'
 GEOCODE_GOOGLE_API_KEY = str(os.environ.get('GEOCODE_GOOGLE_API_KEY') or '').strip() or None
@@ -402,6 +437,41 @@ def _ensure_admin_user_columns() -> None:
         logger.exception('ensure_admin_user_columns failed')
 
 
+def _ensure_promo_image_columns() -> None:
+    try:
+        insp = inspect(engine)
+        if 'promo_images' not in insp.get_table_names():
+            return
+        existing = {c['name'] for c in insp.get_columns('promo_images')}
+    except Exception:
+        existing = set()
+    try:
+        dialect_local = getattr(engine, 'dialect', None)
+        dialect_name = getattr(dialect_local, 'name', '') if dialect_local else ''
+        with engine.begin() as conn:
+            if 'business_scope' not in existing:
+                col_sql = "VARCHAR(20) DEFAULT 'mayorista'"
+                if 'postgres' in dialect_name:
+                    try:
+                        conn.execute(text(f"ALTER TABLE promo_images ADD COLUMN IF NOT EXISTS business_scope {col_sql}"))
+                    except Exception:
+                        conn.execute(text(f"ALTER TABLE promo_images ADD COLUMN business_scope {col_sql}"))
+                else:
+                    conn.execute(text(f"ALTER TABLE promo_images ADD COLUMN business_scope {col_sql}"))
+                existing.add('business_scope')
+            if 'business_scope' in existing:
+                conn.execute(
+                    text(
+                        "UPDATE promo_images SET business_scope = CASE "
+                        "WHEN COALESCE(TRIM(LOWER(business_scope)), '') = 'minorista' THEN 'minorista' "
+                        "ELSE 'mayorista' "
+                        "END"
+                    )
+                )
+    except Exception:
+        logger.exception('ensure_promo_image_columns failed')
+
+
 def _startup_bootstrap_sync() -> None:
     """Run blocking startup tasks in a background thread when desired."""
     # Startup
@@ -410,6 +480,7 @@ def _startup_bootstrap_sync() -> None:
     # Ensure admin owner user exists (so panel users persist in DB).
     try:
         _ensure_admin_user_columns()
+        _ensure_promo_image_columns()
         _ensure_default_admin_owner()
     except Exception:
         logger.exception('ensure_default_admin_owner failed')
@@ -818,7 +889,7 @@ PRODUCTS_CACHE_TTL = float(os.environ.get('PRODUCTS_CACHE_TTL') or 10.0)
 PRODUCTS_CACHE_LIMIT_MAX = int(os.environ.get('PRODUCTS_CACHE_LIMIT_MAX') or 1000)
 PRODUCTS_COUNT_CACHE: Dict[Any, Dict[str, Any]] = {}
 PRODUCTS_COUNT_CACHE_TTL = float(os.environ.get('PRODUCTS_COUNT_CACHE_TTL') or 15.0)
-PROMOTIONS_CACHE: Dict[str, Any] = {'ts': 0.0, 'mtime': None, 'value': None}
+PROMOTIONS_CACHE: Dict[str, Dict[str, Any]] = {}
 PROMOTIONS_CACHE_TTL = float(os.environ.get('PROMOTIONS_CACHE_TTL') or 15.0)
 
 # Auto-image progress tracking (in-memory, last job wins).
@@ -977,20 +1048,18 @@ def _load_products_serialized(
             return []
 
 
-def _load_consumos_snapshot(db: Session) -> List[Dict[str, Any]]:
+def _load_consumos_snapshot(db: Session, business_scope: str = 'mayorista') -> List[Dict[str, Any]]:
+    scope = _normalize_catalog_business_scope(business_scope)
     try:
         items = []
         try:
-            rec = db.query(models.Setting).filter(models.Setting.key == 'consumos').first()
-            if rec and rec.value:
-                try:
-                    items = json.loads(rec.value) or []
-                except Exception:
-                    items = []
+            dbv = crud.get_setting(db, _scoped_setting_key('consumos', scope))
+            if isinstance(dbv, list):
+                items = dbv
         except Exception:
             items = []
         if not items:
-            consumos_path = os.path.join(CATALOG_DIR, 'consumos.json')
+            consumos_path = os.path.join(CATALOG_DIR, _scoped_snapshot_filename('consumos.json', scope))
             if os.path.exists(consumos_path):
                 try:
                     with open(consumos_path, 'r', encoding='utf-8') as f:
@@ -1008,31 +1077,46 @@ def _invalidate_products_cache() -> None:
     PRODUCTS_COUNT_CACHE.clear()
 
 
-def _invalidate_promotions_cache() -> None:
-    PROMOTIONS_CACHE.update({'ts': 0.0, 'mtime': None, 'value': None})
+def _get_promotions_cache_bucket(business_scope: str = 'mayorista') -> Dict[str, Any]:
+    scope = _normalize_catalog_business_scope(business_scope)
+    bucket = PROMOTIONS_CACHE.get(scope)
+    if not isinstance(bucket, dict):
+        bucket = {'ts': 0.0, 'mtime': None, 'value': None}
+        PROMOTIONS_CACHE[scope] = bucket
+    return bucket
 
 
-def _get_promotions_cached() -> List[Dict[str, Any]]:
-    path = os.path.join(CATALOG_DIR, 'promotions.json')
+def _invalidate_promotions_cache(business_scope: Optional[str] = None) -> None:
+    if business_scope:
+        bucket = _get_promotions_cache_bucket(business_scope)
+        bucket.update({'ts': 0.0, 'mtime': None, 'value': None})
+        return
+    PROMOTIONS_CACHE.clear()
+
+
+def _get_promotions_cached(business_scope: str = 'mayorista') -> List[Dict[str, Any]]:
+    scope = _normalize_catalog_business_scope(business_scope)
+    path = os.path.join(CATALOG_DIR, _scoped_snapshot_filename('promotions.json', scope))
     try:
         if not os.path.exists(path):
             return []
         mtime = os.path.getmtime(path)
         now = time.time()
-        cached = PROMOTIONS_CACHE.get('value')
+        cache_bucket = _get_promotions_cache_bucket(scope)
+        cached = cache_bucket.get('value')
         if (
             cached is not None
-            and PROMOTIONS_CACHE.get('mtime') == mtime
-            and (now - float(PROMOTIONS_CACHE.get('ts') or 0)) < PROMOTIONS_CACHE_TTL
+            and cache_bucket.get('mtime') == mtime
+            and (now - float(cache_bucket.get('ts') or 0)) < PROMOTIONS_CACHE_TTL
         ):
             return cached
         with open(path, 'r', encoding='utf-8') as f:
             data = _normalize_promotions_payload(json.load(f))
-        PROMOTIONS_CACHE.update({'value': data, 'mtime': mtime, 'ts': now})
+        cache_bucket.update({'value': data, 'mtime': mtime, 'ts': now})
         return data
     except Exception as e:
         logger.exception('promotions cache read failed: %s', e)
-        cached = PROMOTIONS_CACHE.get('value')
+        cached = _get_promotions_cache_bucket(scope).get('value')
         return cached if isinstance(cached, list) else []
 
 def _prune_order_cache():
@@ -5219,9 +5303,10 @@ def _derive_product_categories(product_row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _write_catalog_settings_snapshot(filename: str, payload: Any) -> None:
+def _write_catalog_settings_snapshot(filename: str, payload: Any, business_scope: str = 'mayorista') -> None:
     os.makedirs(CATALOG_DIR, exist_ok=True)
-    with open(os.path.join(CATALOG_DIR, filename), 'w', encoding='utf-8') as f:
+    scoped_name = _scoped_snapshot_filename(filename, business_scope)
+    with open(os.path.join(CATALOG_DIR, scoped_name), 'w', encoding='utf-8') as f:
         f.write(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
@@ -5229,7 +5314,9 @@ def _auto_sync_catalog_categories(
     db: Session,
     product_ids: Optional[List[int]] = None,
     overwrite_category: bool = False,
+    business_scope: str = 'mayorista',
 ) -> Dict[str, Any]:
+    scope = _normalize_catalog_business_scope(business_scope)
     try:
         bind = db.get_bind()
         insp = inspect(bind)
@@ -5254,8 +5341,8 @@ def _auto_sync_catalog_categories(
             sql += f" WHERE id IN ({', '.join(placeholders)})"
     rows = crud._safe_execute_fetchall(db, sql, params) or []
 
-    filters_before = _normalize_backend_filters_list(crud.get_setting(db, 'filters'))
-    mapping_before = _normalize_product_categories_mapping(crud.get_setting(db, 'product_categories'))
+    filters_before = _normalize_backend_filters_list(crud.get_setting(db, _scoped_setting_key('filters', scope)))
+    mapping_before = _normalize_product_categories_mapping(crud.get_setting(db, _scoped_setting_key('product_categories', scope)))
     filters_map = {item['value']: dict(item) for item in filters_before}
     mapping_after = dict(mapping_before)
     updated_products = 0
@@ -5334,22 +5421,22 @@ def _auto_sync_catalog_categories(
     mapping_saved = False
     if filters_changed:
         try:
-            filters_saved = bool(crud.set_setting(db, 'filters', filters_after))
+            filters_saved = bool(crud.set_setting(db, _scoped_setting_key('filters', scope), filters_after))
         except Exception:
             logger.exception('auto category sync: failed to persist filters')
             filters_saved = False
         try:
-            _write_catalog_settings_snapshot('filters.json', filters_after)
+            _write_catalog_settings_snapshot('filters.json', filters_after, business_scope=scope)
         except Exception:
             logger.exception('auto category sync: failed to write filters snapshot')
     if mapping_changed:
         try:
-            mapping_saved = bool(crud.set_setting(db, 'product_categories', mapping_after))
+            mapping_saved = bool(crud.set_setting(db, _scoped_setting_key('product_categories', scope), mapping_after))
         except Exception:
             logger.exception('auto category sync: failed to persist product categories')
             mapping_saved = False
         try:
-            _write_catalog_settings_snapshot('product_categories.json', mapping_after)
+            _write_catalog_settings_snapshot('product_categories.json', mapping_after, business_scope=scope)
         except Exception:
             logger.exception('auto category sync: failed to write product categories snapshot')
 
@@ -5391,15 +5478,16 @@ async def _push_catalog_category_events(sync_result: Optional[Dict[str, Any]]) -
 def get_filters(request: Request, db: Session = Depends(get_db)):
     """Return admin-managed filters. Prefer the DB-backed setting when available
     so filters survive deploys; fall back to the on-disk snapshot for compatibility."""
+    scope = _resolve_request_business_scope(request)
     data = None
     try:
         # Try DB first
-        dbv = crud.get_setting(db, 'filters')
+        dbv = crud.get_setting(db, _scoped_setting_key('filters', scope))
         if isinstance(dbv, list):
             data = dbv
         else:
             # fallback to file if DB has no value or it's malformed
-            path = os.path.join(CATALOG_DIR, 'filters.json')
+            path = os.path.join(CATALOG_DIR, _scoped_snapshot_filename('filters.json', scope))
             if os.path.exists(path):
                 with open(path, 'r', encoding='utf-8') as f:
                     loaded = json.load(f)
@@ -5415,13 +5503,14 @@ def get_filters(request: Request, db: Session = Depends(get_db)):
 
 @app.post('/filters')
 async def set_filters(request: Request, db: Session = Depends(get_db)):
+    scope = _resolve_request_business_scope(request)
     try:
         body = await request.json()
         if not isinstance(body, list):
             raise HTTPException(status_code=400, detail='filters must be an array')
         # Persist to DB (best-effort)
         try:
-            ok = crud.set_setting(db, 'filters', body)
+            ok = crud.set_setting(db, _scoped_setting_key('filters', scope), body)
             if not ok:
                 logger.warning('set_filters: failed to persist filters to DB')
         except Exception:
@@ -5429,7 +5518,7 @@ async def set_filters(request: Request, db: Session = Depends(get_db)):
         # Also write file snapshot for backward compatibility
         try:
             os.makedirs(CATALOG_DIR, exist_ok=True)
-            path = os.path.join(CATALOG_DIR, 'filters.json')
+            path = os.path.join(CATALOG_DIR, _scoped_snapshot_filename('filters.json', scope))
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(json.dumps(body, ensure_ascii=False, indent=2))
         except Exception:
@@ -5457,13 +5546,14 @@ async def set_filters(request: Request, db: Session = Depends(get_db)):
 def get_product_categories(request: Request, db: Session = Depends(get_db)):
     """Return mapping productKey -> [categoryValues]. Prefer DB-stored mapping so
     the configuration survives deploys; fall back to the file snapshot otherwise."""
+    scope = _resolve_request_business_scope(request)
     data = None
     try:
-        dbv = crud.get_setting(db, 'product_categories')
+        dbv = crud.get_setting(db, _scoped_setting_key('product_categories', scope))
         if isinstance(dbv, dict):
             data = dbv
         else:
-            path = os.path.join(CATALOG_DIR, 'product_categories.json')
+            path = os.path.join(CATALOG_DIR, _scoped_snapshot_filename('product_categories.json', scope))
             if os.path.exists(path):
                 with open(path, 'r', encoding='utf-8') as f:
                     loaded = json.load(f)
@@ -5479,13 +5569,14 @@ def get_product_categories(request: Request, db: Session = Depends(get_db)):
 
 @app.post('/product-categories')
 async def set_product_categories(request: Request, db: Session = Depends(get_db)):
+    scope = _resolve_request_business_scope(request)
     try:
         body = await request.json()
         if not isinstance(body, dict):
             raise HTTPException(status_code=400, detail='body must be an object mapping productKey to array')
         # Persist into DB (best-effort)
         try:
-            ok = crud.set_setting(db, 'product_categories', body)
+            ok = crud.set_setting(db, _scoped_setting_key('product_categories', scope), body)
             if not ok:
                 logger.warning('set_product_categories: failed to persist mapping to DB')
         except Exception:
@@ -5493,7 +5584,7 @@ async def set_product_categories(request: Request, db: Session = Depends(get_db)
         # Also write local snapshot file for compatibility
         try:
             os.makedirs(CATALOG_DIR, exist_ok=True)
-            path = os.path.join(CATALOG_DIR, 'product_categories.json')
+            path = os.path.join(CATALOG_DIR, _scoped_snapshot_filename('product_categories.json', scope))
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(json.dumps(body, ensure_ascii=False, indent=2))
         except Exception:
@@ -5869,11 +5960,20 @@ def list_promos(request: Request, db: Session = Depends(get_db)):
     """Return only the images selected for the public promo carousel.
     The selection is stored in `promo_list.json` under the catalog directory.
     """
+    scope = _resolve_request_business_scope(request)
     try:
         # Prefer DB-backed selection of promo images. Fall back to scanned uploads when DB empty.
         selected = []
         try:
-            promos = db.query(models.PromoImage).filter(models.PromoImage.selected == True).order_by(models.PromoImage.created_at.desc()).all()
+            promos = (
+                db.query(models.PromoImage)
+                .filter(
+                    models.PromoImage.selected == True,
+                    models.PromoImage.business_scope == scope,
+                )
+                .order_by(models.PromoImage.created_at.desc())
+                .all()
+            )
             for p in promos:
                 # prefer stored URL, but make it absolute so frontend/admin can load across origins
                 try:
@@ -5909,7 +6009,7 @@ def list_promos(request: Request, db: Session = Depends(get_db)):
 
                 selected.append({ 'url': url, 'alt': p.alt or p.filename, 'name': p.filename, 'ts': int(p.created_at.timestamp()) if p.created_at else None })
             # If DB has none, fall back to scanning PROMO_DIR for compatibility
-            if not selected and os.path.isdir(PROMO_DIR):
+            if scope == 'mayorista' and not selected and os.path.isdir(PROMO_DIR):
                 for fname in sorted(os.listdir(PROMO_DIR)):
                     if fname.startswith('.'):
                         continue
@@ -5941,6 +6041,7 @@ async def upload_promo(file: UploadFile = File(...), request: Request = None, db
     Uses `utils.save_upload_file` so deployments on hosts like Render can be configured
     to use a persistent `UPLOAD_DIR` or S3 via env vars.
     """
+    scope = _resolve_request_business_scope(request)
     try:
         # Ensure upload folder exists
         utils.ensure_upload_folder(PROMO_DIR)
@@ -5998,17 +6099,29 @@ async def upload_promo(file: UploadFile = File(...), request: Request = None, db
         # persist metadata in DB (store absolute URL when possible)
         try:
             # Try to avoid duplicate PromoImage rows: match by exact filename or by suffix of original filename
-            existing_pi = db.query(models.PromoImage).filter(
-                or_(models.PromoImage.filename == fname, models.PromoImage.filename.like(f'%{orig_name}'))
-            ).first()
+            existing_pi = (
+                db.query(models.PromoImage)
+                .filter(
+                    models.PromoImage.business_scope == scope,
+                    or_(models.PromoImage.filename == fname, models.PromoImage.filename.like(f'%{orig_name}')),
+                )
+                .first()
+            )
             if existing_pi:
                 existing_pi.url = url
                 existing_pi.alt = fname
                 existing_pi.selected = False
+                existing_pi.business_scope = scope
                 db.add(existing_pi)
                 db.commit()
             else:
-                pi = models.PromoImage(filename=fname, url=url, alt=fname, selected=False)
+                pi = models.PromoImage(
+                    filename=fname,
+                    url=url,
+                    alt=fname,
+                    selected=False,
+                    business_scope=scope,
+                )
                 db.add(pi)
                 db.commit()
         except Exception:
@@ -6028,11 +6141,17 @@ async def upload_promo(file: UploadFile = File(...), request: Request = None, db
 @app.get('/api/uploads')
 def list_uploads(request: Request, db: Session = Depends(get_db)):
     """Return all uploaded image files (for admin browsing)."""
+    scope = _resolve_request_business_scope(request)
     try:
         items = []
         try:
             # prefer DB records
-            rows = db.query(models.PromoImage).order_by(models.PromoImage.created_at.desc()).all()
+            rows = (
+                db.query(models.PromoImage)
+                .filter(models.PromoImage.business_scope == scope)
+                .order_by(models.PromoImage.created_at.desc())
+                .all()
+            )
             for r in rows:
                 try:
                     base = str(request.base_url).rstrip('/')
@@ -6071,7 +6190,7 @@ def list_uploads(request: Request, db: Session = Depends(get_db)):
 
                 items.append({ 'url': url, 'alt': r.alt or r.filename, 'name': r.filename, 'ts': int(r.created_at.timestamp()) if r.created_at else None, 'selected': bool(r.selected) })
             # If DB empty, fallback to scanning disk
-            if not items and os.path.isdir(PROMO_DIR):
+            if scope == 'mayorista' and not items and os.path.isdir(PROMO_DIR):
                 for fname in sorted(os.listdir(PROMO_DIR)):
                     if fname.startswith('.'):
                         continue
@@ -6106,6 +6225,7 @@ def list_uploads(request: Request, db: Session = Depends(get_db)):
 
 @app.delete('/api/promos/{filename}')
 def delete_promo(filename: str, request: Request, db: Session = Depends(get_db)):
+    scope = _resolve_request_business_scope(request)
     try:
         # prevent traversal
         fname = os.path.basename(filename)
@@ -6113,17 +6233,16 @@ def delete_promo(filename: str, request: Request, db: Session = Depends(get_db))
 
         deleted_any = False
 
-        # If the file exists on disk, remove it
-        try:
-            if os.path.exists(path) and os.path.isfile(path):
-                os.remove(path)
-                deleted_any = True
-        except Exception as e:
-            logger.exception('Failed removing file %s: %s', path, e)
-
         # Remove associated promo DB record(s)
         try:
-            rec = db.query(models.PromoImage).filter(models.PromoImage.filename == fname).first()
+            rec = (
+                db.query(models.PromoImage)
+                .filter(
+                    models.PromoImage.filename == fname,
+                    models.PromoImage.business_scope == scope,
+                )
+                .first()
+            )
             if rec:
                 # If the promo image points to a DB-backed image URL like /images/{id}, remove that image row too
                 try:
@@ -6140,13 +6259,25 @@ def delete_promo(filename: str, request: Request, db: Session = Depends(get_db))
                     db.rollback()
                 # delete the promo record
                 try:
-                    db.query(models.PromoImage).filter(models.PromoImage.filename == fname).delete()
+                    db.query(models.PromoImage).filter(models.PromoImage.id == rec.id).delete()
                     db.commit()
                     deleted_any = True
                 except Exception:
                     db.rollback()
         except Exception:
             db.rollback()
+
+        try:
+            other_refs = db.query(models.PromoImage).filter(models.PromoImage.filename == fname).count()
+        except Exception:
+            other_refs = 1
+        if other_refs == 0:
+            try:
+                if os.path.exists(path) and os.path.isfile(path):
+                    os.remove(path)
+                    deleted_any = True
+            except Exception as e:
+                logger.exception('Failed removing file %s: %s', path, e)
 
         headers = _cors_headers_for_request(request)
         if deleted_any:
@@ -6208,6 +6339,7 @@ def serve_promo_fallback(filename: str, request: Request, db: Session = Depends(
 @app.post('/api/promos/select')
 def select_promo(request: Request, db: Session = Depends(get_db)):
     """Add a filename to the promo_list (body: { "name": "filename" })."""
+    scope = _resolve_request_business_scope(request)
     try:
         body = request.json() if hasattr(request, 'json') else None
     except Exception:
@@ -6252,14 +6384,28 @@ def select_promo(request: Request, db: Session = Depends(get_db)):
         path = os.path.join(PROMO_DIR, fname)
         if not os.path.isfile(path):
             # If the file is not present on disk, allow selection if a DB record exists (tolerant behavior)
-            rec = db.query(models.PromoImage).filter(models.PromoImage.filename == fname).first()
+            rec = (
+                db.query(models.PromoImage)
+                .filter(
+                    models.PromoImage.filename == fname,
+                    models.PromoImage.business_scope == scope,
+                )
+                .first()
+            )
             if not rec:
                 headers = _cors_headers_for_request(request)
                 return JSONResponse(status_code=404, content={'detail': 'file not found'}, headers=headers)
         # mark DB record selected (and deselect others if necessary)
         try:
             # ensure record exists
-            rec = db.query(models.PromoImage).filter(models.PromoImage.filename == fname).first()
+            rec = (
+                db.query(models.PromoImage)
+                .filter(
+                    models.PromoImage.filename == fname,
+                    models.PromoImage.business_scope == scope,
+                )
+                .first()
+            )
             if not rec:
                 # create record with absolute URL when possible
                 try:
@@ -6268,10 +6414,17 @@ def select_promo(request: Request, db: Session = Depends(get_db)):
                     base = ''
                 url_path = f'/uploads/promos/{fname}'
                 url = (base + url_path) if base else url_path
-                rec = models.PromoImage(filename=fname, url=url, alt=fname, selected=True)
+                rec = models.PromoImage(
+                    filename=fname,
+                    url=url,
+                    alt=fname,
+                    selected=True,
+                    business_scope=scope,
+                )
                 db.add(rec)
             else:
                 rec.selected = True
+                rec.business_scope = scope
             # commit selection
             db.commit()
         except Exception:
@@ -6288,10 +6441,18 @@ def select_promo(request: Request, db: Session = Depends(get_db)):
 
 @app.delete('/api/promos/select/{filename}')
 def deselect_promo(filename: str, request: Request, db: Session = Depends(get_db)):
+    scope = _resolve_request_business_scope(request)
     try:
         fname = os.path.basename(filename)
         try:
-            rec = db.query(models.PromoImage).filter(models.PromoImage.filename == fname).first()
+            rec = (
+                db.query(models.PromoImage)
+                .filter(
+                    models.PromoImage.filename == fname,
+                    models.PromoImage.business_scope == scope,
+                )
+                .first()
+            )
             if not rec:
                 headers = _cors_headers_for_request(request)
                 return JSONResponse(status_code=404, content={'detail': 'not found'}, headers=headers)
@@ -6318,8 +6479,9 @@ def list_consumos(request: Request, db: Session = Depends(get_db)):
     """Return consumos config: list of { id: product_id, discount: percent }.
     Prefer DB-backed settings when available; fall back to consumos.json.
     """
+    scope = _resolve_request_business_scope(request)
     try:
-        items = _load_consumos_snapshot(db)
+        items = _load_consumos_snapshot(db, business_scope=scope)
         headers = _cors_headers_for_request(request)
         return JSONResponse(status_code=200, content=items, headers=headers)
     except Exception as e:
@@ -6331,6 +6493,7 @@ def list_consumos(request: Request, db: Session = Depends(get_db)):
 @app.post('/api/consumos')
 async def save_consumos(request: Request, db: Session = Depends(get_db)):
     """Replace the consumos list. Accepts JSON array in body."""
+    scope = _resolve_request_business_scope(request)
     try:
         body = await request.body()
         try:
@@ -6378,7 +6541,7 @@ async def save_consumos(request: Request, db: Session = Depends(get_db)):
         if len(cleaned) == 0 and len(data) > 0:
             raise HTTPException(status_code=400, detail='no-valid-consumos')
         data = cleaned
-        consumos_path = os.path.join(CATALOG_DIR, 'consumos.json')
+        consumos_path = os.path.join(CATALOG_DIR, _scoped_snapshot_filename('consumos.json', scope))
         # write and verify success; if writing fails return 500 so client knows
         try:
             os.makedirs(CATALOG_DIR, exist_ok=True)
@@ -6386,13 +6549,7 @@ async def save_consumos(request: Request, db: Session = Depends(get_db)):
                 json.dump(data, f, ensure_ascii=False, indent=2)
             # Persist to DB settings so consumos survive deploys
             try:
-                rec = db.query(models.Setting).filter(models.Setting.key == 'consumos').first()
-                if rec:
-                    rec.value = json.dumps(data, ensure_ascii=False)
-                else:
-                    rec = models.Setting(key='consumos', value=json.dumps(data, ensure_ascii=False))
-                    db.add(rec)
-                db.commit()
+                crud.set_setting(db, _scoped_setting_key('consumos', scope), data)
             except Exception as db_err:
                 try:
                     db.rollback()
@@ -6423,13 +6580,14 @@ async def save_consumos(request: Request, db: Session = Depends(get_db)):
 
 
 @app.delete('/api/consumos/{product_id}')
-def delete_consumo(product_id: str, request: Request):
+def delete_consumo(product_id: str, request: Request, db: Session = Depends(get_db)):
+    scope = _resolve_request_business_scope(request)
     try:
         pid = int(product_id)
     except Exception:
         pid = product_id
     try:
-        consumos_path = os.path.join(CATALOG_DIR, 'consumos.json')
+        consumos_path = os.path.join(CATALOG_DIR, _scoped_snapshot_filename('consumos.json', scope))
         items = []
         if os.path.exists(consumos_path):
             try:
@@ -6441,6 +6599,10 @@ def delete_consumo(product_id: str, request: Request):
             try:
                 with open(consumos_path, 'w', encoding='utf-8') as f:
                     json.dump(new_items, f, ensure_ascii=False, indent=2)
+                try:
+                    crud.set_setting(db, _scoped_setting_key('consumos', scope), new_items)
+                except Exception:
+                    logger.exception('delete_consumo failed updating scoped setting')
                 headers = _cors_headers_for_request(request)
                 return JSONResponse(status_code=200, content={'detail': 'deleted'}, headers=headers)
             except Exception as write_err:
@@ -8307,6 +8469,7 @@ async def auto_categorize_catalog(
             except Exception:
                 continue
     overwrite_category = bool(payload.get('overwrite_category')) if isinstance(payload, dict) else False
+    business_scope = _resolve_admin_customer_type_filter(current_admin) or 'mayorista'
 
     def task():
         db = SessionLocal()
@@ -8315,6 +8478,7 @@ async def auto_categorize_catalog(
                 db,
                 product_ids=ids or None,
                 overwrite_category=overwrite_category,
+                business_scope=business_scope,
             )
         finally:
             try:
@@ -8333,12 +8497,18 @@ async def auto_categorize_catalog(
 
 
 @app.get('/admin/users', response_model=List[schemas.AdminUserResponse])
-def admin_list_users(current_admin=Depends(get_current_admin_user), db: Session = Depends(get_db)):
+def admin_list_users(request: Request, current_admin=Depends(get_current_admin_user), db: Session = Depends(get_db)):
     role = str(getattr(current_admin, 'role', '') or '').strip().lower()
     users = crud.list_admin_users(db)
+    requested_scope = _resolve_request_business_scope(request, fallback=getattr(current_admin, 'active_business_scope', None))
+    active_scope = _resolve_admin_active_business_scope(current_admin, requested_scope=requested_scope)
     if role == 'owner':
-        return users
-    current_scope = _get_admin_assigned_business_scope(current_admin)
+        return [
+            u for u in (users or [])
+            if str(getattr(u, 'role', '') or '').strip().lower() == 'owner'
+            or _get_admin_assigned_business_scope(u) == active_scope
+        ]
+    current_scope = active_scope
     return [
         u for u in (users or [])
         if str(getattr(u, 'role', '') or '').strip().lower() == 'repartidor'
@@ -8347,7 +8517,7 @@ def admin_list_users(current_admin=Depends(get_current_admin_user), db: Session 
 
 
 @app.post('/admin/users', response_model=schemas.AdminUserResponse)
-def admin_create_user(payload: schemas.AdminUserCreate, current_owner=Depends(require_admin_owner), db: Session = Depends(get_db)):
+def admin_create_user(payload: schemas.AdminUserCreate, request: Request, current_owner=Depends(require_admin_owner), db: Session = Depends(get_db)):
     username = str(payload.username or '').strip()
     if not username:
         raise HTTPException(status_code=400, detail='Username requerido')
@@ -8357,6 +8527,12 @@ def admin_create_user(payload: schemas.AdminUserCreate, current_owner=Depends(re
     business_scope = _normalize_admin_business_scope(getattr(payload, 'business_scope', None))
     if business_scope not in ('mayorista', 'minorista'):
         raise HTTPException(status_code=400, detail='Rubro requerido')
+    active_scope = _resolve_admin_active_business_scope(
+        current_owner,
+        requested_scope=_resolve_request_business_scope(request, fallback=getattr(current_owner, 'active_business_scope', None)),
+    )
+    if business_scope != active_scope:
+        raise HTTPException(status_code=403, detail='Cambia al rubro correspondiente antes de crear este usuario')
     zone = _normalize_admin_zone(getattr(payload, 'zone', None))
     if role == 'repartidor':
         zone_tokens = _parse_admin_zones(zone)
@@ -8389,7 +8565,7 @@ def admin_create_user(payload: schemas.AdminUserCreate, current_owner=Depends(re
 
 
 @app.delete('/admin/users/{user_key}')
-def admin_delete_user(user_key: str, current_owner=Depends(require_admin_owner), db: Session = Depends(get_db)):
+def admin_delete_user(user_key: str, request: Request, current_owner=Depends(require_admin_owner), db: Session = Depends(get_db)):
     user = None
     try:
         if str(user_key).isdigit():
@@ -8402,6 +8578,12 @@ def admin_delete_user(user_key: str, current_owner=Depends(require_admin_owner),
         raise HTTPException(status_code=404, detail='Usuario no encontrado')
     if getattr(user, 'role', None) == 'owner':
         raise HTTPException(status_code=400, detail='No se puede eliminar el owner')
+    active_scope = _resolve_admin_active_business_scope(
+        current_owner,
+        requested_scope=_resolve_request_business_scope(request, fallback=getattr(current_owner, 'active_business_scope', None)),
+    )
+    if _get_admin_assigned_business_scope(user) != active_scope:
+        raise HTTPException(status_code=403, detail='Ese usuario pertenece a otro rubro')
     try:
         ok = crud.delete_admin_user(db, int(getattr(user, 'id')))
         if not ok:
@@ -8418,6 +8600,7 @@ def admin_delete_user(user_key: str, current_owner=Depends(require_admin_owner),
 def admin_update_user(
     user_key: str,
     payload: schemas.AdminUserUpdate,
+    request: Request,
     current_admin=Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ):
@@ -8436,7 +8619,11 @@ def admin_update_user(
         raise HTTPException(status_code=404, detail='Usuario no encontrado')
     target_role = str(getattr(user, 'role', '') or '').strip().lower()
     target_scope = _get_admin_assigned_business_scope(user)
-    if role != 'owner' and target_scope != _get_admin_assigned_business_scope(current_admin):
+    active_scope = _resolve_admin_active_business_scope(
+        current_admin,
+        requested_scope=_resolve_request_business_scope(request, fallback=getattr(current_admin, 'active_business_scope', None)),
+    )
+    if target_role != 'owner' and target_scope != active_scope:
         raise HTTPException(status_code=403, detail='No autorizado para ese rubro')
     requested_scope = getattr(payload, 'business_scope', None)
     normalized_scope = None
@@ -8495,6 +8682,7 @@ def admin_update_user(
 def admin_update_user_next_zone(
     user_key: str,
     payload: schemas.DriverNextZoneUpdate,
+    request: Request,
     current_admin=Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ):
@@ -8514,6 +8702,12 @@ def admin_update_user_next_zone(
     target_role = str(getattr(user, 'role', '') or '').strip().lower()
     if target_role != 'repartidor':
         raise HTTPException(status_code=403, detail='Solo se puede asignar zona a repartidores')
+    active_scope = _resolve_admin_active_business_scope(
+        current_admin,
+        requested_scope=_resolve_request_business_scope(request, fallback=getattr(current_admin, 'active_business_scope', None)),
+    )
+    if _get_admin_assigned_business_scope(user) != active_scope:
+        raise HTTPException(status_code=403, detail='Ese repartidor pertenece a otro rubro')
 
     assignments = _load_driver_next_zone_assignments(db)
     assignments = _cleanup_driver_next_zone_assignments(assignments)
@@ -8574,7 +8768,7 @@ def admin_driver_next_zone(current_admin=Depends(get_current_admin_user), db: Se
 
 
 @app.get('/admin/driver-next-zones', response_model=List[schemas.DriverNextZoneNoticeResponse])
-def admin_driver_next_zones(current_admin=Depends(get_current_admin_user), db: Session = Depends(get_db)):
+def admin_driver_next_zones(request: Request, current_admin=Depends(get_current_admin_user), db: Session = Depends(get_db)):
     role = str(getattr(current_admin, 'role', '') or '').strip().lower()
     if role not in ('owner', 'admin'):
         raise HTTPException(status_code=403, detail='No autorizado')
@@ -8584,15 +8778,17 @@ def admin_driver_next_zones(current_admin=Depends(get_current_admin_user), db: S
         _save_driver_next_zone_assignments(db, cleaned)
         assignments = cleaned
     rows = [value for value in assignments.values() if isinstance(value, dict)]
-    if role != 'owner':
-        allowed_scope = _get_admin_assigned_business_scope(current_admin)
-        allowed_ids = {
-            str(getattr(user, 'id'))
-            for user in (crud.list_admin_users(db) or [])
-            if str(getattr(user, 'role', '') or '').strip().lower() == 'repartidor'
-            and _get_admin_assigned_business_scope(user) == allowed_scope
-        }
-        rows = [row for row in rows if str(row.get('driver_id') or '') in allowed_ids]
+    allowed_scope = _resolve_admin_active_business_scope(
+        current_admin,
+        requested_scope=_resolve_request_business_scope(request, fallback=getattr(current_admin, 'active_business_scope', None)),
+    )
+    allowed_ids = {
+        str(getattr(user, 'id'))
+        for user in (crud.list_admin_users(db) or [])
+        if str(getattr(user, 'role', '') or '').strip().lower() == 'repartidor'
+        and _get_admin_assigned_business_scope(user) == allowed_scope
+    }
+    rows = [row for row in rows if str(row.get('driver_id') or '') in allowed_ids]
     rows.sort(key=lambda item: (str(item.get('driver_username') or '').lower(), str(item.get('delivery_date') or '')))
     return rows
 
@@ -8684,6 +8880,7 @@ async def create_product(payload: schemas.ProductCreate, request: Request, backg
         logger.exception('Failed to log payload for POST /products')
 
     actor = None
+    business_scope = _resolve_request_business_scope(request)
     try:
         actor = (request.headers.get('x-actor') or request.headers.get('X-Actor') or '').strip() or None
     except Exception:
@@ -8724,7 +8921,11 @@ async def create_product(payload: schemas.ProductCreate, request: Request, backg
             sync_result = None
             try:
                 if result.get('id'):
-                    sync_result = _auto_sync_catalog_categories(db, product_ids=[int(result.get('id'))])
+                    sync_result = _auto_sync_catalog_categories(
+                        db,
+                        product_ids=[int(result.get('id'))],
+                        business_scope=business_scope,
+                    )
             except Exception:
                 logger.exception('POST /products auto-categorize failed for id=%s', result.get('id'))
             return result, sync_result
@@ -9505,6 +9706,7 @@ def list_product_duplicates(limit: int = 200, db: Session = Depends(get_db)):
 @app.patch("/products/bulk")
 async def bulk_update_products(payload: List[schemas.ProductBulkUpdateItem], request: Request):
     actor = None
+    business_scope = _resolve_request_business_scope(request)
     try:
         actor = (request.headers.get('x-actor') or request.headers.get('X-Actor') or '').strip() or None
     except Exception:
@@ -9525,7 +9727,11 @@ async def bulk_update_products(payload: List[schemas.ProductBulkUpdateItem], req
                     except Exception:
                         continue
                 if ids_to_sync:
-                    sync_result = _auto_sync_catalog_categories(db, product_ids=ids_to_sync)
+                    sync_result = _auto_sync_catalog_categories(
+                        db,
+                        product_ids=ids_to_sync,
+                        business_scope=business_scope,
+                    )
             except Exception:
                 logger.exception('PATCH /products/bulk auto-categorize failed')
             return result, sync_result
@@ -9793,7 +9999,11 @@ async def import_products_excel(
         try:
             ids_to_sync = [int(v) for v in (created_ids + updated_ids) if v]
             if ids_to_sync:
-                sync_result = _auto_sync_catalog_categories(db, product_ids=ids_to_sync)
+                sync_result = _auto_sync_catalog_categories(
+                    db,
+                    product_ids=ids_to_sync,
+                    business_scope=business_scope,
+                )
         except Exception:
             logger.exception('products/import-excel auto-categorize failed')
 
@@ -9961,6 +10171,7 @@ async def update_product(product_id: int, payload: schemas.ProductUpdate, reques
         logger.exception('Failed to log payload for PUT /products/%s', product_id)
 
     actor = None
+    business_scope = _resolve_request_business_scope(request)
     try:
         actor = (request.headers.get('x-actor') or request.headers.get('X-Actor') or '').strip() or None
     except Exception:
@@ -9972,7 +10183,11 @@ async def update_product(product_id: int, payload: schemas.ProductUpdate, reques
             prod = crud.update_product(db, product_id, payload, actor=actor, action='update')
             sync_result = None
             try:
-                sync_result = _auto_sync_catalog_categories(db, product_ids=[int(product_id)])
+                sync_result = _auto_sync_catalog_categories(
+                    db,
+                    product_ids=[int(product_id)],
+                    business_scope=business_scope,
+                )
             except Exception:
                 logger.exception('PUT /products/%s auto-categorize failed', product_id)
             if isinstance(prod, dict):
@@ -10261,19 +10476,20 @@ def _normalize_promotions_payload(promos: Any) -> List[Dict[str, Any]]:
     return out
 
 
-def write_promotions_snapshot(promos):
+def write_promotions_snapshot(promos, business_scope: str = 'mayorista'):
     """Write promotions snapshot to catalog directory so frontend/admin can read/write a canonical file."""
     try:
+        scope = _normalize_catalog_business_scope(business_scope)
         normalized_promos = _normalize_promotions_payload(promos or [])
         if not os.path.exists(CATALOG_DIR):
             os.makedirs(CATALOG_DIR, exist_ok=True)
-        path = os.path.join(CATALOG_DIR, "promotions.json")
+        path = os.path.join(CATALOG_DIR, _scoped_snapshot_filename("promotions.json", scope))
         with open(path, "w", encoding="utf-8") as f:
             json.dump(normalized_promos, f, indent=2, ensure_ascii=False)
         logger.info('promotions snapshot written to %s', path)
         # best-effort: also push promotions to configured gist backup
         try:
-            if GIST_TOKEN and GIST_ID:
+            if scope == 'mayorista' and GIST_TOKEN and GIST_ID:
                 url = f"https://api.github.com/gists/{GIST_ID}"
                 payload = {"files": {"promotions.json": {"content": json.dumps(normalized_promos, ensure_ascii=False, indent=2)}}}
                 try:
@@ -10291,25 +10507,27 @@ def write_promotions_snapshot(promos):
 
 
 @app.get('/promotions')
-def list_promotions():
+def list_promotions(request: Request):
     """Return persisted promotions snapshot if present, otherwise return empty list."""
+    scope = _resolve_request_business_scope(request)
     try:
-        return _get_promotions_cached()
+        return _get_promotions_cached(scope)
     except Exception as e:
         logger.exception('list_promotions failed: %s', e)
     return []
 
 
 @app.post('/promotions')
-def save_promotions(promos: List[Dict[str, Any]]):
+def save_promotions(promos: List[Dict[str, Any]], request: Request):
     """Persist promotions snapshot (admin may send the full array)."""
+    scope = _resolve_request_business_scope(request)
     try:
         normalized_promos = _normalize_promotions_payload(promos or [])
         logger.info('Received /promotions POST, count=%s', len(normalized_promos))
-        ok = write_promotions_snapshot(normalized_promos)
+        ok = write_promotions_snapshot(normalized_promos, business_scope=scope)
         if not ok:
             raise HTTPException(status_code=500, detail='failed to write promotions')
-        _invalidate_promotions_cache()
+        _invalidate_promotions_cache(scope)
         return { 'detail': 'ok', 'count': len(normalized_promos) }
     except HTTPException:
         raise
@@ -11884,7 +12102,10 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
                 try:
                     def _apply_consumos(consumed_map):
                         try:
-                            path = os.path.join(CATALOG_DIR, 'consumos.json')
+                            consumed_scope = _normalize_catalog_business_scope(
+                                getattr(order, '_consumos_business_scope', None) or getattr(order, 'customer_type', None)
+                            )
+                            path = os.path.join(CATALOG_DIR, _scoped_snapshot_filename('consumos.json', consumed_scope))
                             if not os.path.exists(path):
                                 return None
                             try:

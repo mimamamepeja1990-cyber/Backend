@@ -1465,14 +1465,27 @@ def _product_stock_kg(prod):
     except Exception:
         return 0.0
 
-def prealloc_consumos(items_list_input, catalog_dir_override=None):
+def _normalize_consumos_scope(value) -> str:
+    try:
+        scope = str(value or '').strip().lower()
+    except Exception:
+        scope = ''
+    return scope if scope in ('mayorista', 'minorista') else 'mayorista'
+
+
+def _scoped_consumos_filename(business_scope=None) -> str:
+    scope = _normalize_consumos_scope(business_scope)
+    return 'consumos.json' if scope == 'mayorista' else f'consumos.{scope}.json'
+
+
+def prealloc_consumos(items_list_input, catalog_dir_override=None, business_scope=None):
     """Best-effort pre-allocation of consumos from catalogo/consumos.json.
     Returns (items_list, pre_alloc_flag, consumos_map)
     """
     try:
         root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
         catalog_dir_local = catalog_dir_override or os.environ.get('CATALOG_DIR') or os.path.join(root_dir, 'catalogo')
-        consumos_path_local = os.path.join(catalog_dir_local, 'consumos.json')
+        consumos_path_local = os.path.join(catalog_dir_local, _scoped_consumos_filename(business_scope))
         consumos_map_local = {}
         if os.path.exists(consumos_path_local):
             with open(consumos_path_local, 'r', encoding='utf-8') as f:
@@ -1575,6 +1588,11 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
     except Exception:
         stock_items = items_list
 
+    customer_type = getattr(payload, 'customer_type', None)
+    if not customer_type or not str(customer_type).strip():
+        customer_type = 'mayorista'
+    customer_type = _normalize_consumos_scope(customer_type)
+
     # Validate stock availability: consider near-expiry consumos and total stock.
     # Read consumos.json to get available near-expiry quantities (best-effort, file may not exist).
     try:
@@ -1583,7 +1601,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
             try:
                 root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
                 catalog_dir_local = catalog_dir_override or os.environ.get('CATALOG_DIR') or os.path.join(root_dir, 'catalogo')
-                consumos_path_local = os.path.join(catalog_dir_local, 'consumos.json')
+                consumos_path_local = os.path.join(catalog_dir_local, _scoped_consumos_filename(customer_type))
                 consumos_map_local = {}
                 if os.path.exists(consumos_path_local):
                     with open(consumos_path_local, 'r', encoding='utf-8') as f:
@@ -1742,13 +1760,6 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
     src = str(src).strip().lower()
     if src not in ('app', 'web'):
         src = 'web'
-
-    customer_type = getattr(payload, 'customer_type', None)
-    if not customer_type or not str(customer_type).strip():
-        customer_type = 'mayorista'
-    customer_type = str(customer_type).strip().lower()
-    if customer_type not in ('mayorista', 'minorista'):
-        customer_type = 'mayorista'
 
     kwargs = {
         'items': items_json,
@@ -1970,7 +1981,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
             # Re-load consumos file (best-effort snapshot from disk)
             root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
             catalog_dir = os.environ.get('CATALOG_DIR') or os.path.join(root_dir, 'catalogo')
-            consumos_path = os.path.join(catalog_dir, 'consumos.json')
+            consumos_path = os.path.join(catalog_dir, _scoped_consumos_filename(customer_type))
             consumos_disk = {}
             try:
                 if os.path.exists(consumos_path):
@@ -2583,6 +2594,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
         obj._updated_product_ids = list(updated_product_ids) if 'updated_product_ids' in locals() else []
         # Attach consumos consumed deltas so higher layer can update consumos.json on-disk
         obj._consumos_consumed = { str(k): int(v) for k, v in (consumed_map.items() if 'consumed_map' in locals() else []) } if 'consumed_map' in locals() else {}
+        obj._consumos_business_scope = customer_type
     except Exception:
         pass
     return obj
@@ -2822,9 +2834,11 @@ def get_orders(
             where.append("LOWER(COALESCE(status, 'recibido')) IN (" + ', '.join(status_placeholders) + ")")
 
         q_raw = str(q or '').strip()
+        order_by_clause = 'created_at DESC'
         if q_raw:
             q_no_hash = q_raw[1:].strip() if q_raw.startswith('#') else q_raw
-            q_like = f"%{q_raw.lower()}%"
+            q_search = (q_no_hash or q_raw).lower()
+            q_like = f"%{q_search}%"
             search_parts = []
 
             # Exact id match first so searching "1234" brings order #1234 reliably.
@@ -2833,6 +2847,12 @@ def get_orders(
                 params['q_exact'] = q_no_hash
                 params['q_exact_lc'] = q_no_hash.lower()
                 search_parts.append("LOWER(CAST(id AS TEXT)) = :q_exact_lc")
+                order_by_clause = (
+                    "CASE "
+                    "WHEN CAST(id AS TEXT) = :q_exact THEN 0 "
+                    "WHEN LOWER(CAST(id AS TEXT)) = :q_exact_lc THEN 0 "
+                    "ELSE 1 END, created_at DESC"
+                )
 
             # Partial id/name/email/address fallback search.
             params['q_like'] = q_like
@@ -2874,7 +2894,7 @@ def get_orders(
             limit_clause = ' LIMIT :limit'
         rows = _safe_execute_fetchall(
             db,
-            f"SELECT {cols_sql} FROM orders{where_clause} ORDER BY created_at DESC{limit_clause} OFFSET :skip",
+            f"SELECT {cols_sql} FROM orders{where_clause} ORDER BY {order_by_clause}{limit_clause} OFFSET :skip",
             params,
         )
     except Exception:
@@ -2902,6 +2922,7 @@ def get_orders(
             q_raw = str(q or '').strip().lower()
             if q_raw:
                 q_no_hash = q_raw[1:].strip() if q_raw.startswith('#') else q_raw
+                q_search = q_no_hash or q_raw
                 filtered = []
                 for row in orm_rows:
                     try:
@@ -2917,11 +2938,13 @@ def get_orders(
                             str(getattr(row, 'user_department', '') or '').strip().lower(),
                             str(getattr(row, 'payment_reference', '') or '').strip().lower(),
                         ])
-                        if (q_no_hash and row_id == q_no_hash) or (q_raw in row_blob):
+                        if (q_no_hash and row_id == q_no_hash) or (q_search in row_blob):
                             filtered.append(row)
                     except Exception:
                         continue
                 orm_rows = filtered
+                if q_no_hash:
+                    orm_rows.sort(key=lambda row: 0 if str(getattr(row, 'id', '') or '').strip().lower() == q_no_hash else 1)
             date_value = str(date or '').strip()
             if date_value:
                 orm_rows = [

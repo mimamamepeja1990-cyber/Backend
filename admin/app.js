@@ -609,11 +609,11 @@ async function initDriverMap(){
   const center = { lat: -32.883, lng: -68.84 };
   driverMap = new google.maps.Map(container, {
     center,
-    zoom: 10,
+    zoom: 12,
+    mapTypeId: google.maps.MapTypeId.ROADMAP,
     mapTypeControl: false,
     streetViewControl: false,
     fullscreenControl: true,
-    styles: DRIVER_MAP_STYLE,
   });
   try{
     driverMap.addListener('click', () => {
@@ -1269,6 +1269,7 @@ function activateSection(sectionId){
   if ((sectionId === 'catalog' || sectionId === 'retail-prices' || sectionId === 'filters') && catalogRefreshPending) {
     try{ scheduleCatalogRefresh(`section:${sectionId}`, 120); }catch(_){ }
   }
+  if (sectionId === 'orders') { try{ refreshOrders('web'); }catch(_){ } }
   if (sectionId === 'customers') { try{ refreshCustomers(false); }catch(_){ } }
   if (sectionId === 'retail-prices') { try{ refreshRetailPrices(); }catch(_){ } }
   if (sectionId === 'preparations') { try{ refreshPreparations(false); }catch(_){ } }
@@ -1408,6 +1409,13 @@ function hasApiConnection(){
   return !!apiBaseReachable;
 }
 
+function getApiUnavailableMessage(){
+  try{
+    if (isLocalRuntime()) return 'Backend local no disponible. Levantá la API en el puerto 8000.';
+  }catch(_){ }
+  return 'No se pudo conectar con el backend.';
+}
+
 function getActor(){
   try{
     const v = localStorage.getItem('admin:actor');
@@ -1468,6 +1476,77 @@ function isRetailBusinessScope(scope = currentBusinessScope){
 
 function getScopedOrderCustomerType(){
   return normalizeBusinessScope(currentBusinessScope);
+}
+
+function getScopedStorageKey(baseKey, scope = getScopedOrderCustomerType()){
+  return `${baseKey}_${normalizeBusinessScope(scope)}`;
+}
+
+function readScopedStorage(baseKey, fallbackValue, scope = getScopedOrderCustomerType()){
+  const normalizedScope = normalizeBusinessScope(scope);
+  const scopedKey = getScopedStorageKey(baseKey, normalizedScope);
+  try{
+    let raw = localStorage.getItem(scopedKey);
+    if ((raw === null || typeof raw === 'undefined') && normalizedScope === 'mayorista'){
+      raw = localStorage.getItem(baseKey);
+      if (raw !== null && typeof raw !== 'undefined'){
+        try{ localStorage.setItem(scopedKey, raw); }catch(_){ }
+      }
+    }
+    return (raw === null || typeof raw === 'undefined') ? fallbackValue : raw;
+  }catch(_){
+    return fallbackValue;
+  }
+}
+
+function writeScopedStorage(baseKey, value, scope = getScopedOrderCustomerType()){
+  const normalizedScope = normalizeBusinessScope(scope);
+  const scopedKey = getScopedStorageKey(baseKey, normalizedScope);
+  const serialized = JSON.stringify(value);
+  try{ localStorage.setItem(scopedKey, serialized); }catch(_){ }
+  if (normalizedScope === 'mayorista'){
+    try{ localStorage.setItem(baseKey, serialized); }catch(_){ }
+  }
+}
+
+function getScopedBroadcastChannelName(baseName, scope = getScopedOrderCustomerType()){
+  return `${baseName}_${normalizeBusinessScope(scope)}`;
+}
+
+function broadcastScopedMessage(baseName, payload, options = {}){
+  try{
+    if (!window.BroadcastChannel) return;
+    const scope = normalizeBusinessScope(options.scope || getScopedOrderCustomerType());
+    const channels = [getScopedBroadcastChannelName(baseName, scope)];
+    if (scope === 'mayorista' && options.includeLegacyMayorista !== false){
+      channels.push(baseName);
+    }
+    channels.forEach((channelName) => {
+      const bc = new BroadcastChannel(channelName);
+      bc.postMessage(Object.assign({}, payload || {}, { business_scope: scope }));
+      bc.close();
+    });
+  }catch(e){
+    console.warn('broadcastScopedMessage failed', e);
+  }
+}
+
+function getScopedRequestHeaders(extraHeaders){
+  const headers = Object.assign({}, extraHeaders || {});
+  headers['X-Business-Scope'] = getScopedOrderCustomerType();
+  return headers;
+}
+
+function withScopedQuery(url, scope = getScopedOrderCustomerType()){
+  try{
+    const isAbsolute = /^[a-z]+:\/\//i.test(String(url || ''));
+    const parsed = new URL(String(url || ''), window.location.origin);
+    parsed.searchParams.set('business_scope', normalizeBusinessScope(scope));
+    return isAbsolute ? parsed.toString() : `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  }catch(_){
+    const joiner = String(url || '').includes('?') ? '&' : '?';
+    return `${url}${joiner}business_scope=${encodeURIComponent(normalizeBusinessScope(scope))}`;
+  }
 }
 
 function matchesCurrentBusinessScope(order){
@@ -1661,8 +1740,29 @@ function applyBusinessScope(scope, options = {}){
     try{ setSessionUser(currentAdminUser, currentBusinessScope); }catch(_){ }
   }
   syncBusinessScopeUI();
+  try{
+    if (userBusinessScopeSelect){
+      userBusinessScopeSelect.value = getScopedOrderCustomerType();
+      userBusinessScopeSelect.disabled = true;
+    }
+  }catch(_){ }
   if (currentSectionId === 'branches'){
     try{ const p = renderBranches(); if (p && p.catch) p.catch(()=>{}); }catch(_){ }
+  }
+  if (currentSectionId === 'users'){
+    try{ const p = renderUsers(); if (p && p.catch) p.catch(()=>{}); }catch(_){ }
+  }
+  if (currentSectionId === 'promotions'){
+    try{ renderPromotions(); }catch(_){ }
+  }
+  if (currentSectionId === 'filters'){
+    try{ renderFilters(); }catch(_){ }
+  }
+  if (currentSectionId === 'promo-images'){
+    try{ fetchPromoImages(); }catch(_){ }
+  }
+  if (currentSectionId === 'consumos'){
+    try{ const p = loadConsumos(); if (p && p.catch) p.catch(()=>{}); }catch(_){ }
   }
 }
 
@@ -1813,9 +1913,9 @@ function initAuth(){
       }
       setAuthError('');
       try{
-        const resolvedApiBase = await ensureApiBase();
+        const resolvedApiBase = await ensureApiBase({ force: true });
         if (!resolvedApiBase){
-          setAuthError('Backend local no disponible. Levantá la API en el puerto 8000.');
+          setAuthError(getApiUnavailableMessage());
           return;
         }
       }catch(_){ }
@@ -1859,6 +1959,7 @@ function initAuth(){
         setSessionUser(me, scope);
         setAuthLocked(false);
         applyRoleAccess(me);
+        try{ await bootstrapAuthenticatedAdmin(); }catch(_){ }
         try{ setupSocket(); }catch(_){ }
         activateSection('dashboard');
       }catch(e){
@@ -1880,7 +1981,7 @@ function initAuth(){
 
   (async () => {
     try{
-      await ensureApiBase();
+      await ensureApiBase({ force: true });
     }catch(_){ }
     if (!hasApiConnection()){
       setAuthLocked(true);
@@ -1900,6 +2001,7 @@ function initAuth(){
       setSessionUser(me, scope);
       setAuthLocked(false);
       applyRoleAccess(me);
+      try{ await bootstrapAuthenticatedAdmin(); }catch(_){ }
       try{ setupSocket(); }catch(_){ }
       if (me.role !== 'repartidor'){
         const activeLink = document.querySelector('.sidebar nav a.active[data-section]');
@@ -1922,10 +2024,12 @@ initAuth();
 async function safeFetch(url, opts) {
   const next = opts ? Object.assign({}, opts) : {};
   let shouldAttachAuthHeaders = true;
+  let isApiOriginRequest = false;
   try{
     const resolved = new URL(url, location.origin);
     const apiOrigin = new URL(API_BASE, location.origin).origin;
     shouldAttachAuthHeaders = resolved.origin === location.origin || resolved.origin === apiOrigin;
+    isApiOriginRequest = resolved.origin === apiOrigin;
   }catch(_){ }
   if (shouldAttachAuthHeaders){
     try{
@@ -1954,6 +2058,13 @@ async function safeFetch(url, opts) {
     throw err;
   }
   if (!res) throw new Error('no-response');
+  if (isApiOriginRequest){
+    try{
+      apiBaseCheckedAt = Date.now();
+      apiBaseReachable = true;
+      if(apiBaseIndicator) apiBaseIndicator.textContent = API_BASE;
+    }catch(_){ }
+  }
   const ct = res.headers.get('content-type') || '';
   let payload = null;
   try {
@@ -2019,9 +2130,14 @@ function fetchPromoImages() {
   (async () => {
     try{
       if (!promoImagesList) return;
+      const scope = getScopedOrderCustomerType();
       promoImagesList.innerHTML = '';
-      const uploads = await safeFetch(API_BASE + '/api/uploads').catch(()=>[]);
-      const selected = await safeFetch(API_BASE + '/api/promos').catch(()=>[]);
+      const uploads = await safeFetch(withScopedQuery(API_BASE + '/api/uploads', scope), {
+        headers: getScopedRequestHeaders(),
+      }).catch(()=>[]);
+      const selected = await safeFetch(withScopedQuery(API_BASE + '/api/promos', scope), {
+        headers: getScopedRequestHeaders(),
+      }).catch(()=>[]);
       const selectedNames = new Set((selected || []).map(i => i.name));
       if (!uploads || uploads.length === 0) {
         promoImagesList.innerHTML = '<div style="color:#888">No hay imágenes subidas.</div>';
@@ -2039,7 +2155,9 @@ function fetchPromoImages() {
           try{
             if (this.dataset && this.dataset._retried) return;
             this.dataset._retried = '1';
-            const uploadsRefetch = await safeFetch(API_BASE + '/api/uploads').catch(()=>[]);
+            const uploadsRefetch = await safeFetch(withScopedQuery(API_BASE + '/api/uploads', scope), {
+              headers: getScopedRequestHeaders(),
+            }).catch(()=>[]);
             if (uploadsRefetch && uploadsRefetch.length) {
               const found = uploadsRefetch.find(u => u.name === (img.name || ''));
               if (found && found.url && found.url !== img.url) {
@@ -2066,19 +2184,35 @@ function fetchPromoImages() {
           selBtn.textContent = 'En carrusel (Quitar)';
           selBtn.onclick = async () => {
             if (!confirm('Quitar "' + fname + '" del carrusel?')) return;
-            const resp = await fetch(API_BASE + '/api/promos/select/' + encodeURIComponent(fname), { method: 'DELETE' });
+            const resp = await fetch(withScopedQuery(API_BASE + '/api/promos/select/' + encodeURIComponent(fname), scope), {
+              method: 'DELETE',
+              headers: getScopedRequestHeaders(),
+            });
             if (resp.ok) {
               await fetchPromoImages();
-              try{ if(typeof BroadcastChannel !== 'undefined'){ const bc = new BroadcastChannel('promo_channel'); const promos = await fetch(API_BASE + '/api/promos').then(r=>r.ok? r.json():[]).catch(()=>[]); bc.postMessage({ action: 'promotions-updated', promos }); } }catch(_){ }
+              try{
+                const promos = await safeFetch(withScopedQuery(API_BASE + '/api/promos', scope), {
+                  headers: getScopedRequestHeaders(),
+                }).catch(()=>[]);
+                broadcastScopedMessage('promo_channel', { action: 'promotions-updated', promos }, { scope });
+              }catch(_){ }
             } else alert('No se pudo quitar');
           };
         } else {
           selBtn.textContent = 'Agregar al carrusel';
           selBtn.onclick = async () => {
-            const resp = await fetch(API_BASE + '/api/promos/select?name=' + encodeURIComponent(fname), { method: 'POST' });
+            const resp = await fetch(withScopedQuery(API_BASE + '/api/promos/select?name=' + encodeURIComponent(fname), scope), {
+              method: 'POST',
+              headers: getScopedRequestHeaders(),
+            });
             if (resp.ok) {
               await fetchPromoImages();
-              try{ if(typeof BroadcastChannel !== 'undefined'){ const bc = new BroadcastChannel('promo_channel'); const promos = await fetch(API_BASE + '/api/promos').then(r=>r.ok? r.json():[]).catch(()=>[]); bc.postMessage({ action: 'promotions-updated', promos }); } }catch(_){ }
+              try{
+                const promos = await safeFetch(withScopedQuery(API_BASE + '/api/promos', scope), {
+                  headers: getScopedRequestHeaders(),
+                }).catch(()=>[]);
+                broadcastScopedMessage('promo_channel', { action: 'promotions-updated', promos }, { scope });
+              }catch(_){ }
             } else alert('No se pudo seleccionar');
           };
         }
@@ -2089,10 +2223,18 @@ function fetchPromoImages() {
         delBtn.onclick = async () => {
           if (!confirm('¿Eliminar esta imagen?')) return;
           try{
-            const resp = await fetch(API_BASE + '/api/promos/' + encodeURIComponent(fname), { method: 'DELETE' });
+            const resp = await fetch(withScopedQuery(API_BASE + '/api/promos/' + encodeURIComponent(fname), scope), {
+              method: 'DELETE',
+              headers: getScopedRequestHeaders(),
+            });
             if (resp.ok) {
               await fetchPromoImages();
-              try{ if(typeof BroadcastChannel !== 'undefined'){ const bc = new BroadcastChannel('promo_channel'); const promos = await fetch(API_BASE + '/api/promos').then(r=>r.ok? r.json():[]).catch(()=>[]); bc.postMessage({ action: 'promotions-updated', promos }); } }catch(_){ }
+              try{
+                const promos = await safeFetch(withScopedQuery(API_BASE + '/api/promos', scope), {
+                  headers: getScopedRequestHeaders(),
+                }).catch(()=>[]);
+                broadcastScopedMessage('promo_channel', { action: 'promotions-updated', promos }, { scope });
+              }catch(_){ }
             } else {
               // try to show server error message
               try{
@@ -2128,7 +2270,11 @@ if (promoImageSelectBtn && promoImageInput && promoImageFileName && promoImageUp
     if (!file) { alert('Selecciona un archivo primero'); return; }
     const fd = new FormData(); fd.append('file', file);
     promoImageUploadBtn.disabled = true;
-    fetch(API_BASE + '/api/promos', { method: 'POST', body: fd })
+    fetch(withScopedQuery(API_BASE + '/api/promos'), {
+      method: 'POST',
+      headers: getScopedRequestHeaders(),
+      body: fd,
+    })
       .then(res => {
         if (res && (res.status === 200 || res.status === 201)) {
           promoImageInput.value = '';
@@ -2919,7 +3065,9 @@ const branchMarkers = new Map();
 
 async function fetchAdminUsers(){
   try{
-    const list = await safeFetch(`${API_BASE}/admin/users`).catch(() => []);
+    const list = await safeFetch(`${API_BASE}/admin/users`, {
+      headers: getScopedRequestHeaders(),
+    }).catch(() => []);
     adminUsersCache = Array.isArray(list) ? list : [];
   }catch(_){
     adminUsersCache = [];
@@ -2929,7 +3077,9 @@ async function fetchAdminUsers(){
 
 async function fetchDriverNextZones(){
   try{
-    const list = await safeFetch(`${API_BASE}/admin/driver-next-zones`).catch(() => []);
+    const list = await safeFetch(`${API_BASE}/admin/driver-next-zones`, {
+      headers: getScopedRequestHeaders(),
+    }).catch(() => []);
     const next = new Map();
     (Array.isArray(list) ? list : []).forEach((entry) => {
       const key = String((entry && (entry.driver_id || entry.driver_username)) || '').trim();
@@ -2956,7 +3106,10 @@ async function renderUsers(){
   if (!usersTableBody) return;
   if (!currentAdminUser || (currentAdminUser.role !== 'owner' && currentAdminUser.role !== 'admin')) return;
   updateUserFormAccess();
-  if (userBusinessScopeSelect) userBusinessScopeSelect.value = getScopedOrderCustomerType();
+  if (userBusinessScopeSelect){
+    userBusinessScopeSelect.value = getScopedOrderCustomerType();
+    userBusinessScopeSelect.disabled = true;
+  }
   const users = await fetchAdminUsers();
   await fetchDriverNextZones();
   const roleOrder = { owner: 0, admin: 1, repartidor: 2 };
@@ -3014,7 +3167,7 @@ async function renderUsers(){
         try{
           await safeFetch(`${API_BASE}/admin/users/${encodeURIComponent(u.id)}`, {
             method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getScopedRequestHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ zone: nextZone }),
           });
           showToast('Zona actualizada');
@@ -3071,7 +3224,7 @@ async function renderUsers(){
         try{
           await safeFetch(`${API_BASE}/admin/users/${encodeURIComponent(u.id)}/next-zone`, {
             method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
+            headers: getScopedRequestHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ zone: nextZone || null }),
           });
           showToast(nextZone ? 'Zona de mañana actualizada' : 'Zona de mañana limpiada');
@@ -3131,7 +3284,7 @@ function handleUserFormSubmit(ev){
   const username = userUsernameInput ? String(userUsernameInput.value || '').trim() : '';
   const password = userPasswordInput ? String(userPasswordInput.value || '') : '';
   const role = userRoleSelect ? String(userRoleSelect.value || 'admin') : 'admin';
-  const businessScope = userBusinessScopeSelect ? normalizeBusinessScope(userBusinessScopeSelect.value || 'mayorista') : 'mayorista';
+  const businessScope = getScopedOrderCustomerType();
   const zone = userZoneSelect ? String(userZoneSelect.value || '').trim() : '';
   if (!username || !password){
     setUserFormMessage('Completá usuario y contraseña.', 'error');
@@ -3152,12 +3305,15 @@ function handleUserFormSubmit(ev){
     try{
       await safeFetch(`${API_BASE}/admin/users`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getScopedRequestHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ username, password, role, business_scope: businessScope, zone: zone || null }),
       });
       setUserFormMessage('Usuario creado correctamente.', 'success');
       if (userForm) userForm.reset();
-      if (userBusinessScopeSelect) userBusinessScopeSelect.value = getScopedOrderCustomerType();
+      if (userBusinessScopeSelect){
+        userBusinessScopeSelect.value = getScopedOrderCustomerType();
+        userBusinessScopeSelect.disabled = true;
+      }
       syncUserFormRoleState();
       renderUsers();
     }catch(e){
@@ -3199,7 +3355,10 @@ function setupUserManagement(){
           await ensureApiBase();
         }catch(_){ }
         try{
-          await safeFetch(`${API_BASE}/admin/users/${encodeURIComponent(userId)}`, { method: 'DELETE' });
+          await safeFetch(`${API_BASE}/admin/users/${encodeURIComponent(userId)}`, {
+            method: 'DELETE',
+            headers: getScopedRequestHeaders(),
+          });
           await renderUsers();
           setUserFormMessage('Usuario eliminado.', 'success');
         }catch(e){
@@ -3250,11 +3409,11 @@ async function initBranchesMap(){
   }
   branchesMap = new google.maps.Map(branchesMapContainer, {
     center: { lat: -32.8895, lng: -68.8458 },
-    zoom: 11,
+    zoom: 13,
+    mapTypeId: google.maps.MapTypeId.ROADMAP,
     mapTypeControl: false,
     streetViewControl: false,
     fullscreenControl: true,
-    styles: DRIVER_MAP_STYLE,
   });
   branchesMapReady = true;
   return true;
@@ -3267,7 +3426,7 @@ function focusBranchOnMap(branch){
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
   try{
     branchesMap.panTo({ lat, lng });
-    branchesMap.setZoom(16);
+    branchesMap.setZoom(17);
   }catch(_){ }
 }
 
@@ -3279,7 +3438,7 @@ function renderBranchesMap(branches){
     setBranchesMapEmpty('Todav\u00eda no hay sucursales cargadas para este rubro.');
     try{
       branchesMap.setCenter({ lat: -32.8895, lng: -68.8458 });
-      branchesMap.setZoom(11);
+      branchesMap.setZoom(13);
     }catch(_){ }
     return;
   }
@@ -3316,7 +3475,7 @@ function renderBranchesMap(branches){
     if (rows.length === 1){
       const first = rows[0];
       branchesMap.setCenter({ lat: Number(first.lat), lng: Number(first.lon) });
-      branchesMap.setZoom(16);
+      branchesMap.setZoom(17);
     } else {
       branchesMap.fitBounds(bounds, 56);
     }
@@ -4445,7 +4604,7 @@ async function applyBulk(){
     if (applyBulkBtn) applyBulkBtn.disabled = true;
     const result = await safeFetch(`${API_BASE}/products/bulk`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      headers: getScopedRequestHeaders({ 'Content-Type': 'application/json', 'Accept': 'application/json' }),
       body: JSON.stringify(updates),
     });
     const updated = Number(result && result.updated != null ? result.updated : 0) || 0;
@@ -4583,7 +4742,7 @@ async function importCsvFile(file){
     }
     const res = await safeFetch(`${API_BASE}/products/bulk`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      headers: getScopedRequestHeaders({ 'Content-Type': 'application/json', 'Accept': 'application/json' }),
       body: JSON.stringify(updates),
     });
     const updated = Number(res && res.updated != null ? res.updated : 0) || 0;
@@ -5452,7 +5611,7 @@ async function createProduct(payload){
   const url = `${API_BASE}/products`;
   console.log('createProduct -> POST', url, payload);
   try{
-    return await safeFetch(url, {method:'POST', headers:{'Content-Type':'application/json', 'Accept': 'application/json'}, body: JSON.stringify(payload)});
+    return await safeFetch(url, {method:'POST', headers:getScopedRequestHeaders({'Content-Type':'application/json', 'Accept': 'application/json'}), body: JSON.stringify(payload)});
   }catch(e){
     console.error('createProduct failed', e, e.payload || null);
     // rethrow original error so caller can inspect status/payload
@@ -5464,7 +5623,7 @@ async function updateProduct(id, payload){
   const url = `${API_BASE}/products/${id}`;
   console.log('updateProduct -> PUT', url, payload);
   try{
-    return await safeFetch(url, {method:'PUT', headers:{'Content-Type':'application/json', 'Accept': 'application/json'}, body: JSON.stringify(payload)});
+    return await safeFetch(url, {method:'PUT', headers:getScopedRequestHeaders({'Content-Type':'application/json', 'Accept': 'application/json'}), body: JSON.stringify(payload)});
   }catch(e){
     console.error('updateProduct failed', e);
     throw e;
@@ -6626,6 +6785,30 @@ let lastOrdersBaseWeb = [];
 let lastPreparationsBase = [];
 let ordersRefreshRequestSeq = 0;
 let activeOrdersRefreshController = null;
+let orderSearchRefreshTimer = null;
+
+function normalizeOrderSearchQuery(value){
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const stripped = raw.replace(/^#+\s*/, '').trim();
+  return stripped || '';
+}
+
+function isExactOrderSearchQuery(value){
+  const normalized = normalizeOrderSearchQuery(value);
+  if (!normalized) return false;
+  return /^[a-z0-9_-]+$/i.test(normalized) && /\d/.test(normalized);
+}
+
+function scheduleOrdersSearchRefresh(){
+  try{
+    if (orderSearchRefreshTimer) clearTimeout(orderSearchRefreshTimer);
+  }catch(_){ }
+  orderSearchRefreshTimer = setTimeout(() => {
+    orderSearchRefreshTimer = null;
+    refreshOrders('web');
+  }, 220);
+}
 
 function dedupeOrdersSnapshot(list){
   const rows = Array.isArray(list) ? list : [];
@@ -6923,7 +7106,8 @@ const filtersTableBody = document.querySelector('#filtersTable tbody');
 
 async function fetchOrders(q = '', date = '', source = '', limit = 0, fetchOptions = null){
   const params = new URLSearchParams();
-  if(q) params.append('q', q);
+  const normalizedQuery = normalizeOrderSearchQuery(q);
+  if(normalizedQuery) params.append('q', normalizedQuery);
   if(date) params.append('date', date);
   if(source) params.append('source', source);
   params.append('customer_type', getScopedOrderCustomerType());
@@ -6996,8 +7180,23 @@ async function fetchOrders(q = '', date = '', source = '', limit = 0, fetchOptio
         }
       }catch(e){ console.warn('Failed to fetch/merge token previews', e); }
     }
-    return dedupeOrdersSnapshot(arr);
-  }catch(e){ console.warn('fetchOrders failed', e); return null; }
+    arr = dedupeOrdersSnapshot(arr);
+    if (isExactOrderSearchQuery(q)){
+      const exactQuery = normalizeOrderSearchQuery(q).toLowerCase();
+      arr = arr.slice().sort((a, b) => {
+        const aExact = String((a && a.id) || '').trim().toLowerCase() === exactQuery ? 1 : 0;
+        const bExact = String((b && b.id) || '').trim().toLowerCase() === exactQuery ? 1 : 0;
+        if (aExact !== bExact) return bExact - aExact;
+        return 0;
+      });
+    }
+    return arr;
+  }catch(e){
+    const aborted = !!(e && (e.name === 'AbortError' || String(e.message || '').toLowerCase().includes('abort')));
+    if (aborted) throw e;
+    console.warn('fetchOrders failed', e);
+    return null;
+  }
 }
 
 async function fetchPreparationsOrders(){
@@ -7515,7 +7714,7 @@ function renderOrders(list, source, dateFilter){
   try{ console.debug('[admin] renderOrders called (rebuild)', { count: Array.isArray(list)?list.length:0, source }); }catch(_){ }
   ordersTableBody.innerHTML = '';
   if(!list || list.length === 0){
-    const emptyRow = document.createElement('tr'); emptyRow.innerHTML = `<td colspan="8" class="empty-note">No hay pedidos. Si esperas ver pedidos, prueba el botón "Probar evento WS" o crea uno desde el frontend.</td>`;
+    const emptyRow = document.createElement('tr'); emptyRow.innerHTML = `<td colspan="8" class="empty-note">No hay pedidos para este rubro con los filtros actuales.</td>`;
     ordersTableBody.appendChild(emptyRow);
     try{ updateBadgeCount(source); }catch(_){ }
     return;
@@ -8736,7 +8935,9 @@ async function fetchRouteDrivers(){
   try{
     await ensureApiBase();
   }catch(_){ }
-  const list = await safeFetch(`${API_BASE}/admin/users`).catch(() => []);
+  const list = await safeFetch(`${API_BASE}/admin/users`, {
+    headers: getScopedRequestHeaders(),
+  }).catch(() => []);
   const arr = Array.isArray(list) ? list : [];
   const activeScope = getScopedOrderCustomerType();
   routesDriversCache = arr.filter((u) => (
@@ -9362,7 +9563,7 @@ async function refreshOrders(source){
   let controller = null;
   try{
     source = 'web';
-    const q = (orderSearch_web && orderSearch_web.value) ? orderSearch_web.value.trim() : '';
+    const q = normalizeOrderSearchQuery((orderSearch_web && orderSearch_web.value) ? orderSearch_web.value : '');
     const date = (orderDate_web && orderDate_web.value) ? orderDate_web.value : '';
     requestSeq = ++ordersRefreshRequestSeq;
     try{
@@ -9398,8 +9599,7 @@ async function refreshOrders(source){
   }
 }
 
-// Wire refresh buttons per-section and add a single test push button
-const anchorForTest = document.querySelector('#refreshOrdersBtn_web');
+// Wire refresh buttons per-section
 if(refreshOrdersBtn_web) refreshOrdersBtn_web.addEventListener('click', ()=> refreshOrders('web'));
 if(markAllSeenBtn_web) markAllSeenBtn_web.addEventListener('click', async ()=> {
   const ids = collectBulkActionIds('#ordersTable_web .markSeenBtn[data-id]');
@@ -9409,22 +9609,9 @@ if(markAllSeenBtn_web) markAllSeenBtn_web.addEventListener('click', async ()=> {
     successSuffix: 'vistos',
   });
 });
-try{
-  const testBtn = document.createElement('button'); testBtn.id = 'testPushBtn'; testBtn.className = 'btn'; testBtn.style.marginLeft = '8px'; testBtn.textContent = 'Probar evento WS';
-  if(anchorForTest && anchorForTest.parentNode) anchorForTest.parentNode.appendChild(testBtn); else document.body.appendChild(testBtn);
-  testBtn.addEventListener('click', async ()=>{
-    testBtn.disabled = true; testBtn.textContent = 'Enviando...';
-    try{
-      const sample = { items:[{id:'debug-sample', qty:1, meta:{name:'Pedido Test', price:1}}], total:1, created_at: new Date().toISOString() };
-      try{ await safeFetch(API_BASE + '/debug/push-order', { method: 'POST', headers:{ 'Content-Type':'application/json' }, body: JSON.stringify(sample) }); }catch(e){ throw new Error('push failed'); }
-      showToast('Evento enviado (revisa tabla)');
-    }catch(e){ console.error('testPush failed', e); showToast('Error enviando evento','error'); }
-    finally{ testBtn.disabled = false; testBtn.textContent = 'Probar evento WS'; }
-  });
-}catch(e){ console.warn('Could not add test push button', e); }
 
 // wire search/date inputs per-section
-if(orderSearch_web) orderSearch_web.addEventListener('input', ()=> refreshOrders('web'));
+if(orderSearch_web) orderSearch_web.addEventListener('input', ()=> scheduleOrdersSearchRefresh());
 if(orderDate_web) orderDate_web.addEventListener('change', ()=> refreshOrders('web'));
 if(clearOrderDate_web) clearOrderDate_web.addEventListener('click', ()=> { if(orderDate_web) orderDate_web.value = ''; refreshOrders('web'); });
 if(preparationsSearch) preparationsSearch.addEventListener('input', ()=> renderPreparations(lastPreparationsBase));
@@ -9483,7 +9670,7 @@ if(customersActiveOnlyToggle) customersActiveOnlyToggle.addEventListener('change
 if(refreshCustomersBtn) refreshCustomersBtn.addEventListener('click', ()=> refreshCustomers(true));
 ensureCustomersMonthDefault();
 
-function setOrdersCustomerType(type){
+function setOrdersCustomerType(){
   currentOrderCustomerType = getScopedOrderCustomerType();
   applyOrdersCustomerTypeTabState();
   if(Array.isArray(lastOrdersBaseWeb) && lastOrdersBaseWeb.length){
@@ -9550,10 +9737,10 @@ try{ syncProductUnitFields(); }catch(_){ }
 
 // Promotions persistence helpers
 function loadPromotions(){
-  try{ const raw = localStorage.getItem(PROMO_KEY) || '[]'; const parsed = JSON.parse(raw); return Array.isArray(parsed) ? parsed : []; }catch(e){ console.warn('loadPromotions failed', e); return []; }
+  try{ const raw = readScopedStorage(PROMO_KEY, '[]'); const parsed = JSON.parse(raw); return Array.isArray(parsed) ? parsed : []; }catch(e){ console.warn('loadPromotions failed', e); return []; }
 }
 function savePromotions(promos){
-  try{ localStorage.setItem(PROMO_KEY, JSON.stringify(promos || [])); }catch(e){ console.warn('savePromotions failed', e); }
+  try{ writeScopedStorage(PROMO_KEY, promos || []); }catch(e){ console.warn('savePromotions failed', e); }
 }
 
 function normalizePromotionsList(list){
@@ -9591,17 +9778,21 @@ function extractPromotionsArray(payload){
 }
 
 async function fetchAndSyncPromotionsFromServer(){
+  const scope = getScopedOrderCustomerType();
   const tryUrls = [
-    `${API_BASE}/promotions`,
-    `${API_BASE}/catalogo/promotions.json`,
+    withScopedQuery(`${API_BASE}/promotions`, scope),
+    scope === 'minorista' ? `${API_BASE}/catalogo/promotions.minorista.json` : `${API_BASE}/catalogo/promotions.json`,
     ...buildOptionalSameOriginUrls([
-      '/promotions',
-      '/catalogo/promotions.json',
+      withScopedQuery('/promotions', scope),
+      scope === 'minorista' ? '/catalogo/promotions.minorista.json' : '/catalogo/promotions.json',
     ]),
   ];
   for(const url of tryUrls){
     try{
-      const payload = await safeFetch(url, { cache: 'no-store' }).catch((err) => {
+      const payload = await safeFetch(url, {
+        cache: 'no-store',
+        headers: getScopedRequestHeaders(),
+      }).catch((err) => {
         console.warn('fetch promotions failed for', url, err);
         return null;
       });
@@ -9678,7 +9869,7 @@ function renderPromotions(){
 
 // Filters persistence and UI (admin)
 function loadFilters(){
-  try{ const raw = localStorage.getItem(FILTERS_KEY) || '[]'; const parsed = JSON.parse(raw); return Array.isArray(parsed) ? parsed : []; }catch(e){ console.warn('loadFilters failed', e); return []; }
+  try{ const raw = readScopedStorage(FILTERS_KEY, '[]'); const parsed = JSON.parse(raw); return Array.isArray(parsed) ? parsed : []; }catch(e){ console.warn('loadFilters failed', e); return []; }
 }
 function normalizeFiltersList(list){
   if(!Array.isArray(list)) return [];
@@ -9704,7 +9895,7 @@ function saveFilters(filters, options){
   const opts = options || {};
   const shouldPublish = opts.publish !== false;
   const normalized = normalizeFiltersList(filters || []);
-  try{ localStorage.setItem(FILTERS_KEY, JSON.stringify(normalized)); }catch(e){ console.warn('saveFilters failed', e); }
+  try{ writeScopedStorage(FILTERS_KEY, normalized); }catch(e){ console.warn('saveFilters failed', e); }
   if(!shouldPublish) return;
   try{ publishFilters(normalized); }catch(e){ console.warn('publishFilters failed', e); }
 }
@@ -9717,17 +9908,21 @@ function extractFiltersArray(payload){
 }
 
 async function fetchAndSyncFiltersFromServer(){
+  const scope = getScopedOrderCustomerType();
   const tryUrls = [
-    `${API_BASE}/filters.json`,
-    `${API_BASE}/filters`,
+    withScopedQuery(`${API_BASE}/filters.json`, scope),
+    withScopedQuery(`${API_BASE}/filters`, scope),
     ...buildOptionalSameOriginUrls([
-      '/filters.json',
-      '/filters',
+      withScopedQuery('/filters.json', scope),
+      withScopedQuery('/filters', scope),
     ]),
   ];
   for(const url of tryUrls){
     try{
-      const payload = await safeFetch(url, { cache: 'no-store' }).catch((err) => {
+      const payload = await safeFetch(url, {
+        cache: 'no-store',
+        headers: getScopedRequestHeaders(),
+      }).catch((err) => {
         console.warn('fetch filters failed for', url, err);
         return null;
       });
@@ -9789,9 +9984,13 @@ async function seedFiltersFromProductsIfMissing(){
 // can fetch them from /filters.json. This is best-effort and failures are non-fatal.
 async function publishFilters(filters){
   try{
-    const url = `${API_BASE}/filters`;
+    const url = withScopedQuery(`${API_BASE}/filters`);
     try{
-      const resp = await safeFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(filters || []) });
+      const resp = await safeFetch(url, {
+        method: 'POST',
+        headers: getScopedRequestHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(filters || []),
+      });
       // safeFetch will throw on non-ok
       return resp;
     }catch(e){
@@ -9802,22 +10001,26 @@ async function publishFilters(filters){
 
 // Product categories persistence helpers (productKey -> [filterValue,...])
 function loadProductCategories(){
-  try{ const raw = localStorage.getItem(PRODUCT_CATEGORIES_KEY) || '{}'; const parsed = JSON.parse(raw); return (parsed && typeof parsed === 'object') ? parsed : {}; }catch(e){ console.warn('loadProductCategories failed', e); return {}; }
+  try{ const raw = readScopedStorage(PRODUCT_CATEGORIES_KEY, '{}'); const parsed = JSON.parse(raw); return (parsed && typeof parsed === 'object') ? parsed : {}; }catch(e){ console.warn('loadProductCategories failed', e); return {}; }
 }
 async function fetchAndSyncProductCategories(){
+  const scope = getScopedOrderCustomerType();
   const tryUrls = [
-    `${API_BASE}/product-categories.json`,
-    `${API_BASE}/admin/product-categories.json`,
+    withScopedQuery(`${API_BASE}/product-categories.json`, scope),
+    withScopedQuery(`${API_BASE}/admin/product-categories.json`, scope),
     ...buildOptionalSameOriginUrls([
-      '/product-categories.json',
-      '/admin/product-categories.json',
+      withScopedQuery('/product-categories.json', scope),
+      withScopedQuery('/admin/product-categories.json', scope),
     ]),
   ];
   for(const url of tryUrls){
     try{
-      const data = await safeFetch(url, { cache: 'no-store' }).catch(err => { console.warn('fetch product-categories failed for', url, err); return null; });
+      const data = await safeFetch(url, {
+        cache: 'no-store',
+        headers: getScopedRequestHeaders(),
+      }).catch(err => { console.warn('fetch product-categories failed for', url, err); return null; });
       if(data && typeof data === 'object'){
-        try{ localStorage.setItem(PRODUCT_CATEGORIES_KEY, JSON.stringify(data)); }catch(e){ console.warn('failed to write product categories to localStorage', e); }
+        try{ writeScopedStorage(PRODUCT_CATEGORIES_KEY, data, scope); }catch(e){ console.warn('failed to write product categories to localStorage', e); }
         return data;
       }
     }catch(e){ console.warn('fetchAndSyncProductCategories inner error', e); }
@@ -9825,16 +10028,19 @@ async function fetchAndSyncProductCategories(){
   // If no categories file found, attempt to seed filters from admin static filters.json
   try{
     const furls = [
-      `${API_BASE}/admin/filters.json`,
-      `${API_BASE}/filters.json`,
+      withScopedQuery(`${API_BASE}/admin/filters.json`, scope),
+      withScopedQuery(`${API_BASE}/filters.json`, scope),
       ...buildOptionalSameOriginUrls([
-        '/admin/filters.json',
-        '/filters.json',
+        withScopedQuery('/admin/filters.json', scope),
+        withScopedQuery('/filters.json', scope),
       ]),
     ];
     for(const fu of furls){
       try{
-        const fdata = await safeFetch(fu, { cache: 'no-store' }).catch(()=>null);
+        const fdata = await safeFetch(fu, {
+          cache: 'no-store',
+          headers: getScopedRequestHeaders(),
+        }).catch(()=>null);
         if(Array.isArray(fdata) && fdata.length){
           // Normalize to simple array of values if file uses strings, or objects with id/label
           const norms = fdata.map(x => {
@@ -9843,9 +10049,9 @@ async function fetchAndSyncProductCategories(){
             return null;
           }).filter(Boolean);
           // persist as filters and also as product-categories mapping (values)
-          try{ localStorage.setItem(FILTERS_KEY, JSON.stringify(norms)); }catch(e){ }
+          try{ writeScopedStorage(FILTERS_KEY, norms, scope); }catch(e){ }
           const vals = norms.map(n => n.value);
-          try{ localStorage.setItem(PRODUCT_CATEGORIES_KEY, JSON.stringify(vals)); }catch(e){}
+          try{ writeScopedStorage(PRODUCT_CATEGORIES_KEY, vals, scope); }catch(e){}
           return vals;
         }
       }catch(e){ }
@@ -9856,17 +10062,23 @@ async function fetchAndSyncProductCategories(){
 
 async function publishProductCategories(mapping){
   try{
-    const url = `${API_BASE}/product-categories`;
-    try{ await safeFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(mapping || {}) }); }catch(e){ console.warn('publishProductCategories failed', e); }
+    const url = withScopedQuery(`${API_BASE}/product-categories`);
+    try{
+      await safeFetch(url, {
+        method: 'POST',
+        headers: getScopedRequestHeaders({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify(mapping || {}),
+      });
+    }catch(e){ console.warn('publishProductCategories failed', e); }
   }catch(e){ console.warn('publishProductCategories failed', e); }
 }
 
 async function saveProductCategories(mapping){
   try{
-    localStorage.setItem(PRODUCT_CATEGORIES_KEY, JSON.stringify(mapping || {}));
+    writeScopedStorage(PRODUCT_CATEGORIES_KEY, mapping || {});
   }catch(e){ console.warn('saveProductCategories localStorage failed', e); }
   try{ await publishProductCategories(mapping); }catch(e){ console.warn('saveProductCategories publish failed', e); }
-  try{ if(window.BroadcastChannel){ const bc = new BroadcastChannel('product_categories_channel'); bc.postMessage({ action: 'product-categories-updated', mapping }); bc.close(); } }catch(e){ console.warn('BroadcastChannel product-categories send failed', e); }
+  broadcastScopedMessage('product_categories_channel', { action: 'product-categories-updated', mapping });
 }
 
 // Render filters as checkboxes for product modal
@@ -9921,12 +10133,12 @@ function addFilter(name){
     renderFilters();
     showToast('Filtro agregado');
     // broadcast to public catalog
-    try{ if(window.BroadcastChannel){ const bc = new BroadcastChannel('filters_channel'); bc.postMessage({ action: 'filters-updated', filters }); bc.close(); } }catch(e){ console.warn('BroadcastChannel filters send failed', e); }
+    broadcastScopedMessage('filters_channel', { action: 'filters-updated', filters });
   }catch(e){ console.warn('addFilter failed', e); }
 }
 function deleteFilter(id){
   if(!confirm('Eliminar filtro?')) return;
-  try{ let filters = loadFilters(); filters = filters.filter(f => String(f.id) !== String(id)); saveFilters(filters); renderFilters(); showToast('Filtro eliminado'); try{ if(window.BroadcastChannel){ const bc = new BroadcastChannel('filters_channel'); bc.postMessage({ action: 'filters-updated', filters }); bc.close(); } }catch(e){ console.warn('BroadcastChannel filters send failed', e); } }catch(e){ console.warn('deleteFilter failed', e); }
+  try{ let filters = loadFilters(); filters = filters.filter(f => String(f.id) !== String(id)); saveFilters(filters); renderFilters(); showToast('Filtro eliminado'); broadcastScopedMessage('filters_channel', { action: 'filters-updated', filters }); }catch(e){ console.warn('deleteFilter failed', e); }
 }
 function editFilter(id){
   try{
@@ -9945,7 +10157,7 @@ function editFilter(id){
       if(!newName) return showToast('El nombre no puede estar vacío','error');
       f.name = newName; f.value = newValue;
       saveFilters(filters); renderFilters(); showToast('Filtro actualizado');
-      try{ if(window.BroadcastChannel){ const bc = new BroadcastChannel('filters_channel'); bc.postMessage({ action: 'filters-updated', filters }); bc.close(); } }catch(e){ console.warn('BroadcastChannel filters send failed', e); }
+      broadcastScopedMessage('filters_channel', { action: 'filters-updated', filters });
     };
   }catch(e){ console.warn('editFilter failed', e); }
 }
@@ -9955,20 +10167,16 @@ if(filterNameInput) filterNameInput.addEventListener('keydown', (e)=>{ if(e.key 
 
 if(importFiltersBtn) importFiltersBtn.addEventListener('click', async ()=>{
   try{
-    const f = await safeFetch(`${API_BASE}/filters.json`).catch(()=>null);
+    const f = await safeFetch(withScopedQuery(`${API_BASE}/filters.json`), {
+      headers: getScopedRequestHeaders(),
+    }).catch(()=>null);
     const rawFilters = extractFiltersArray(f);
     if(Array.isArray(rawFilters)){
       const normalized = normalizeFiltersList(rawFilters);
       saveFilters(normalized);
       renderFilters();
       showToast('Filtros importados');
-      try{
-        if(window.BroadcastChannel){
-          const bc = new BroadcastChannel('filters_channel');
-          bc.postMessage({ action: 'filters-updated', filters: normalized });
-          bc.close();
-        }
-      }catch(_){}
+      broadcastScopedMessage('filters_channel', { action: 'filters-updated', filters: normalized });
     } else {
       showToast('Archivo de filtros inválido o no encontrado','error');
     }
@@ -9986,7 +10194,7 @@ if(autoCategorizeCatalogBtn) autoCategorizeCatalogBtn.addEventListener('click', 
   try{
     const result = await safeFetch(`${API_BASE}/admin/products/auto-categorize`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getScopedRequestHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify({ overwrite_category: false }),
     });
     await fetchAndSyncFiltersFromServer().catch(()=>null);
@@ -10007,7 +10215,31 @@ if(autoCategorizeCatalogBtn) autoCategorizeCatalogBtn.addEventListener('click', 
 });
 
 // Listen for product-categories broadcast updates
-try{ if(window.BroadcastChannel){ const bcpc = new BroadcastChannel('product_categories_channel'); bcpc.onmessage = (ev) => { try{ if(ev.data && ev.data.action === 'product-categories-updated'){ console.log('[admin] product-categories updated via BroadcastChannel'); fetchAndSyncProductCategories().then(()=>refresh()).catch(()=>refresh()); } }catch(e){} }; } }catch(e){}
+try{
+  if(window.BroadcastChannel){
+    ['mayorista', 'minorista'].forEach((scope) => {
+      const bcpc = new BroadcastChannel(getScopedBroadcastChannelName('product_categories_channel', scope));
+      bcpc.onmessage = (ev) => {
+        try{
+          if(ev.data && ev.data.action === 'product-categories-updated'){
+            console.log('[admin] product-categories updated via BroadcastChannel');
+            fetchAndSyncProductCategories().then(()=>refresh()).catch(()=>refresh());
+          }
+        }catch(e){}
+      };
+    });
+  }
+}catch(e){}
+
+async function bootstrapAuthenticatedAdmin(){
+  if (!currentAdminUser || !hasApiConnection()) return;
+  if (String(currentAdminUser.role || '').trim().toLowerCase() === 'repartidor') return;
+  try{ loadLocalOrderCache(); }catch(e){ console.warn('loadLocalOrderCache failed', e); }
+  try{ loadOrderMapsCoordCache(); }catch(e){ console.warn('loadOrderMapsCoordCache failed', e); }
+  try{ await refresh(); }catch(e){ console.warn('authenticated refresh failed', e); }
+  try{ await refreshOrders('web'); }catch(e){ console.warn('authenticated refreshOrders failed', e); }
+  try{ startAutoImageProgressPolling(); }catch(e){ console.warn('authenticated auto image polling failed', e); }
+}
 
 async function bootstrapAdmin(){
   // ensure filters UI is initialized
@@ -10027,13 +10259,6 @@ async function bootstrapAdmin(){
   try{ renderPromotions(); }catch(e){ console.warn('initial renderPromotions failed', e); }
   // fetch product-categories snapshot (best-effort)
   try{ await fetchAndSyncProductCategories(); console.log('[admin] product-categories synced'); }catch(e){ console.warn('initial fetchAndSyncProductCategories failed', e); }
-  // initial load
-  try{ await refresh(); }catch(e){ console.warn('initial refresh failed', e); }
-  // restore any locally-inserted order previews (persisted across reloads)
-  try{ loadLocalOrderCache(); }catch(e){ console.warn('loadLocalOrderCache failed', e); }
-  try{ loadOrderMapsCoordCache(); }catch(e){ console.warn('loadOrderMapsCoordCache failed', e); }
-  try{ await refreshOrders('web'); }catch(e){ console.warn('refreshOrders web failed', e); }
-  try{ startAutoImageProgressPolling(); }catch(e){ console.warn('auto image polling failed', e); }
 }
 bootstrapAdmin();
 
@@ -10308,11 +10533,11 @@ async function savePromo(){ const name = promoName.value.trim(); const desc = pr
   savePromotions(promos); renderPromotions(); closePromoModal(); showToast('Promoción guardada');
   console.log('[admin] saved promotions to localStorage, count=', (promos || []).length, promos);
   // Broadcast promotions update to other tabs/pages (same-origin)
-  try{ if(window.BroadcastChannel){ const bc = new BroadcastChannel('promo_channel'); bc.postMessage({ action: 'promotions-updated', promos }); bc.close(); console.log('[admin] broadcasted promotions via BroadcastChannel'); } }catch(e){ console.warn('BroadcastChannel send failed', e); }
+  broadcastScopedMessage('promo_channel', { action: 'promotions-updated', promos });
   // If API base is available, try to persist the promotions to the server (writes promotions.json snapshot)
   try{
     if(API_BASE && API_BASE.startsWith('http')){
-      fetch(API_BASE + '/promotions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(promos) })
+      fetch(withScopedQuery(API_BASE + '/promotions'), { method: 'POST', headers: getScopedRequestHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(promos) })
         .then(r => { if(r.ok) { showToast('Promociones guardadas en servidor', 'info'); console.log('[admin] server saved promotions ok'); } else { console.warn('Server did not accept promotions', r.status); showToast('No se pudo guardar en servidor', 'error'); } })
         .catch(err => { console.warn('Failed sending promotions to server', err); showToast('Error guardando promos en servidor', 'error'); });
     }
@@ -10328,9 +10553,9 @@ function deletePromotion(id){
   showToast('Promoción eliminada');
   console.log('[admin] deletePromotion: broadcast & persist updated promotions count=', promos.length);
   // Broadcast promotions change so other tabs (catalogo) update
-  try{ if(window.BroadcastChannel){ const bc = new BroadcastChannel('promo_channel'); bc.postMessage({ action: 'promotions-updated', promos }); bc.close(); console.log('[admin] broadcasted promotions update after delete'); } }catch(e){ console.warn('BroadcastChannel send failed', e); }
+  broadcastScopedMessage('promo_channel', { action: 'promotions-updated', promos });
   // Persist to server if possible (write snapshot)
-  try{ if(API_BASE && API_BASE.startsWith('http')){ fetch(API_BASE + '/promotions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(promos) }) .then(r => { if(r.ok) { console.log('[admin] server saved promotions (post-delete) ok'); } else { console.warn('Server did not accept promotions on delete', r.status); } }) .catch(err => { console.warn('Failed sending promotions to server on delete', err); }); } }catch(e){ console.error('Persist to server error on delete', e); }
+  try{ if(API_BASE && API_BASE.startsWith('http')){ fetch(withScopedQuery(API_BASE + '/promotions'), { method: 'POST', headers: getScopedRequestHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(promos) }) .then(r => { if(r.ok) { console.log('[admin] server saved promotions (post-delete) ok'); } else { console.warn('Server did not accept promotions on delete', r.status); } }) .catch(err => { console.warn('Failed sending promotions to server on delete', err); }); } }catch(e){ console.error('Persist to server error on delete', e); }
 }
 
 
@@ -10363,7 +10588,7 @@ if(exportPromosBtn) exportPromosBtn.onclick = ()=>{
   try{
     const promos = loadPromotions(); const blob = new Blob([JSON.stringify(promos, null, 2)], {type:'application/json'});
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href = url; a.download = 'promotions.json'; document.body.appendChild(a); a.click(); setTimeout(()=>{ a.remove(); URL.revokeObjectURL(url); }, 500);
+    const scope = getScopedOrderCustomerType(); const a = document.createElement('a'); a.href = url; a.download = scope === 'minorista' ? 'promotions.minorista.json' : 'promotions.json'; document.body.appendChild(a); a.click(); setTimeout(()=>{ a.remove(); URL.revokeObjectURL(url); }, 500);
     showToast('Promociones exportadas', 'info');
   }catch(e){ console.error('Export promos failed', e); showToast('Error exportando promociones', 'error'); }
 };
@@ -10380,11 +10605,14 @@ const consumoSearch = document.getElementById('consumoSearch');
 
 async function loadConsumos(){
   try{
+    const scope = getScopedOrderCustomerType();
     let products = [];
     try{ products = await ensureAllProductsCache({ force: true }); }catch(e){ console.warn('ensureAllProductsCache failed for consumos', e); }
     // try snapshot fallback
     if(!products || !products.length){ try{ const resp = await fetch('../catalogo/products.json'); if(resp.ok) products = await resp.json(); }catch(e){} }
-    const resp = await safeFetch(API_BASE + '/api/consumos').catch(()=>[]);
+    const resp = await safeFetch(withScopedQuery(API_BASE + '/api/consumos', scope), {
+      headers: getScopedRequestHeaders(),
+    }).catch(()=>[]);
     const consumos = Array.isArray(resp) ? resp : [];
     renderConsumosList(products, consumos);
   }catch(e){ console.error('loadConsumos failed', e); showToast('No se pudieron cargar consumos','error'); }
@@ -10415,6 +10643,7 @@ function renderConsumosList(products, consumos){
 
 async function saveConsumos(){
   try{
+    const scope = getScopedOrderCustomerType();
     if(!consumosList) return;
     const rows = Array.from(consumosList.querySelectorAll('.consumo-row'));
     const data = [];
@@ -10437,8 +10666,9 @@ async function saveConsumos(){
         return;
       }
     }
-    const url = API_BASE + '/api/consumos' + (data.length === 0 ? '?confirm=true' : '');
-    const resp = await safeFetch(url, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(data) });
+    const url = withScopedQuery(API_BASE + '/api/consumos' + (data.length === 0 ? '?confirm=true' : ''), scope);
+    const resp = await safeFetch(url, { method: 'POST', headers: getScopedRequestHeaders({'Content-Type':'application/json'}), body: JSON.stringify(data) });
+    broadcastScopedMessage('consumos_channel', { action: 'consumos-updated', consumos: data }, { scope });
     showToast('Consumiciones guardadas', 'info');
   }catch(e){ console.error('saveConsumos failed', e); showToast('Error guardando consumos','error'); }
 }
