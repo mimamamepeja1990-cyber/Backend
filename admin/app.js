@@ -2903,8 +2903,7 @@ const branchForm = document.getElementById('branchForm');
 const branchNameInput = document.getElementById('branchName');
 const branchStreetInput = document.getElementById('branchStreet');
 const branchStreetNumberInput = document.getElementById('branchStreetNumber');
-const branchLatInput = document.getElementById('branchLat');
-const branchLonInput = document.getElementById('branchLon');
+const branchCoordsInput = document.getElementById('branchCoords');
 const branchFormMsg = document.getElementById('branchFormMsg');
 const branchesTableBody = document.querySelector('#branchesTable tbody');
 const branchesSectionTitle = document.getElementById('branchesSectionTitle');
@@ -3385,6 +3384,52 @@ function syncBranchesScopeCopy(){
   if (branchesSectionSub) branchesSectionSub.textContent = `Administr\u00e1 las sucursales ${scopeLabel.toLowerCase()}s del panel actual y verific\u00e1 su ubicaci\u00f3n en el mapa.`;
 }
 
+function formatBranchCoordinates(lat, lon){
+  return `${Number(lat).toFixed(6)}, ${Number(lon).toFixed(6)}`;
+}
+
+function parseBranchCoordinates(rawValue){
+  const raw = String(rawValue || '').replace(/\u00a0/g, ' ').trim();
+  if (!raw) return null;
+  const directPatterns = [
+    /@(-?\d+(?:[.,]\d+)?),\s*(-?\d+(?:[.,]\d+)?)/,
+    /[?&](?:q|query|ll)=(-?\d+(?:[.,]\d+)?),\s*(-?\d+(?:[.,]\d+)?)/i,
+    /!3d(-?\d+(?:[.,]\d+)?)!4d(-?\d+(?:[.,]\d+)?)/,
+    /^\s*(-?\d+(?:[.,]\d+)?)\s*[,;]\s*(-?\d+(?:[.,]\d+)?)\s*$/,
+    /^\s*(-?\d+(?:[.,]\d+)?)\s+(-?\d+(?:[.,]\d+)?)\s*$/,
+  ];
+  const parseNumber = (value) => {
+    const normalized = String(value || '').trim().replace(',', '.');
+    if (!normalized) return NaN;
+    const numeric = Number(normalized);
+    return Number.isFinite(numeric) ? numeric : NaN;
+  };
+  const isValidPair = (lat, lon) => Number.isFinite(lat) && Number.isFinite(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180;
+  for (const pattern of directPatterns){
+    const match = raw.match(pattern);
+    if (!match) continue;
+    const lat = parseNumber(match[1]);
+    const lon = parseNumber(match[2]);
+    if (isValidPair(lat, lon)) return { lat, lon };
+  }
+  const numericTokens = raw.match(/-?\d+(?:[.,]\d+)?/g) || [];
+  for (let idx = 0; idx < numericTokens.length - 1; idx += 1){
+    const lat = parseNumber(numericTokens[idx]);
+    const lon = parseNumber(numericTokens[idx + 1]);
+    if (isValidPair(lat, lon)) return { lat, lon };
+  }
+  return null;
+}
+
+function normalizeBranchCoordinatesInput(){
+  if (!branchCoordsInput) return null;
+  const parsed = parseBranchCoordinates(branchCoordsInput.value);
+  if (!parsed) return null;
+  branchCoordsInput.value = formatBranchCoordinates(parsed.lat, parsed.lon);
+  setBranchFormMessage('');
+  return parsed;
+}
+
 function setBranchesMapEmpty(message){
   if (!branchesMapEmpty) return;
   branchesMapEmpty.textContent = message || '';
@@ -3535,16 +3580,16 @@ function handleBranchFormSubmit(ev){
   const name = branchNameInput ? String(branchNameInput.value || '').trim() : '';
   const street = branchStreetInput ? String(branchStreetInput.value || '').trim() : '';
   const streetNumber = branchStreetNumberInput ? String(branchStreetNumberInput.value || '').trim() : '';
-  const lat = branchLatInput ? Number(branchLatInput.value) : NaN;
-  const lon = branchLonInput ? Number(branchLonInput.value) : NaN;
+  const parsedCoords = normalizeBranchCoordinatesInput();
   if (!name || !street || !streetNumber){
     setBranchFormMessage('Complet\u00e1 nombre, calle y n\u00famero.', 'error');
     return;
   }
-  if (!Number.isFinite(lat) || !Number.isFinite(lon)){
-    setBranchFormMessage('Ingres\u00e1 coordenadas v\u00e1lidas.', 'error');
+  if (!parsedCoords){
+    setBranchFormMessage('Peg\u00e1 coordenadas v\u00e1lidas juntas. Ejemplo: -32.889458, -68.845839.', 'error');
     return;
   }
+  const { lat, lon } = parsedCoords;
   (async () => {
     try{
       await ensureApiBase();
@@ -3576,6 +3621,16 @@ function setupBranchesSection(){
   if (branchForm){
     branchForm.addEventListener('submit', handleBranchFormSubmit);
     branchForm.addEventListener('input', () => setBranchFormMessage(''));
+  }
+  if (branchCoordsInput){
+    branchCoordsInput.addEventListener('blur', () => {
+      try{ normalizeBranchCoordinatesInput(); }catch(_){ }
+    });
+    branchCoordsInput.addEventListener('paste', () => {
+      window.setTimeout(() => {
+        try{ normalizeBranchCoordinatesInput(); }catch(_){ }
+      }, 0);
+    });
   }
   if (branchesTableBody){
     branchesTableBody.addEventListener('click', (ev) => {
