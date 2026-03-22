@@ -31,11 +31,13 @@ let driverMapReady = false;
 let driverMapInit = false;
 let driverMapPoll = null;
 const driverMapMarkers = new Map();
+const dashboardBranchMarkers = new Map();
 const driverMarkerAnim = new Map();
 let driverAnimFrame = null;
 const driverRouteState = new Map();
 let driverDirectionsService = null;
 const driverMapData = new Map();
+let dashboardBranchesCache = [];
 let selectedDriverId = '';
 let selectedDriverData = null;
 let selectedDriverInsights = null;
@@ -78,6 +80,153 @@ function getDriverMapElements(){
     container: document.getElementById('driverMap'),
     empty: document.getElementById('driverMapEmpty'),
   };
+}
+
+function getDashboardBranchMarkerIcon(){
+  if (!(window.google && window.google.maps)) return null;
+  return {
+    path: google.maps.SymbolPath.CIRCLE,
+    scale: 8,
+    fillColor: '#10b981',
+    fillOpacity: 0.98,
+    strokeColor: '#064e3b',
+    strokeOpacity: 0.92,
+    strokeWeight: 2,
+  };
+}
+
+function clearDashboardBranchMarkers(){
+  dashboardBranchMarkers.forEach((marker) => {
+    try{ marker.setMap(null); }catch(_){ }
+  });
+  dashboardBranchMarkers.clear();
+}
+
+function getDashboardBranchAddress(branch){
+  const addressLine = String(branch && branch.address_line || '').trim();
+  if (addressLine) return addressLine;
+  return `${String(branch && branch.street || '').trim()} ${String(branch && branch.street_number || '').trim()}`.trim();
+}
+
+function syncDriverMapEmptyState(mode){
+  const driverCount = driverMapMarkers.size;
+  const branchCount = dashboardBranchMarkers.size;
+  if (mode === 'auth'){
+    setDriverMapEmpty(branchCount > 0 ? 'Mostrando sucursales. Sin acceso a ubicaciones de repartidores.' : 'Sin acceso a ubicaciones. Volvé a iniciar sesión.');
+    return;
+  }
+  if (mode === 'network'){
+    setDriverMapEmpty(branchCount > 0 ? 'Mostrando sucursales. No se pudieron cargar ubicaciones de repartidores.' : 'No se pudieron cargar ubicaciones.');
+    return;
+  }
+  if (driverCount > 0){
+    setDriverMapEmpty('');
+    return;
+  }
+  if (branchCount > 0){
+    setDriverMapEmpty('Mostrando sucursales. Sin ubicaciones recientes de repartidores.');
+    return;
+  }
+  setDriverMapEmpty('Sin ubicaciones recientes de repartidores.');
+}
+
+function fitDriverMapOverview(){
+  if (!(driverMapReady && window.google && window.google.maps) || selectedDriverId) return;
+  const bounds = new google.maps.LatLngBounds();
+  let pointCount = 0;
+  const collectPoints = (markers) => {
+    markers.forEach((marker) => {
+      const point = toLatLngLiteral(marker && typeof marker.getPosition === 'function' ? marker.getPosition() : null);
+      if (!point) return;
+      bounds.extend(point);
+      pointCount += 1;
+    });
+  };
+  collectPoints(dashboardBranchMarkers);
+  collectPoints(driverMapMarkers);
+  if (pointCount > 1){
+    try{ driverMap.fitBounds(bounds, 64); }catch(_){ }
+    return;
+  }
+  if (pointCount === 1){
+    try{
+      driverMap.setCenter(bounds.getCenter());
+      driverMap.setZoom(15);
+    }catch(_){ }
+    return;
+  }
+  try{
+    driverMap.setCenter({ lat: -32.883, lng: -68.84 });
+    driverMap.setZoom(12);
+  }catch(_){ }
+}
+
+async function fetchAdminBranches(scope = getScopedOrderCustomerType()){
+  const role = String(currentAdminUser && currentAdminUser.role || '').trim().toLowerCase();
+  if (!['owner', 'admin'].includes(role)) return [];
+  const normalizedScope = normalizeBusinessScope(scope);
+  const headers = getScopedRequestHeaders();
+  headers['X-Business-Scope'] = normalizedScope;
+  try{
+    const list = await safeFetch(withScopedQuery(`${API_BASE}/admin/branches`, normalizedScope), {
+      cache: 'no-store',
+      headers,
+    }).catch(() => []);
+    return Array.isArray(list) ? list : [];
+  }catch(_){
+    return [];
+  }
+}
+
+function renderDashboardBranches(branches){
+  if (!(driverMapReady && driverMap && window.google && window.google.maps)) return;
+  clearDashboardBranchMarkers();
+  const rows = Array.isArray(branches) ? branches : [];
+  const icon = getDashboardBranchMarkerIcon();
+  rows.forEach((branch) => {
+    const lat = Number(branch && branch.lat);
+    const lng = Number(branch && branch.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    const name = String(branch && branch.name || 'Sucursal').trim() || 'Sucursal';
+    const address = getDashboardBranchAddress(branch);
+    const marker = new google.maps.Marker({
+      map: driverMap,
+      position: { lat, lng },
+      icon: icon || undefined,
+      label: {
+        text: name.slice(0, 1).toUpperCase(),
+        fontSize: '11px',
+        fontWeight: '800',
+        color: '#052e2b',
+      },
+      title: address ? `${name} - ${address}` : name,
+      zIndex: 20,
+    });
+    try{
+      marker.addListener('click', () => {
+        try{
+          driverMap.panTo({ lat, lng });
+          driverMap.setZoom(Math.max(Number(driverMap.getZoom()) || 0, 16));
+        }catch(_){ }
+      });
+    }catch(_){ }
+    dashboardBranchMarkers.set(String(branch && branch.id || name), marker);
+  });
+  syncDriverMapEmptyState();
+}
+
+async function refreshDashboardBranches(options = {}){
+  const opts = options || {};
+  const scope = normalizeBusinessScope(opts.scope || getScopedOrderCustomerType());
+  const list = await fetchAdminBranches(scope);
+  dashboardBranchesCache = Array.isArray(list) ? list.slice() : [];
+  if (driverMapReady){
+    renderDashboardBranches(dashboardBranchesCache);
+    if (opts.fitOverview){
+      fitDriverMapOverview();
+    }
+  }
+  return dashboardBranchesCache.slice();
 }
 
 function getDriverInspectorElements(){
@@ -629,7 +778,9 @@ async function initDriverMap(){
   driverMapReady = true;
   setDriverMapEmpty('');
   renderDriverInspectorPlaceholder();
+  try{ await refreshDashboardBranches({ fitOverview: false }); }catch(_){ }
   try{ await refreshDriverLocations(true); }catch(_){ }
+  try{ fitDriverMapOverview(); }catch(_){ }
 }
 
 function updateDriverMarker(driver){
@@ -720,17 +871,15 @@ async function refreshDriverLocations(force){
   }catch(e){
     const status = Number(e && e.status);
     if (status === 401 || status === 403){
-      setDriverMapEmpty('Sin acceso a ubicaciones. Volvé a iniciar sesión.');
       clearDriverMarkers();
+      syncDriverMapEmptyState('auth');
     } else {
-      setDriverMapEmpty('No se pudieron cargar ubicaciones.');
+      syncDriverMapEmptyState('network');
     }
     return;
   }
   if (!Array.isArray(list) || list.length === 0){
-    if (driverMapMarkers.size === 0){
-      setDriverMapEmpty('Sin ubicaciones recientes de repartidores.');
-    }
+    syncDriverMapEmptyState();
     return;
   }
   const seen = new Set();
@@ -751,11 +900,7 @@ async function refreshDriverLocations(force){
       removeDriverMarkerById(id);
     }
   });
-  if (visible === 0){
-    setDriverMapEmpty('Sin ubicaciones recientes de repartidores.');
-  } else {
-    setDriverMapEmpty('');
-  }
+  syncDriverMapEmptyState();
   if (selectedDriverId){
     try{ await refreshSelectedDriverInsights(false); }catch(_){ }
   }
@@ -1261,6 +1406,15 @@ function activateSection(sectionId){
   if (sectionId === 'dashboard') {
     try{ refreshSalesStats({ force: false, quiet: true }); }catch(_){ }
     try{ initDriverMap(); startDriverMapPolling(); }catch(_){ }
+    if (driverMapReady){
+      try{
+        (async () => {
+          try{ await refreshDashboardBranches({ fitOverview: false }); }catch(_){ }
+          try{ await refreshDriverLocations(false); }catch(_){ }
+          try{ fitDriverMapOverview(); }catch(_){ }
+        })();
+      }catch(_){ }
+    }
     if (catalogRefreshPending) try{ scheduleCatalogRefresh('section:dashboard', 120); }catch(_){ }
   } else {
     stopDriverMapPolling();
@@ -1640,6 +1794,8 @@ function invalidateBusinessScopeCaches(){
   lastCustomersOrdersMeta = { totalOrders: 0, limit: 0 };
   routesAssignedBase = [];
   routesUnassignedBase = [];
+  dashboardBranchesCache = [];
+  clearDashboardBranchMarkers();
 }
 
 function syncScopeSensitiveProductUi(){
@@ -1748,6 +1904,19 @@ function applyBusinessScope(scope, options = {}){
   }catch(_){ }
   if (currentSectionId === 'branches'){
     try{ const p = renderBranches(); if (p && p.catch) p.catch(()=>{}); }catch(_){ }
+  }
+  if (currentSectionId === 'dashboard'){
+    try{
+      if (driverMapReady){
+        (async () => {
+          try{ await refreshDashboardBranches({ fitOverview: false }); }catch(_){ }
+          try{ await refreshDriverLocations(true); }catch(_){ }
+          try{ fitDriverMapOverview(); }catch(_){ }
+        })();
+      } else {
+        initDriverMap();
+      }
+    }catch(_){ }
   }
   if (currentSectionId === 'users'){
     try{ const p = renderUsers(); if (p && p.catch) p.catch(()=>{}); }catch(_){ }
@@ -3536,8 +3705,12 @@ async function renderBranches(){
     await ensureApiBase();
   }catch(_){ }
   const scope = getScopedOrderCustomerType();
-  const list = await safeFetch(`${API_BASE}/admin/branches?business_scope=${encodeURIComponent(scope)}`).catch(() => []);
+  const list = await fetchAdminBranches(scope);
   branchesCache = Array.isArray(list) ? list : [];
+  dashboardBranchesCache = branchesCache.slice();
+  if (driverMapReady){
+    try{ renderDashboardBranches(dashboardBranchesCache); }catch(_){ }
+  }
   try{
     const ready = await initBranchesMap();
     if (ready) renderBranchesMap(branchesCache);
@@ -10443,13 +10616,12 @@ function setupSocket(attempt = 0){
         const driver = data.driver || data;
         const id = getDriverId(driver);
         if (id) removeDriverMarkerById(id);
-        if (driverMapMarkers.size === 0){
-          setDriverMapEmpty('Sin ubicaciones recientes de repartidores.');
-        }
+        syncDriverMapEmptyState();
         return;
       }
       if (data && data.action === 'driver_location' && data.driver){
         try{ updateDriverMarker(data.driver); }catch(_){ }
+        syncDriverMapEmptyState();
         return;
       }
       if (data && data.action === 'orders_changed'){
