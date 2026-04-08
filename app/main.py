@@ -4424,6 +4424,12 @@ def health():
     mp_configured = bool((os.environ.get('MERCADOPAGO_ACCESS_TOKEN') or '').strip())
     return {'status': 'ok', 'mercadopago_configured': mp_configured}
 
+
+@app.head('/health')
+def health_head():
+    # Explicit HEAD support helps platform probes that don't follow GET-only routes.
+    return Response(status_code=200)
+
 @app.get('/debug/version')
 def debug_version():
     """Return deploy identification info to help confirm the running code version."""
@@ -15952,6 +15958,11 @@ if os.path.exists(FRONTEND_DIR):
     def root():
         return RedirectResponse("/admin/index.html")
 
+    @app.head("/")
+    def root_head():
+        # Render/edge probes may use HEAD on "/".
+        return Response(status_code=200)
+
     # Serve a versioned `index.html` to help cache-bust client assets after deploys.
     @app.get("/admin/index.html")
     async def admin_index():
@@ -15974,6 +15985,10 @@ if os.path.exists(FRONTEND_DIR):
         except Exception:
             content = content.replace('app.js"', f'app.js?v={ver}"').replace('styles.css"', f'styles.css?v={ver}"')
         return Response(content=content, media_type='text/html')
+
+    @app.head("/admin/index.html")
+    async def admin_index_head():
+        return Response(status_code=200)
 
     @app.get("/admin/repartidor.html")
     async def admin_repartidor():
