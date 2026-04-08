@@ -1405,6 +1405,7 @@ function activateSection(sectionId){
   if (sectionId === 'promo-images') fetchPromoImages();
   if (sectionId === 'dashboard') {
     try{ refreshSalesStats({ force: false, quiet: true }); }catch(_){ }
+    try{ refreshOperationalInsights({ force: false, quiet: true }); }catch(_){ }
     try{ initDriverMap(); startDriverMapPolling(); }catch(_){ }
     if (driverMapReady){
       try{
@@ -2844,11 +2845,28 @@ const dashboardState = {
   uncategorized: 0,
   categoryCoverage: 0,
 };
+const opsInsightsUpdatedAtEl = document.getElementById('opsInsightsUpdatedAt');
+const opsHealthScoreEl = document.getElementById('opsHealthScore');
+const opsHealthMetaEl = document.getElementById('opsHealthMeta');
+const opsRiskOrdersEl = document.getElementById('opsRiskOrders');
+const opsRiskOrdersMetaEl = document.getElementById('opsRiskOrdersMeta');
+const opsDriversOnlineEl = document.getElementById('opsDriversOnline');
+const opsDriversOnlineMetaEl = document.getElementById('opsDriversOnlineMeta');
+const opsInsightsSummaryEl = document.getElementById('opsInsightsSummary');
+const opsRecommendationsListEl = document.getElementById('opsRecommendationsList');
+const opsInsightsRefreshBtn = document.getElementById('opsInsightsRefreshBtn');
+const installPwaBtn = document.getElementById('installPwaBtn');
+const OPERATIONS_INSIGHTS_TTL_MS = 1000 * 60;
 const WS_CATALOG_REFRESH_DEBOUNCE_MS = 1600;
 const WS_OPERATIONS_REFRESH_DEBOUNCE_MS = 900;
 const ORDERS_POLL_INTERVAL_MS = 30000;
 const AUTO_IMAGE_POLL_INTERVAL_MS = 15000;
 const TOKEN_PREVIEW_CACHE_MS = 30000;
+let operationsInsightsCache = null;
+let operationsInsightsCacheTs = 0;
+let operationsInsightsCacheScope = '';
+let operationsInsightsInFlight = null;
+let deferredInstallPrompt = null;
 let tokenPreviewIndexCache = null;
 let tokenPreviewIndexCacheTs = 0;
 let wsCatalogRefreshTimer = null;
@@ -2887,6 +2905,70 @@ function setNodeText(selectorOrNode, value){
     const node = typeof selectorOrNode === 'string' ? document.querySelector(selectorOrNode) : selectorOrNode;
     if (node) node.textContent = cleanDashboardText(value);
   }catch(_){ }
+}
+
+function setPwaInstallButtonVisible(visible){
+  if (!installPwaBtn) return;
+  installPwaBtn.classList.toggle('hidden', !visible);
+}
+
+function canRegisterAdminServiceWorker(){
+  try{
+    if (!('serviceWorker' in navigator)) return false;
+    const protocol = String(location.protocol || '').toLowerCase();
+    if (protocol === 'https:') return true;
+    if (protocol === 'http:'){
+      const host = String(location.hostname || '').toLowerCase();
+      return host === 'localhost' || host === '127.0.0.1';
+    }
+  }catch(_){ }
+  return false;
+}
+
+async function registerAdminServiceWorker(){
+  if (!canRegisterAdminServiceWorker()) return null;
+  try{
+    const registration = await navigator.serviceWorker.register('/admin/service-worker.js', { scope: '/admin/' });
+    return registration;
+  }catch(e){
+    console.warn('service worker registration failed', e);
+    return null;
+  }
+}
+
+function setupPwaInstall(){
+  setPwaInstallButtonVisible(false);
+  if (!installPwaBtn) return;
+
+  window.addEventListener('beforeinstallprompt', (event) => {
+    try{ event.preventDefault(); }catch(_){ }
+    deferredInstallPrompt = event;
+    setPwaInstallButtonVisible(true);
+  });
+
+  window.addEventListener('appinstalled', () => {
+    deferredInstallPrompt = null;
+    setPwaInstallButtonVisible(false);
+    try{ showToast('App instalada en tu inicio', 'info'); }catch(_){ }
+  });
+
+  installPwaBtn.addEventListener('click', async () => {
+    if (!deferredInstallPrompt) return;
+    installPwaBtn.disabled = true;
+    const oldLabel = installPwaBtn.textContent;
+    installPwaBtn.textContent = 'Instalando...';
+    try{
+      await deferredInstallPrompt.prompt();
+      await deferredInstallPrompt.userChoice;
+    }catch(e){
+      console.warn('pwa install prompt failed', e);
+    }finally{
+      installPwaBtn.disabled = false;
+      installPwaBtn.textContent = oldLabel || 'Instalar app';
+      deferredInstallPrompt = null;
+      setPwaInstallButtonVisible(false);
+    }
+  });
 }
 
 function normalizeDashboardStaticCopy(){
@@ -2961,6 +3043,8 @@ function ensureSalesChartCardLayout(){
 
 normalizeDashboardStaticCopy();
 ensureSalesChartCardLayout();
+setupPwaInstall();
+registerAdminServiceWorker();
 
 function shouldLiveRefreshOrders(){
   return ['dashboard', 'orders', 'preparations', 'routes', 'deliveries'].includes(String(currentSectionId || ''));
@@ -4478,6 +4562,212 @@ function syncDashboardSummary(){
   setDashboardActionButton(dashboardHeroSecondaryBtn, hero.secondary && hero.secondary.label, hero.secondary && hero.secondary.action);
 }
 
+function formatOpsUpdatedAt(value){
+  try{
+    if (!value) return 'Sin datos';
+    const dt = new Date(value);
+    if (Number.isNaN(dt.getTime())) return 'Sin datos';
+    return `Actualizado ${dt.toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })}`;
+  }catch(_){
+    return 'Sin datos';
+  }
+}
+
+function getOpsPriorityTone(priority){
+  const key = String(priority || '').trim().toLowerCase();
+  if (key === 'critical') return 'critical';
+  if (key === 'high') return 'high';
+  if (key === 'medium') return 'medium';
+  return '';
+}
+
+function prettifyOpsKey(value){
+  return cleanDashboardText(String(value || '').replace(/_/g, ' '));
+}
+
+function renderOperationalInsights(payload){
+  if (!opsRecommendationsListEl) return;
+  const data = payload && typeof payload === 'object' ? payload : null;
+  const orders = data && data.kpis && data.kpis.orders ? data.kpis.orders : {};
+  const drivers = data && data.kpis && data.kpis.drivers ? data.kpis.drivers : {};
+  const summary = data && data.summary ? data.summary : {};
+  const recs = Array.isArray(data && data.recommendations) ? data.recommendations : [];
+
+  const healthScore = Number(data && data.health_score);
+  const pendingAttention = Number(orders && orders.pending_attention || 0);
+  const pendingAmount = Number(orders && orders.pending_amount || 0);
+  const onlineDrivers = Number(drivers && drivers.online || 0);
+  const totalDrivers = Number(drivers && drivers.total || 0);
+
+  if (opsInsightsUpdatedAtEl) opsInsightsUpdatedAtEl.textContent = formatOpsUpdatedAt(data && data.generated_at);
+  if (opsHealthScoreEl) opsHealthScoreEl.textContent = Number.isFinite(healthScore) ? `${Math.round(Math.max(0, healthScore))}/100` : '-';
+  if (opsHealthMetaEl){
+    if (!data){
+      opsHealthMetaEl.textContent = 'Sin datos de backend.';
+    } else if (healthScore >= 80){
+      opsHealthMetaEl.textContent = 'Operacion estable en este momento.';
+    } else if (healthScore >= 60){
+      opsHealthMetaEl.textContent = 'Hay alertas para priorizar.';
+    } else {
+      opsHealthMetaEl.textContent = 'Necesita foco operativo inmediato.';
+    }
+  }
+
+  if (opsRiskOrdersEl) opsRiskOrdersEl.textContent = formatNumber(Math.max(0, pendingAttention));
+  if (opsRiskOrdersMetaEl){
+    opsRiskOrdersMetaEl.textContent = pendingAmount > 0
+      ? `${formatMoneyRounded(pendingAmount)} pendientes`
+      : 'Sin monto pendiente detectado.';
+  }
+
+  if (opsDriversOnlineEl){
+    opsDriversOnlineEl.textContent = totalDrivers > 0 ? `${formatNumber(Math.max(0, onlineDrivers))}/${formatNumber(Math.max(0, totalDrivers))}` : '-';
+  }
+  if (opsDriversOnlineMetaEl){
+    const ratio = totalDrivers > 0 ? (onlineDrivers / totalDrivers) * 100 : 0;
+    opsDriversOnlineMetaEl.textContent = totalDrivers > 0
+      ? `${formatPercent(ratio)} de la flota`
+      : 'Sin repartidores configurados.';
+  }
+
+  if (opsInsightsSummaryEl){
+    const head = cleanDashboardText(summary && summary.headline ? summary.headline : 'Sin resumen operativo');
+    const focus = cleanDashboardText(summary && summary.focus ? summary.focus : 'Esperando informacion para recomendar proximos pasos.');
+    opsInsightsSummaryEl.textContent = `${head}. ${focus}`;
+  }
+
+  opsRecommendationsListEl.innerHTML = '';
+  if (!recs.length){
+    const empty = document.createElement('div');
+    empty.className = 'ops-empty';
+    empty.textContent = data ? 'No hay recomendaciones urgentes por ahora.' : 'Sin datos todavia. Actualiza el analisis.';
+    opsRecommendationsListEl.appendChild(empty);
+    return;
+  }
+
+  recs.slice(0, 5).forEach((rec) => {
+    const card = document.createElement('article');
+    const tone = getOpsPriorityTone(rec && rec.priority);
+    card.className = `ops-rec-card${tone ? ` tone-${tone}` : ''}`;
+
+    const head = document.createElement('div');
+    head.className = 'ops-rec-head';
+    const title = document.createElement('h4');
+    title.className = 'ops-rec-title';
+    title.textContent = cleanDashboardText(rec && rec.title ? rec.title : 'Recomendacion');
+    head.appendChild(title);
+
+    const score = document.createElement('span');
+    score.className = 'ops-rec-score';
+    const scoreNum = Number(rec && rec.impact_score);
+    score.textContent = Number.isFinite(scoreNum) ? `Impacto ${Math.round(Math.max(0, scoreNum))}` : 'Impacto -';
+    head.appendChild(score);
+    card.appendChild(head);
+
+    const why = document.createElement('p');
+    why.className = 'ops-rec-why';
+    why.textContent = cleanDashboardText(rec && rec.why ? rec.why : '');
+    card.appendChild(why);
+
+    const numbers = rec && typeof rec.numbers === 'object' && rec.numbers ? rec.numbers : {};
+    const numberEntries = Object.entries(numbers).filter((entry) => {
+      const value = entry[1];
+      return typeof value === 'number' || typeof value === 'string';
+    }).slice(0, 4);
+    if (numberEntries.length){
+      const pills = document.createElement('div');
+      pills.className = 'ops-rec-numbers';
+      numberEntries.forEach(([key, value]) => {
+        const pill = document.createElement('span');
+        pill.className = 'ops-pill';
+        if (typeof value === 'number' && Number.isFinite(value)){
+          const maybeMoney = /amount|revenue|risk|cost|ticket|venta|monto/i.test(String(key || ''));
+          pill.textContent = `${prettifyOpsKey(key)}: ${maybeMoney ? formatMoneyRounded(value) : formatNumber(value)}`;
+        } else {
+          pill.textContent = `${prettifyOpsKey(key)}: ${cleanDashboardText(value)}`;
+        }
+        pills.appendChild(pill);
+      });
+      card.appendChild(pills);
+    }
+
+    const options = Array.isArray(rec && rec.options) ? rec.options : [];
+    if (options.length){
+      const optionsWrap = document.createElement('div');
+      optionsWrap.className = 'ops-rec-options';
+      options.slice(0, 2).forEach((option) => {
+        const row = document.createElement('div');
+        row.className = 'ops-rec-option';
+        const label = cleanDashboardText(option && option.label ? option.label : 'Opcion');
+        const estimate = cleanDashboardText(option && option.estimate ? option.estimate : '');
+        const pros = cleanDashboardText(option && option.pros ? option.pros : '');
+        row.textContent = `${label}: ${estimate}${pros ? ` - ${pros}` : ''}`;
+        optionsWrap.appendChild(row);
+      });
+      card.appendChild(optionsWrap);
+    }
+
+    const section = rec && rec.action && rec.action.section ? String(rec.action.section || '').trim() : '';
+    if (section){
+      const actions = document.createElement('div');
+      actions.className = 'ops-rec-action';
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn';
+      btn.textContent = cleanDashboardText(rec && rec.action && rec.action.label ? rec.action.label : 'Abrir');
+      btn.addEventListener('click', () => runDashboardAction(section));
+      actions.appendChild(btn);
+      card.appendChild(actions);
+    }
+
+    opsRecommendationsListEl.appendChild(card);
+  });
+}
+
+async function refreshOperationalInsights({ force = false, quiet = true } = {}){
+  const scope = getScopedOrderCustomerType();
+  const cacheKey = String(scope || '');
+  const now = Date.now();
+  if (!force && operationsInsightsCache && operationsInsightsCacheScope === cacheKey && (now - operationsInsightsCacheTs) < OPERATIONS_INSIGHTS_TTL_MS){
+    renderOperationalInsights(operationsInsightsCache);
+    return operationsInsightsCache;
+  }
+  if (operationsInsightsInFlight) return operationsInsightsInFlight;
+
+  operationsInsightsInFlight = (async () => {
+    try{
+      const params = new URLSearchParams();
+      params.set('customer_type', scope);
+      params.set('days', '30');
+      const data = await safeFetch(`${API_BASE}/admin/operations/overview?${params.toString()}`, {
+        cache: 'no-store',
+        headers: getScopedRequestHeaders(),
+      });
+      operationsInsightsCache = data || null;
+      operationsInsightsCacheTs = Date.now();
+      operationsInsightsCacheScope = cacheKey;
+      renderOperationalInsights(operationsInsightsCache);
+      return operationsInsightsCache;
+    }catch(e){
+      console.warn('refreshOperationalInsights failed', e);
+      if (!quiet) showToast('No se pudo cargar inteligencia operativa', 'error');
+      if (!operationsInsightsCache){
+        renderOperationalInsights(null);
+      }
+      return null;
+    }finally{
+      operationsInsightsInFlight = null;
+    }
+  })();
+  return operationsInsightsInFlight;
+}
+
+if (opsInsightsRefreshBtn){
+  opsInsightsRefreshBtn.addEventListener('click', () => {
+    refreshOperationalInsights({ force: true, quiet: false }).catch(() => null);
+  });
+}
+
 dashboardActionNodes.forEach((node) => {
   if (node.tagName !== 'BUTTON'){
     try{ node.setAttribute('role', 'button'); node.setAttribute('tabindex', '0'); }catch(_){ }
@@ -4722,6 +5012,12 @@ async function refreshSalesStats({ force = false, quiet = true, days = 30 } = {}
   const cacheKey = `${scope}:${d}`;
   if (!force && salesStatsCache && salesStatsCacheKey === cacheKey && (now - salesStatsTs) < SALES_STATS_TTL_MS) {
     try{ renderSalesStats(salesStatsCache); }catch(_){ }
+    try{
+      const dash = document.getElementById('dashboard');
+      if (dash && !dash.classList.contains('hidden')) {
+        refreshOperationalInsights({ force: false, quiet: true }).catch(() => null);
+      }
+    }catch(_){ }
     return salesStatsCache;
   }
   try{
@@ -4742,6 +5038,12 @@ async function refreshSalesStats({ force = false, quiet = true, days = 30 } = {}
     salesStatsTs = now;
     salesStatsCacheKey = cacheKey;
     renderSalesStats(stats);
+    try{
+      const dash = document.getElementById('dashboard');
+      if (dash && !dash.classList.contains('hidden')) {
+        refreshOperationalInsights({ force: false, quiet: true }).catch(() => null);
+      }
+    }catch(_){ }
     return stats;
   }catch(e){
     console.error('refreshSalesStats failed', e);
@@ -5937,6 +6239,7 @@ async function refresh(){
     const dash = document.getElementById('dashboard');
     if (dash && !dash.classList.contains('hidden')) {
       refreshSalesStats({ force: false, quiet: true }).catch(()=>{});
+      refreshOperationalInsights({ force: false, quiet: true }).catch(()=>{});
     }
   }catch(_){ }
   // If retail-prices is visible, refresh that section with a dedicated query (full list)
@@ -9830,7 +10133,15 @@ async function refreshOrders(source){
       showToast('No se pudo actualizar pedidos (conservando la vista actual)', 'warning');
       return;
     }
-    if (!q && !date) updateOrderAlertCounts(list);
+    if (!q && !date){
+      updateOrderAlertCounts(list);
+      try{
+        const dash = document.getElementById('dashboard');
+        if (dash && !dash.classList.contains('hidden')) {
+          refreshOperationalInsights({ force: false, quiet: true }).catch(() => null);
+        }
+      }catch(_){ }
+    }
     const dateFilter = date || '';
     let toRender = list;
     if(dateFilter){ try{ toRender = (list || []).filter(o => { try{ return (o.created_at || '').slice(0,10) === dateFilter; }catch(_){ return false; } }); }catch(e){ toRender = list; } }

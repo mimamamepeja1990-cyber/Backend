@@ -11145,6 +11145,631 @@ def admin_sales_stats(
     return sales_stats(days=days, source=source, customer_type=scope_filter, limit=limit, db=db)
 
 
+def _ops_safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        num = float(value)
+    except Exception:
+        return float(default)
+    if not math.isfinite(num):
+        return float(default)
+    return float(num)
+
+
+def _ops_safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _ops_normalize_product(product: Any) -> Dict[str, Any]:
+    if isinstance(product, dict):
+        return dict(product)
+    return {
+        'id': getattr(product, 'id', None),
+        'code': getattr(product, 'code', None),
+        'name': getattr(product, 'name', None),
+        'active': getattr(product, 'active', None),
+        'price': getattr(product, 'price', None),
+        'cost': getattr(product, 'cost', None),
+        'stock': getattr(product, 'stock', None),
+        'stock_kg': getattr(product, 'stock_kg', None),
+        'min_stock': getattr(product, 'min_stock', None),
+        'sale_unit': getattr(product, 'sale_unit', None),
+        'kg_per_unit': getattr(product, 'kg_per_unit', None),
+    }
+
+
+def _ops_stock_value(product_data: Dict[str, Any]) -> float:
+    unit = str(product_data.get('sale_unit') or 'unit').strip().lower()
+    if unit == 'kg':
+        return _ops_safe_float(product_data.get('stock_kg') or 0.0, 0.0)
+    return float(_ops_safe_int(product_data.get('stock') or 0, 0))
+
+
+def _ops_stock_threshold(product_data: Dict[str, Any]) -> float:
+    min_stock = _ops_safe_float(product_data.get('min_stock'), 0.0)
+    if min_stock > 0:
+        return min_stock
+    return 5.0
+
+
+def _ops_gap_to_restock(product_data: Dict[str, Any], stock_value: float, threshold: float) -> float:
+    unit = str(product_data.get('sale_unit') or 'unit').strip().lower()
+    min_step = 0.25 if unit == 'kg' else 1.0
+    gap = threshold - stock_value
+    if gap > 0:
+        return float(gap)
+    return float(min_step)
+
+
+def _ops_price_per_stock_unit(product_data: Dict[str, Any], field_name: str) -> float:
+    value = _ops_safe_float(product_data.get(field_name), 0.0)
+    if value <= 0:
+        return 0.0
+    unit = str(product_data.get('sale_unit') or 'unit').strip().lower()
+    if unit == 'kg':
+        kg_per_unit = _ops_safe_float(product_data.get('kg_per_unit'), 1.0)
+        if kg_per_unit > 0:
+            return value / kg_per_unit
+    return value
+
+
+def _ops_parse_order_items(raw_items: Any) -> List[Dict[str, Any]]:
+    if isinstance(raw_items, list):
+        return [it for it in raw_items if isinstance(it, dict)]
+    if isinstance(raw_items, str):
+        try:
+            parsed = json.loads(raw_items)
+            if isinstance(parsed, list):
+                return [it for it in parsed if isinstance(it, dict)]
+        except Exception:
+            return []
+    return []
+
+
+def _ops_order_created_local_date(order_data: Dict[str, Any], tzinfo: datetime.tzinfo) -> Optional[datetime.date]:
+    dt = _parse_datetime_utc(order_data.get('created_at'))
+    if dt is None:
+        return None
+    try:
+        return dt.astimezone(tzinfo).date()
+    except Exception:
+        return None
+
+
+def _ops_order_total(order_data: Dict[str, Any]) -> float:
+    return max(0.0, _ops_safe_float(order_data.get('total'), 0.0))
+
+
+def _ops_recommendation_priority(score: float) -> str:
+    if score >= 80:
+        return 'critical'
+    if score >= 60:
+        return 'high'
+    if score >= 40:
+        return 'medium'
+    return 'low'
+
+
+def _build_admin_operations_overview(
+    db: Session,
+    customer_type_filter: Optional[str] = None,
+    days: int = 30,
+    limit: int = 5000,
+) -> Dict[str, Any]:
+    tzinfo, tz_name = _resolve_dashboard_tzinfo()
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    today_local = now_utc.astimezone(tzinfo).date()
+    days_window = max(7, min(120, _ops_safe_int(days, 30)))
+    sample_limit = max(500, min(20000, _ops_safe_int(limit, 5000)))
+
+    orders_raw = list_orders(skip=0, limit=sample_limit, source=None, q=None, date=None, db=db)
+    orders: List[Dict[str, Any]] = []
+    for row in (orders_raw or []):
+        if not isinstance(row, dict):
+            continue
+        if customer_type_filter:
+            if _normalize_admin_customer_type_filter(row.get('customer_type')) != customer_type_filter:
+                continue
+        orders.append(row)
+
+    status_counts = {
+        'recibido': 0,
+        'visto': 0,
+        'preparado': 0,
+        'enviado': 0,
+        'entregado': 0,
+        'cancelado': 0,
+    }
+    unseen_count = 0
+    unseen_amount = 0.0
+    unprepared_count = 0
+    unprepared_amount = 0.0
+    prepared_unassigned = 0
+    delivered_today = 0
+    delivered_today_revenue = 0.0
+    sent_count = 0
+    received_oldest_hours = 0.0
+    created_last_7d = 0
+    cancelled_last_7d = 0
+
+    sales_today_orders = 0
+    sales_today_revenue = 0.0
+    sales_7d_orders = 0
+    sales_7d_revenue = 0.0
+    sales_30d_orders = 0
+    sales_30d_revenue = 0.0
+
+    seven_days_ago = today_local - datetime.timedelta(days=6)
+    thirty_days_ago = today_local - datetime.timedelta(days=29)
+
+    for order_data in (orders or []):
+        status_key = _normalize_order_status(order_data.get('status'))
+        if status_key not in status_counts:
+            status_key = 'recibido'
+        status_counts[status_key] = int(status_counts.get(status_key, 0)) + 1
+        total_value = _ops_order_total(order_data)
+
+        if status_key == 'recibido':
+            unseen_count += 1
+            unseen_amount += total_value
+            created_dt = _parse_datetime_utc(order_data.get('created_at'))
+            if created_dt is not None:
+                age_hours = max(0.0, (now_utc - created_dt).total_seconds() / 3600.0)
+                if age_hours > received_oldest_hours:
+                    received_oldest_hours = age_hours
+        elif status_key == 'visto':
+            unprepared_count += 1
+            unprepared_amount += total_value
+
+        if status_key == 'preparado':
+            assigned_id = str(order_data.get('assigned_driver_id') or '').strip()
+            assigned_user = str(order_data.get('assigned_driver_username') or '').strip()
+            if not assigned_id and not assigned_user:
+                prepared_unassigned += 1
+
+        if status_key == 'enviado':
+            sent_count += 1
+
+        delivered_dt = _parse_datetime_utc(order_data.get('delivered_at'))
+        if delivered_dt is not None:
+            try:
+                if delivered_dt.astimezone(tzinfo).date() == today_local:
+                    delivered_today += 1
+                    delivered_today_revenue += total_value
+            except Exception:
+                pass
+
+        created_local_date = _ops_order_created_local_date(order_data, tzinfo)
+        if created_local_date is None:
+            continue
+
+        if created_local_date >= seven_days_ago:
+            created_last_7d += 1
+            if status_key == 'cancelado':
+                cancelled_last_7d += 1
+        if status_key == 'cancelado':
+            continue
+        if created_local_date == today_local:
+            sales_today_orders += 1
+            sales_today_revenue += total_value
+        if created_local_date >= seven_days_ago:
+            sales_7d_orders += 1
+            sales_7d_revenue += total_value
+        if created_local_date >= thirty_days_ago:
+            sales_30d_orders += 1
+            sales_30d_revenue += total_value
+
+    avg_ticket_30d = (sales_30d_revenue / sales_30d_orders) if sales_30d_orders > 0 else 0.0
+    cancel_rate_7d = (cancelled_last_7d / created_last_7d) if created_last_7d > 0 else 0.0
+
+    products_raw = crud.get_products(db, skip=0, limit=10000, q=None, category=None, active=True, sort='name_asc') or []
+    products = [_ops_normalize_product(row) for row in products_raw]
+    active_products = [p for p in products if p.get('active') is not False]
+
+    low_stock_entries: List[Dict[str, Any]] = []
+    product_by_id: Dict[str, Dict[str, Any]] = {}
+    product_by_code: Dict[str, Dict[str, Any]] = {}
+    for product_data in active_products:
+        stock_val = _ops_stock_value(product_data)
+        threshold = _ops_stock_threshold(product_data)
+        if stock_val > threshold:
+            continue
+        gap = _ops_gap_to_restock(product_data, stock_val, threshold)
+        revenue_per_unit = _ops_price_per_stock_unit(product_data, 'price')
+        cost_per_unit = _ops_price_per_stock_unit(product_data, 'cost')
+        rec = {
+            'id': product_data.get('id'),
+            'code': str(product_data.get('code') or '').strip() or None,
+            'name': str(product_data.get('name') or '').strip() or 'Producto',
+            'unit': str(product_data.get('sale_unit') or 'unit').strip().lower() or 'unit',
+            'stock': float(round(stock_val, 3)),
+            'threshold': float(round(threshold, 3)),
+            'restock_gap': float(round(gap, 3)),
+            'revenue_at_risk': float(round(max(0.0, gap * revenue_per_unit), 2)),
+            'restock_cost': float(round(max(0.0, gap * cost_per_unit), 2)),
+            'pending_orders': 0,
+            '_pending_order_ids': set(),
+        }
+        low_stock_entries.append(rec)
+        pid = str(rec.get('id') or '').strip()
+        if pid:
+            product_by_id[pid] = rec
+        pcode = str(rec.get('code') or '').strip().lower()
+        if pcode:
+            product_by_code[pcode] = rec
+
+    pending_statuses = {'recibido', 'visto', 'preparado'}
+    for order_data in (orders or []):
+        status_key = _normalize_order_status(order_data.get('status'))
+        if status_key not in pending_statuses:
+            continue
+        order_id = str(order_data.get('id') or '').strip()
+        if not order_id:
+            continue
+        matched: set = set()
+        for item in _ops_parse_order_items(order_data.get('items')):
+            item_id = str(item.get('id') or '').strip()
+            meta = item.get('meta') if isinstance(item.get('meta'), dict) else {}
+            code = str(meta.get('code') or meta.get('sku') or meta.get('product_code') or '').strip().lower()
+            entry = (item_id and product_by_id.get(item_id)) or (code and product_by_code.get(code))
+            if not entry:
+                continue
+            ref_key = str(entry.get('id') or entry.get('code') or entry.get('name'))
+            if ref_key in matched:
+                continue
+            matched.add(ref_key)
+            entry['_pending_order_ids'].add(order_id)
+
+    for entry in low_stock_entries:
+        entry['pending_orders'] = len(entry.get('_pending_order_ids') or set())
+        entry.pop('_pending_order_ids', None)
+
+    low_stock_entries.sort(
+        key=lambda row: (
+            int(row.get('pending_orders') or 0),
+            float(row.get('revenue_at_risk') or 0.0),
+            float(row.get('restock_gap') or 0.0),
+        ),
+        reverse=True,
+    )
+    low_stock_count = len(low_stock_entries)
+    low_stock_value_at_risk = float(round(sum(float(x.get('revenue_at_risk') or 0.0) for x in low_stock_entries), 2))
+    low_stock_restock_estimate = float(round(sum(float(x.get('restock_cost') or 0.0) for x in low_stock_entries), 2))
+
+    drivers_raw = crud.list_admin_users(db) or []
+    drivers = []
+    for user in drivers_raw:
+        role = str(getattr(user, 'role', '') or '').strip().lower()
+        if role != 'repartidor':
+            continue
+        if customer_type_filter:
+            try:
+                if _get_admin_assigned_business_scope(user) != customer_type_filter:
+                    continue
+            except Exception:
+                continue
+        drivers.append(user)
+
+    active_orders_by_driver: Dict[Tuple[str, str], int] = {}
+    for order_data in (orders or []):
+        status_key = _normalize_order_status(order_data.get('status'))
+        if status_key not in ('preparado', 'enviado'):
+            continue
+        key = _driver_assignment_cache_key(order_data.get('assigned_driver_id'), order_data.get('assigned_driver_username'))
+        if not key[0] and not key[1]:
+            continue
+        active_orders_by_driver[key] = int(active_orders_by_driver.get(key, 0)) + 1
+
+    online_threshold_sec = 12 * 60
+    online_drivers = 0
+    with_active_orders = 0
+    max_active_orders = 0
+    overloaded_drivers: List[Dict[str, Any]] = []
+    overload_threshold = 8
+    for driver in drivers:
+        driver_id = getattr(driver, 'id', None)
+        driver_username = str(getattr(driver, 'username', '') or '').strip() or None
+        key = _driver_assignment_cache_key(driver_id, driver_username)
+        active_count = int(active_orders_by_driver.get(key, 0))
+        max_active_orders = max(max_active_orders, active_count)
+        if active_count > 0:
+            with_active_orders += 1
+        live_payload = _get_driver_live_location_payload(driver_id, driver_username, db)
+        last_seen_dt = _parse_datetime_utc(live_payload.get('recorded_at')) if isinstance(live_payload, dict) else None
+        is_online = False
+        if last_seen_dt is not None:
+            is_online = (now_utc - last_seen_dt).total_seconds() <= online_threshold_sec
+        if is_online:
+            online_drivers += 1
+        if active_count >= overload_threshold:
+            overloaded_drivers.append({
+                'driver_id': driver_id,
+                'username': driver_username,
+                'full_name': getattr(driver, 'full_name', None),
+                'active_orders': active_count,
+                'online': bool(is_online),
+                'last_seen_at': last_seen_dt,
+            })
+
+    overloaded_drivers.sort(key=lambda row: int(row.get('active_orders') or 0), reverse=True)
+
+    health_score = 100.0
+    health_score -= min(35.0, unseen_count * 4.0)
+    health_score -= min(20.0, unprepared_count * 2.5)
+    health_score -= min(16.0, prepared_unassigned * 3.5)
+    health_score -= min(14.0, low_stock_count * 1.3)
+    if sent_count > 0 and online_drivers <= 0:
+        health_score -= 20.0
+    if cancel_rate_7d > 0:
+        health_score -= min(12.0, cancel_rate_7d * 60.0)
+    health_score = max(0.0, min(100.0, health_score))
+
+    recommendations: List[Dict[str, Any]] = []
+
+    if unseen_count > 0:
+        score = min(100.0, 52.0 + unseen_count * 3.0 + (math.log10(unseen_amount + 1.0) * 8.0 if unseen_amount > 0 else 0.0))
+        recommendations.append({
+            'id': 'review_new_orders',
+            'priority': _ops_recommendation_priority(score),
+            'impact_score': float(round(score, 1)),
+            'title': 'Revisar pedidos nuevos antes de preparar',
+            'why': f'Hay {unseen_count} pedidos sin ver por {round(unseen_amount, 2)} de facturacion potencial.',
+            'action': {'label': 'Abrir pedidos', 'section': 'orders'},
+            'numbers': {
+                'pedidos_sin_ver': unseen_count,
+                'monto_pendiente': round(unseen_amount, 2),
+                'antiguedad_max_horas': round(received_oldest_hours, 1),
+            },
+            'options': [
+                {
+                    'label': 'Priorizar por monto',
+                    'estimate': f'Atender primero top tickets libera hasta {round(unseen_amount * 0.7, 2)} hoy.',
+                    'pros': 'Recupera caja mas rapido.',
+                },
+                {
+                    'label': 'FIFO por antiguedad',
+                    'estimate': f'Baja la demora maxima actual de {round(received_oldest_hours, 1)} horas.',
+                    'pros': 'Mejora experiencia del cliente.',
+                },
+            ],
+        })
+
+    if unprepared_count > 0:
+        score = min(100.0, 48.0 + unprepared_count * 2.5 + (math.log10(unprepared_amount + 1.0) * 7.0 if unprepared_amount > 0 else 0.0))
+        recommendations.append({
+            'id': 'unlock_preparations',
+            'priority': _ops_recommendation_priority(score),
+            'impact_score': float(round(score, 1)),
+            'title': 'Destrabar pedidos ya vistos en preparacion',
+            'why': f'Hay {unprepared_count} pedidos vistos sin preparar por {round(unprepared_amount, 2)} acumulados.',
+            'action': {'label': 'Ir a preparaciones', 'section': 'preparations'},
+            'numbers': {
+                'pedidos_sin_preparar': unprepared_count,
+                'monto_en_preparacion': round(unprepared_amount, 2),
+            },
+            'options': [
+                {
+                    'label': 'Preparar por ticket',
+                    'estimate': f'Si preparas primero los de mayor ticket, podes mover {round(unprepared_amount * 0.6, 2)} en el proximo bloque.',
+                    'pros': 'Impacto economico inmediato.',
+                },
+                {
+                    'label': 'Preparar por zona',
+                    'estimate': 'Reduce cambios de ruta al momento de asignar reparto.',
+                    'pros': 'Menos friccion operativa.',
+                },
+            ],
+        })
+
+    if prepared_unassigned > 0:
+        score = min(100.0, 46.0 + prepared_unassigned * 5.5)
+        recommendations.append({
+            'id': 'assign_routes',
+            'priority': _ops_recommendation_priority(score),
+            'impact_score': float(round(score, 1)),
+            'title': 'Asignar rutas para pedidos preparados',
+            'why': f'Hay {prepared_unassigned} pedidos listos sin repartidor asignado.',
+            'action': {'label': 'Ir a rutas', 'section': 'routes'},
+            'numbers': {
+                'preparados_sin_ruta': prepared_unassigned,
+                'pedidos_en_ruta': sent_count,
+            },
+            'options': [
+                {
+                    'label': 'Auto-asignar por zona',
+                    'estimate': f'Podes despachar hasta {prepared_unassigned} pedidos con un solo ajuste.',
+                    'pros': 'Mas velocidad de salida.',
+                },
+                {
+                    'label': 'Asignacion manual priorizada',
+                    'estimate': 'Enfoca primero clientes con mayor ticket o mayor antiguedad.',
+                    'pros': 'Control fino del servicio.',
+                },
+            ],
+        })
+
+    if low_stock_count > 0:
+        score = min(100.0, 40.0 + low_stock_count * 1.8 + (math.log10(low_stock_value_at_risk + 1.0) * 8.0 if low_stock_value_at_risk > 0 else 0.0))
+        recommendations.append({
+            'id': 'restock_critical',
+            'priority': _ops_recommendation_priority(score),
+            'impact_score': float(round(score, 1)),
+            'title': 'Reponer stock critico con riesgo de corte',
+            'why': f'Hay {low_stock_count} productos bajo minimo. Riesgo estimado: {round(low_stock_value_at_risk, 2)}.',
+            'action': {'label': 'Abrir catalogo', 'section': 'catalog'},
+            'numbers': {
+                'productos_stock_bajo': low_stock_count,
+                'riesgo_venta': round(low_stock_value_at_risk, 2),
+                'reposicion_sugerida': round(low_stock_restock_estimate, 2),
+            },
+            'options': [
+                {
+                    'label': 'Reposicion completa',
+                    'estimate': f'Invertis {round(low_stock_restock_estimate, 2)} para proteger hasta {round(low_stock_value_at_risk, 2)}.',
+                    'pros': 'Disminuye faltantes en todo el dia.',
+                },
+                {
+                    'label': 'Reposicion minima top',
+                    'estimate': f'Atender solo top 5 prioriza mayor impacto comercial.',
+                    'pros': 'Menor inversion inicial.',
+                },
+            ],
+        })
+
+    total_drivers = len(drivers)
+    if sent_count > 0 and total_drivers > 0:
+        online_ratio = (online_drivers / total_drivers) if total_drivers > 0 else 0.0
+        if online_ratio < 0.5:
+            score = min(100.0, 45.0 + (0.5 - online_ratio) * 100.0 + sent_count * 1.2)
+            recommendations.append({
+                'id': 'improve_driver_connectivity',
+                'priority': _ops_recommendation_priority(score),
+                'impact_score': float(round(score, 1)),
+                'title': 'Subir cobertura online de repartidores',
+                'why': f'Hay {sent_count} pedidos en reparto y solo {online_drivers}/{total_drivers} repartidores reportando ubicacion.',
+                'action': {'label': 'Ver entregas', 'section': 'deliveries'},
+                'numbers': {
+                    'repartidores_online': online_drivers,
+                    'repartidores_totales': total_drivers,
+                    'pedidos_en_reparto': sent_count,
+                },
+                'options': [
+                    {
+                        'label': 'Chequeo rapido de app',
+                        'estimate': 'Confirmar permisos GPS y bateria en segundo plano.',
+                        'pros': 'Recupera trazabilidad en minutos.',
+                    },
+                    {
+                        'label': 'Redistribuir carga',
+                        'estimate': 'Mover rutas a choferes online evita pedidos a ciegas.',
+                        'pros': 'Menor riesgo operativo.',
+                    },
+                ],
+            })
+
+    if created_last_7d >= 10 and cancel_rate_7d >= 0.12:
+        score = min(100.0, 35.0 + cancel_rate_7d * 110.0)
+        recommendations.append({
+            'id': 'reduce_cancel_rate',
+            'priority': _ops_recommendation_priority(score),
+            'impact_score': float(round(score, 1)),
+            'title': 'Reducir cancelaciones de la ultima semana',
+            'why': f'La tasa de cancelacion en 7 dias es {round(cancel_rate_7d * 100.0, 1)}% ({cancelled_last_7d}/{created_last_7d}).',
+            'action': {'label': 'Abrir pedidos', 'section': 'orders'},
+            'numbers': {
+                'cancelaciones_7d': cancelled_last_7d,
+                'pedidos_7d': created_last_7d,
+                'tasa_cancelacion_7d_pct': round(cancel_rate_7d * 100.0, 1),
+            },
+            'options': [
+                {
+                    'label': 'Auditar causas',
+                    'estimate': 'Separar por falta de stock, direccion y tiempos.',
+                    'pros': 'Ataque directo al origen.',
+                },
+                {
+                    'label': 'Confirmacion temprana',
+                    'estimate': 'Confirmar stock y ventana de entrega apenas entra el pedido.',
+                    'pros': 'Menos sorpresas para cliente.',
+                },
+            ],
+        })
+
+    recommendations.sort(key=lambda row: float(row.get('impact_score') or 0.0), reverse=True)
+    recommendations = recommendations[:5]
+
+    if recommendations:
+        top = recommendations[0]
+        headline = str(top.get('title') or 'Prioridad operativa')
+        focus = str(top.get('why') or '')
+    else:
+        headline = 'Operacion estable'
+        focus = 'No se detectaron alertas urgentes en este corte.'
+
+    return {
+        'generated_at': now_utc,
+        'timezone': tz_name,
+        'customer_type': customer_type_filter or None,
+        'sample_size': len(orders),
+        'days': days_window,
+        'health_score': float(round(health_score, 1)),
+        'kpis': {
+            'orders': {
+                'total': len(orders),
+                'received': int(status_counts.get('recibido') or 0),
+                'seen': int(status_counts.get('visto') or 0),
+                'prepared': int(status_counts.get('preparado') or 0),
+                'sent': int(status_counts.get('enviado') or 0),
+                'delivered': int(status_counts.get('entregado') or 0),
+                'cancelled': int(status_counts.get('cancelado') or 0),
+                'pending_attention': int(unseen_count + unprepared_count),
+                'pending_amount': float(round(unseen_amount + unprepared_amount, 2)),
+                'unassigned_prepared': int(prepared_unassigned),
+                'delivered_today': int(delivered_today),
+                'delivered_today_revenue': float(round(delivered_today_revenue, 2)),
+                'cancel_rate_7d': float(round(cancel_rate_7d, 4)),
+            },
+            'sales': {
+                'orders_today': int(sales_today_orders),
+                'revenue_today': float(round(sales_today_revenue, 2)),
+                'orders_7d': int(sales_7d_orders),
+                'revenue_7d': float(round(sales_7d_revenue, 2)),
+                'orders_30d': int(sales_30d_orders),
+                'revenue_30d': float(round(sales_30d_revenue, 2)),
+                'avg_ticket_30d': float(round(avg_ticket_30d, 2)),
+            },
+            'catalog': {
+                'active_products': len(active_products),
+                'low_stock_count': int(low_stock_count),
+                'low_stock_value_at_risk': float(round(low_stock_value_at_risk, 2)),
+                'restock_estimate': float(round(low_stock_restock_estimate, 2)),
+                'top_low_stock': low_stock_entries[:10],
+            },
+            'drivers': {
+                'total': len(drivers),
+                'online': int(online_drivers),
+                'offline': int(max(0, len(drivers) - online_drivers)),
+                'online_ratio': float(round((online_drivers / len(drivers)) if len(drivers) > 0 else 0.0, 4)),
+                'with_active_orders': int(with_active_orders),
+                'orders_in_route': int(sent_count),
+                'max_active_orders_per_driver': int(max_active_orders),
+                'overloaded': overloaded_drivers[:8],
+            },
+        },
+        'recommendations': recommendations,
+        'summary': {
+            'headline': headline,
+            'focus': focus,
+            'next_check_minutes': 10,
+        },
+    }
+
+
+@app.get('/admin/operations/overview')
+def admin_operations_overview(
+    request: Request,
+    days: int = 30,
+    customer_type: Optional[str] = None,
+    limit: int = 5000,
+    current_admin=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role not in ('owner', 'admin'):
+        raise HTTPException(status_code=403, detail='No autorizado')
+    scope_filter = _resolve_admin_customer_type_filter(current_admin, customer_type)
+    payload = _build_admin_operations_overview(
+        db=db,
+        customer_type_filter=scope_filter,
+        days=days,
+        limit=limit,
+    )
+    headers = _cors_headers_for_request(request)
+    return JSONResponse(status_code=200, content=jsonable_encoder(payload), headers=headers)
+
+
 # -----------------------------
 # Orders
 # -----------------------------
@@ -15343,7 +15968,11 @@ if os.path.exists(FRONTEND_DIR):
         ver = os.environ.get('DEPLOY_COMMIT') or os.environ.get('RENDER_GIT_COMMIT') or os.environ.get('HEROKU_SLUG_COMMIT') or str(int(os.path.getmtime(path)))
         # Inject config + cache-busting query param for the main JS and CSS references
         content = _inject_admin_config(content)
-        content = content.replace('app.js"', f'app.js?v={ver}"').replace('styles.css"', f'styles.css?v={ver}"')
+        try:
+            content = re.sub(r'app\.js(?:\?[^"]*)?"', f'app.js?v={ver}"', content)
+            content = re.sub(r'styles\.css(?:\?[^"]*)?"', f'styles.css?v={ver}"', content)
+        except Exception:
+            content = content.replace('app.js"', f'app.js?v={ver}"').replace('styles.css"', f'styles.css?v={ver}"')
         return Response(content=content, media_type='text/html')
 
     @app.get("/admin/repartidor.html")
@@ -15359,7 +15988,11 @@ if os.path.exists(FRONTEND_DIR):
             raise HTTPException(status_code=500, detail='Failed to read repartidor UI')
         ver = os.environ.get('DEPLOY_COMMIT') or os.environ.get('RENDER_GIT_COMMIT') or os.environ.get('HEROKU_SLUG_COMMIT') or str(int(os.path.getmtime(path)))
         content = _inject_admin_config(content)
-        content = content.replace('repartidor.js"', f'repartidor.js?v={ver}"').replace('styles.css"', f'styles.css?v={ver}"')
+        try:
+            content = re.sub(r'repartidor\.js(?:\?[^"]*)?"', f'repartidor.js?v={ver}"', content)
+            content = re.sub(r'styles\.css(?:\?[^"]*)?"', f'styles.css?v={ver}"', content)
+        except Exception:
+            content = content.replace('repartidor.js"', f'repartidor.js?v={ver}"').replace('styles.css"', f'styles.css?v={ver}"')
         return Response(content=content, media_type='text/html')
 
     @app.get("/admin/repartidor-app.apk")

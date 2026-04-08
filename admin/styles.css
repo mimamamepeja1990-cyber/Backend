@@ -1891,3 +1891,133 @@ body.auth-locked .auth-overlay{display:flex}
   .branches-map{height:300px}
 }
 
+#installPwaBtn{
+  border:1px solid rgba(15,23,42,0.12);
+  background:linear-gradient(180deg,#ffffff,#f8fafc);
+}
+#installPwaBtn:not(.hidden){
+  display:inline-flex;
+}
+
+.dashboard-group-ops{
+  margin-top:16px;
+}
+.ops-kpi-grid{
+  margin-top:6px;
+}
+.ops-tools{
+  display:flex;
+  justify-content:flex-end;
+  margin-top:12px;
+}
+.ops-summary{
+  margin-top:12px;
+  padding:10px 12px;
+  border-radius:12px;
+  background:linear-gradient(180deg,#f8fafc,#eef2ff);
+  border:1px solid rgba(37,99,235,0.16);
+  color:#1e293b;
+  font-weight:700;
+}
+.ops-recommendations{
+  margin-top:12px;
+  display:grid;
+  gap:10px;
+}
+.ops-rec-card{
+  border-radius:14px;
+  border:1px solid rgba(15,23,42,0.08);
+  background:#fff;
+  padding:12px;
+  box-shadow:0 10px 24px rgba(2,6,23,0.05);
+}
+.ops-rec-card.tone-critical{
+  border-color:rgba(239,68,68,0.34);
+  background:linear-gradient(180deg,#fff,#fff5f5);
+}
+.ops-rec-card.tone-high{
+  border-color:rgba(245,158,11,0.32);
+  background:linear-gradient(180deg,#fff,#fffbeb);
+}
+.ops-rec-card.tone-medium{
+  border-color:rgba(59,130,246,0.28);
+  background:linear-gradient(180deg,#fff,#eff6ff);
+}
+.ops-rec-head{
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:10px;
+}
+.ops-rec-title{
+  margin:0;
+  font-size:16px;
+  font-weight:800;
+  color:#0f172a;
+}
+.ops-rec-score{
+  border-radius:999px;
+  padding:4px 10px;
+  background:#0f172a;
+  color:#fff;
+  font-size:12px;
+  font-weight:800;
+  letter-spacing:0.03em;
+  white-space:nowrap;
+}
+.ops-rec-why{
+  margin:8px 0 0;
+  color:#334155;
+  font-size:13px;
+}
+.ops-rec-numbers{
+  margin-top:8px;
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px;
+}
+.ops-pill{
+  border-radius:999px;
+  padding:4px 8px;
+  font-size:12px;
+  font-weight:700;
+  background:#f1f5f9;
+  color:#0f172a;
+}
+.ops-rec-options{
+  margin-top:10px;
+  display:grid;
+  gap:6px;
+}
+.ops-rec-option{
+  font-size:12px;
+  color:#1e293b;
+  background:#f8fafc;
+  border:1px solid rgba(15,23,42,0.08);
+  border-radius:10px;
+  padding:7px 9px;
+}
+.ops-rec-action{
+  margin-top:10px;
+  display:flex;
+  justify-content:flex-end;
+}
+.ops-empty{
+  color:#64748b;
+  font-size:13px;
+  background:#fff;
+  border:1px dashed rgba(15,23,42,0.2);
+  border-radius:12px;
+  padding:10px 12px;
+}
+
+@media (max-width:900px){
+  .ops-rec-head{
+    flex-direction:column;
+    align-items:flex-start;
+  }
+  .ops-tools{
+    justify-content:flex-start;
+  }
+}
+
