@@ -205,6 +205,28 @@ def _is_truthy(value: Optional[str]) -> bool:
         return False
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return int(default)
+    try:
+        return int(float(str(raw).strip()))
+    except Exception:
+        logger.warning('Invalid integer env %s=%r; using default %s', name, raw, default)
+        return int(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None:
+        return float(default)
+    try:
+        return float(str(raw).strip())
+    except Exception:
+        logger.warning('Invalid float env %s=%r; using default %s', name, raw, default)
+        return float(default)
+
+
 def _normalize_catalog_business_scope(value: Any, default: str = 'mayorista') -> str:
     try:
         scope = str(value or '').strip().lower()
@@ -247,32 +269,32 @@ GEOCODE_ENABLED = _is_truthy(os.environ.get('GEOCODE_ENABLED')) or bool(GEOCODE_
 GEOCODE_NOMINATIM_URL = str(os.environ.get('GEOCODE_NOMINATIM_URL') or 'https://nominatim.openstreetmap.org/search').strip()
 GEOCODE_NOMINATIM_EMAIL = str(os.environ.get('GEOCODE_NOMINATIM_EMAIL') or '').strip() or None
 GEOCODE_USER_AGENT = str(os.environ.get('GEOCODE_USER_AGENT') or 'catalog-admin').strip()
-GEOCODE_RATE_LIMIT_MS = int(float(os.environ.get('GEOCODE_RATE_LIMIT_MS') or 1100))
-GEOCODE_TIMEOUT_SEC = float(os.environ.get('GEOCODE_TIMEOUT_SEC') or 6)
-GEOCODE_CACHE_TTL_SEC = int(float(os.environ.get('GEOCODE_CACHE_TTL_SEC') or (60 * 60 * 24 * 30)))
-GEOCODE_CACHE_MAX = int(float(os.environ.get('GEOCODE_CACHE_MAX') or 2500))
-GEOCODE_MAX_PER_RUN = int(float(os.environ.get('GEOCODE_MAX_PER_RUN') or 60))
-GEOCODE_RUN_WINDOW_SEC = int(float(os.environ.get('GEOCODE_RUN_WINDOW_SEC') or 60))
+GEOCODE_RATE_LIMIT_MS = _env_int('GEOCODE_RATE_LIMIT_MS', 1100)
+GEOCODE_TIMEOUT_SEC = _env_float('GEOCODE_TIMEOUT_SEC', 6)
+GEOCODE_CACHE_TTL_SEC = _env_int('GEOCODE_CACHE_TTL_SEC', 60 * 60 * 24 * 30)
+GEOCODE_CACHE_MAX = _env_int('GEOCODE_CACHE_MAX', 2500)
+GEOCODE_MAX_PER_RUN = _env_int('GEOCODE_MAX_PER_RUN', 60)
+GEOCODE_RUN_WINDOW_SEC = _env_int('GEOCODE_RUN_WINDOW_SEC', 60)
 GEOCODE_PERSIST_CACHE = _is_truthy(os.environ.get('GEOCODE_PERSIST_CACHE'))
 ROUTE_START_LAT_RAW = os.environ.get('ROUTE_START_LAT') or '-32.819094'
 ROUTE_START_LON_RAW = os.environ.get('ROUTE_START_LON') or '-68.804286'
 ROUTE_START_ADDRESS = str(os.environ.get('ROUTE_START_ADDRESS') or '').strip()
 GOOGLE_MAPS_JS_API_KEY = str(os.environ.get('GOOGLE_MAPS_JS_API_KEY') or os.environ.get('GOOGLE_MAPS_API_KEY') or '').strip()
-DRIVER_LOCATION_MAX_AGE_SEC = int(float(os.environ.get('DRIVER_LOCATION_MAX_AGE_SEC') or 60 * 60))
+DRIVER_LOCATION_MAX_AGE_SEC = _env_int('DRIVER_LOCATION_MAX_AGE_SEC', 60 * 60)
 DRIVER_LOCATION_STORE_HISTORY = _is_truthy(os.environ.get('DRIVER_LOCATION_STORE_HISTORY') or os.environ.get('DRIVER_LOCATION_HISTORY'))
-DRIVER_DEPOT_RADIUS_M = float(os.environ.get('DRIVER_DEPOT_RADIUS_M') or 30)
+DRIVER_DEPOT_RADIUS_M = _env_float('DRIVER_DEPOT_RADIUS_M', 30)
 ORDER_AUTO_MILESTONES = _is_truthy(os.environ.get('ORDER_AUTO_MILESTONES') or os.environ.get('ORDER_AUTO_STATUS_BY_TIME') or '0')
 OSRM_ROUTE_BASE = str(os.environ.get('OSRM_ROUTE_BASE') or 'https://router.project-osrm.org').strip().rstrip('/')
-OSRM_ROUTE_TIMEOUT_SEC = float(os.environ.get('OSRM_ROUTE_TIMEOUT_SEC') or 8)
-OSRM_ROUTE_MAX_WAYPOINTS = max(2, min(int(float(os.environ.get('OSRM_ROUTE_MAX_WAYPOINTS') or 20)), 25))
-OSRM_TRACE_MAX_POINTS = max(2, min(int(float(os.environ.get('OSRM_TRACE_MAX_POINTS') or 24)), 40))
-TRACKING_STOP_MIN_MINUTES = max(0, int(float(os.environ.get('TRACKING_STOP_MIN_MINUTES') or 5)))
-TRACKING_STOP_MAX_MINUTES = max(TRACKING_STOP_MIN_MINUTES, int(float(os.environ.get('TRACKING_STOP_MAX_MINUTES') or 10)))
-TRACKING_STOP_SERVICE_MINUTES = max(0, int(float(os.environ.get('TRACKING_STOP_SERVICE_MINUTES') or TRACKING_STOP_MIN_MINUTES or 5)))
-TRACKING_ROUTE_START_HOUR = max(0, min(23, int(float(os.environ.get('TRACKING_ROUTE_START_HOUR') or 9))))
-TRACKING_ROUTE_START_MINUTE = max(0, min(59, int(float(os.environ.get('TRACKING_ROUTE_START_MINUTE') or 30))))
-TRACKING_LIVE_MAX_AGE_MINUTES = max(1, int(float(os.environ.get('TRACKING_LIVE_MAX_AGE_MINUTES') or 25)))
-TRACKING_FALLBACK_SPEED_KMH = max(10.0, float(os.environ.get('TRACKING_FALLBACK_SPEED_KMH') or 26.0))
+OSRM_ROUTE_TIMEOUT_SEC = _env_float('OSRM_ROUTE_TIMEOUT_SEC', 8)
+OSRM_ROUTE_MAX_WAYPOINTS = max(2, min(_env_int('OSRM_ROUTE_MAX_WAYPOINTS', 20), 25))
+OSRM_TRACE_MAX_POINTS = max(2, min(_env_int('OSRM_TRACE_MAX_POINTS', 24), 40))
+TRACKING_STOP_MIN_MINUTES = max(0, _env_int('TRACKING_STOP_MIN_MINUTES', 5))
+TRACKING_STOP_MAX_MINUTES = max(TRACKING_STOP_MIN_MINUTES, _env_int('TRACKING_STOP_MAX_MINUTES', 10))
+TRACKING_STOP_SERVICE_MINUTES = max(0, _env_int('TRACKING_STOP_SERVICE_MINUTES', TRACKING_STOP_MIN_MINUTES or 5))
+TRACKING_ROUTE_START_HOUR = max(0, min(23, _env_int('TRACKING_ROUTE_START_HOUR', 9)))
+TRACKING_ROUTE_START_MINUTE = max(0, min(59, _env_int('TRACKING_ROUTE_START_MINUTE', 30)))
+TRACKING_LIVE_MAX_AGE_MINUTES = max(1, _env_int('TRACKING_LIVE_MAX_AGE_MINUTES', 25))
+TRACKING_FALLBACK_SPEED_KMH = max(10.0, _env_float('TRACKING_FALLBACK_SPEED_KMH', 26.0))
 
 _GEOCODE_CACHE: Dict[str, Dict[str, Any]] = {}
 _GEOCODE_CACHE_LOCK = threading.Lock()
@@ -328,9 +350,24 @@ def _startup_skip_enabled() -> bool:
 
 
 def _startup_background_enabled() -> bool:
-    if os.environ.get('STARTUP_BACKGROUND') is not None:
-        return _is_truthy(os.environ.get('STARTUP_BACKGROUND'))
-    return _running_on_render()
+    startup_background_env = os.environ.get('STARTUP_BACKGROUND')
+    if startup_background_env is not None:
+        enabled = _is_truthy(startup_background_env)
+        # On Render, forcing synchronous bootstrap can make deploy healthchecks
+        # time out when schema migrations or remote restores take too long.
+        # Keep startup non-blocking unless explicitly forced.
+        if (not enabled) and _running_on_render() and not _is_truthy(os.environ.get('FORCE_SYNC_STARTUP')):
+            logger.warning(
+                'STARTUP_BACKGROUND=%r requested sync bootstrap on Render; '
+                'forcing background bootstrap to avoid deploy timeout. '
+                'Set FORCE_SYNC_STARTUP=1 to allow sync startup.',
+                startup_background_env,
+            )
+            return True
+        return enabled
+    # Default to background bootstrap so startup stays fast even when
+    # platform-detection env vars are missing or delayed.
+    return True
 
 
 def _ensure_default_admin_owner() -> None:
@@ -849,13 +886,24 @@ async def lifespan(app: FastAPI):
         APP_EVENT_LOOP = asyncio.get_running_loop()
     except Exception:
         APP_EVENT_LOOP = None
-    if _startup_skip_enabled():
+    startup_skip = _startup_skip_enabled()
+    startup_background = _startup_background_enabled()
+    try:
+        logger.info(
+            'Startup mode snapshot: running_on_render=%s, skip_startup=%s, startup_background=%s',
+            _running_on_render(),
+            startup_skip,
+            startup_background,
+        )
+    except Exception:
+        pass
+    if startup_skip:
         logger.warning('Skipping startup bootstrap (SKIP_STARTUP_BOOTSTRAP enabled).')
         yield
         APP_EVENT_LOOP = None
         return
 
-    if _startup_background_enabled():
+    if startup_background:
         logger.info('Running startup bootstrap in background thread.')
 
         async def _run_background() -> None:
@@ -881,7 +929,7 @@ async def lifespan(app: FastAPI):
 # APP
 # -------------------------------------------------------------------
 app = FastAPI(title="Catálogo API", lifespan=lifespan)
-app.add_middleware(GZipMiddleware, minimum_size=int(os.environ.get('GZIP_MIN_SIZE') or 1000))
+app.add_middleware(GZipMiddleware, minimum_size=_env_int('GZIP_MIN_SIZE', 1000))
 
 # In-memory cache of recently created order payloads (id -> { payload, ts })
 # Used to surface token previews in the admin list when the DB lacks persisted user_* columns.
@@ -893,17 +941,17 @@ ORDER_PAYLOAD_CACHE_MAX_AGE = 60 * 60 * 2  # keep for 2 hours
 ORDER_STATUS_CACHE = {}
 ORDER_STATUS_CACHE_MAX_AGE = 60 * 60 * 24  # keep for 24 hours
 ORDER_PRODUCT_PRICE_MAP_CACHE: Dict[str, Any] = {'ts': 0.0, 'data': {}}
-ORDER_PRODUCT_PRICE_MAP_CACHE_TTL = float(os.environ.get('ORDER_PRODUCT_PRICE_MAP_CACHE_TTL') or 30.0)
+ORDER_PRODUCT_PRICE_MAP_CACHE_TTL = _env_float('ORDER_PRODUCT_PRICE_MAP_CACHE_TTL', 30.0)
 
 # Catalog endpoint caches (short TTL to reduce load during bursts)
 PRODUCTS_CACHE: Dict[Any, Dict[str, Any]] = {}
-PRODUCTS_CACHE_MAX = int(os.environ.get('PRODUCTS_CACHE_MAX') or 200)
-PRODUCTS_CACHE_TTL = float(os.environ.get('PRODUCTS_CACHE_TTL') or 10.0)
-PRODUCTS_CACHE_LIMIT_MAX = int(os.environ.get('PRODUCTS_CACHE_LIMIT_MAX') or 1000)
+PRODUCTS_CACHE_MAX = _env_int('PRODUCTS_CACHE_MAX', 200)
+PRODUCTS_CACHE_TTL = _env_float('PRODUCTS_CACHE_TTL', 10.0)
+PRODUCTS_CACHE_LIMIT_MAX = _env_int('PRODUCTS_CACHE_LIMIT_MAX', 1000)
 PRODUCTS_COUNT_CACHE: Dict[Any, Dict[str, Any]] = {}
-PRODUCTS_COUNT_CACHE_TTL = float(os.environ.get('PRODUCTS_COUNT_CACHE_TTL') or 15.0)
+PRODUCTS_COUNT_CACHE_TTL = _env_float('PRODUCTS_COUNT_CACHE_TTL', 15.0)
 PROMOTIONS_CACHE: Dict[str, Dict[str, Any]] = {}
-PROMOTIONS_CACHE_TTL = float(os.environ.get('PROMOTIONS_CACHE_TTL') or 15.0)
+PROMOTIONS_CACHE_TTL = _env_float('PROMOTIONS_CACHE_TTL', 15.0)
 
 # Auto-image progress tracking (in-memory, last job wins).
 AUTO_IMAGE_PROGRESS_LOCK = threading.Lock()
@@ -5967,7 +6015,10 @@ try:
 except Exception:
     pass
 
-utils.ensure_upload_folder(UPLOAD_DIR)
+try:
+    utils.ensure_upload_folder(UPLOAD_DIR)
+except Exception as e:
+    logger.exception('Failed to ensure UPLOAD_DIR %s: %s', UPLOAD_DIR, e)
 try:
     os.makedirs(PROMO_DIR, exist_ok=True)
 except Exception:
@@ -15956,7 +16007,20 @@ def _inject_admin_config(content: str) -> str:
 if os.path.exists(FRONTEND_DIR):
     @app.get("/")
     def root():
-        return RedirectResponse("/admin/index.html")
+        # Keep HTTP 200 for platform probes while still sending users to admin UI.
+        return Response(
+            content=(
+                "<!doctype html><html><head>"
+                "<meta charset='utf-8'/>"
+                "<meta http-equiv='refresh' content='0; url=/admin/index.html'/>"
+                "<title>Redirecting...</title>"
+                "</head><body>"
+                "<p>Redirigiendo al panel...</p>"
+                "</body></html>"
+            ),
+            media_type="text/html",
+            status_code=200,
+        )
 
     @app.head("/")
     def root_head():
@@ -16044,8 +16108,19 @@ if os.path.exists(FRONTEND_DIR):
         )
 
     app.mount("/admin", StaticFiles(directory=FRONTEND_DIR), name="admin")
+else:
+    @app.get("/")
+    def root_fallback():
+        return {"status": "ok", "admin_ui_available": False}
 
-app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+    @app.head("/")
+    def root_fallback_head():
+        return Response(status_code=200)
+
+if os.path.exists(UPLOAD_DIR):
+    app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+else:
+    logger.warning('Uploads directory not available at startup, skipping /uploads mount: %s', UPLOAD_DIR)
 
 if os.path.exists(CATALOG_DIR):
     app.mount("/catalogo", StaticFiles(directory=CATALOG_DIR), name="catalogo")

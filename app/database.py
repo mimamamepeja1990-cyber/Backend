@@ -24,10 +24,20 @@ def _is_truthy(value: str | None) -> bool:
         return False
 
 
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return int(default)
+    try:
+        return int(float(str(raw).strip()))
+    except Exception:
+        return int(default)
+
+
 def _should_run_import_migrations() -> bool:
     """Control best-effort migrations that run at import time.
 
-    - Skip by default on Render to avoid blocking port bind.
+    - Skip by default to avoid blocking process startup/port bind.
     - Allow explicit opt-in via RUN_DB_MIGRATIONS_AT_IMPORT=1.
     - Allow explicit opt-out via SKIP_DB_MIGRATIONS=1.
     """
@@ -35,7 +45,7 @@ def _should_run_import_migrations() -> bool:
         return False
     if _is_truthy(os.environ.get('RUN_DB_MIGRATIONS_AT_IMPORT')):
         return True
-    return not _is_running_on_render()
+    return False
 
 
 def _resolve_data_dir() -> Path:
@@ -98,10 +108,10 @@ SQLALCHEMY_DATABASE_URL = os.environ.get('DATABASE_URL') or f"sqlite:///{str(DB_
 if SQLALCHEMY_DATABASE_URL.startswith('sqlite'):
     engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={'check_same_thread': False})
 else:
-    pool_size = int(os.environ.get('DB_POOL_SIZE') or 15)
-    max_overflow = int(os.environ.get('DB_MAX_OVERFLOW') or 30)
-    pool_timeout = int(os.environ.get('DB_POOL_TIMEOUT') or 60)
-    pool_recycle = int(os.environ.get('DB_POOL_RECYCLE') or 1800)
+    pool_size = _env_int('DB_POOL_SIZE', 15)
+    max_overflow = _env_int('DB_MAX_OVERFLOW', 30)
+    pool_timeout = _env_int('DB_POOL_TIMEOUT', 60)
+    pool_recycle = _env_int('DB_POOL_RECYCLE', 1800)
     engine = create_engine(
         SQLALCHEMY_DATABASE_URL,
         pool_size=pool_size,
