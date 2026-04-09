@@ -714,7 +714,7 @@ async function loadGoogleMapsApi(){
   if (window.__googleMapsLoading) return window.__googleMapsLoading;
   window.__googleMapsLoading = new Promise((resolve, reject) => {
     const script = document.createElement('script');
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}`;
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&loading=async`;
     script.async = true;
     script.defer = true;
     script.onload = () => resolve(true);
@@ -1950,7 +1950,17 @@ function setAuthLocked(locked){
   try{ document.body.classList.toggle('auth-locked', locked); }catch(_){ }
   try{
     const overlay = document.getElementById('authOverlay');
-    if (overlay) overlay.setAttribute('aria-hidden', locked ? 'false' : 'true');
+    if (!overlay) return;
+    if (!locked){
+      try{
+        const activeEl = document.activeElement;
+        if (activeEl && overlay.contains(activeEl) && typeof activeEl.blur === 'function'){
+          activeEl.blur();
+        }
+      }catch(_){ }
+    }
+    overlay.setAttribute('aria-hidden', locked ? 'false' : 'true');
+    try{ overlay.toggleAttribute('inert', !locked); }catch(_){ }
   }catch(_){ }
 }
 
@@ -2169,6 +2179,7 @@ function initAuth(){
       setAuthLocked(true);
       currentAdminUser = null;
       setPushButtonState('idle');
+      try{ closeRealtimeEventSource(); }catch(_){ }
       try{ location.reload(); }catch(_){ }
     });
   }
@@ -11516,7 +11527,166 @@ try{
   }, ORDERS_POLL_INTERVAL_MS);
 }catch(e){ console.warn('orders polling setup failed', e); }
 
-// websocket to refresh list live with reconnection/backoff
+let realtimeEventSource = null;
+let realtimeMode = 'idle';
+let realtimeWsFailures = 0;
+let realtimeSseFailures = 0;
+
+function setRealtimeStatus(mode){
+  if (!wsStatus) return;
+  const textMode = String(mode || '').trim().toLowerCase();
+  wsStatus.classList.remove('connected', 'disconnected');
+  if (textMode === 'ws'){
+    wsStatus.classList.add('connected');
+    wsStatus.title = 'Conectado por WebSocket';
+    return;
+  }
+  if (textMode === 'sse'){
+    wsStatus.classList.add('connected');
+    wsStatus.title = 'Conectado por fallback (SSE)';
+    return;
+  }
+  wsStatus.classList.add('disconnected');
+  wsStatus.title = 'Desconectado';
+}
+
+async function handleRealtimeData(data){
+  if (data && data.action === 'driver_location_offline'){
+    const driver = data.driver || data;
+    const id = getDriverId(driver);
+    if (id) removeDriverMarkerById(id);
+    syncDriverMapEmptyState();
+    return;
+  }
+  if (data && data.action === 'driver_location' && data.driver){
+    try{ updateDriverMarker(data.driver); }catch(_){ }
+    syncDriverMapEmptyState();
+    return;
+  }
+  if (data && data.action === 'orders_changed'){
+    scheduleOperationsRefresh(`rt:${data.action}`, 400);
+    scheduleExecutiveRefresh(`rt:${data.action}`, 300);
+    return;
+  }
+  if (data && data.action === 'order_updated' && data.order){
+    try{ mergePatchedOrderIntoCaches(data.order, data.order.id); }catch(_){ }
+    scheduleOperationsRefresh('rt:order_updated', 250);
+    scheduleExecutiveRefresh('rt:order_updated', 300);
+    return;
+  }
+  if (['created', 'updated', 'deleted', 'bulk_updated'].includes(data && data.action)){
+    const hasProductPayload = !!(data && data.product && (typeof data.product.id !== 'undefined' || typeof data.product.name !== 'undefined'));
+    if (hasProductPayload || data.action === 'created' || data.action === 'deleted' || data.action === 'bulk_updated'){
+      scheduleCatalogRefresh(`rt:${data.action}`, hasProductPayload ? 1200 : 1600);
+      scheduleExecutiveRefresh(`rt:${data.action}`, 450);
+    } else {
+      scheduleOperationsRefresh(`rt:${data.action}`, 500);
+      scheduleExecutiveRefresh(`rt:${data.action}`, 500);
+    }
+    return;
+  }
+  if (data && data.action && data.action.indexOf && data.action.indexOf('order') === 0){
+    try{ console.debug('[admin realtime] order event received', data); }catch(_){ }
+    if (data.action === 'order_created' && data.order){
+      try{
+        if (!data.order.source) data.order.source = 'web';
+        const src = String(data.order.source).toLowerCase();
+        if (src === 'web'){
+          insertOrderAtTop(data.order);
+          showToast(`Pedido recibido: #${data.order.id}`);
+          scheduleOperationsRefresh('rt:order_created_inline', 250);
+          scheduleExecutiveRefresh('rt:order_created_inline', 280);
+        }
+        return;
+      }catch(e){
+        console.warn('insertOrderAtTop failed, fallback refresh', e);
+      }
+    }
+    try{
+      if (data.action === 'order_created' && data.id){
+        (async () => {
+          const id = String(data.id);
+          try{
+            const list = await fetchOrders(String(id));
+            if (Array.isArray(list) && list.length > 0){
+              try{
+                const srv = list[0];
+                if (srv && srv.source === 'web'){
+                  insertOrderAtTop(srv);
+                  try{ showToast(`Pedido recibido: #${srv.id}`); }catch(_){ }
+                  scheduleOperationsRefresh('rt:order_created_by_id', 250);
+                  scheduleExecutiveRefresh('rt:order_created_by_id', 300);
+                }
+              }catch(_){ }
+            } else {
+              scheduleOperationsRefresh('rt:order_created_fallback', 250);
+              scheduleExecutiveRefresh('rt:order_created_fallback', 320);
+            }
+          }catch(e){
+            console.warn('fetch by id after realtime event failed', e);
+            scheduleOperationsRefresh('rt:order_created_fetch_fail', 250);
+            scheduleExecutiveRefresh('rt:order_created_fetch_fail', 350);
+          }
+        })();
+        return;
+      }
+    }catch(e){
+      console.warn('post-realtime fetch-by-id handling failed', e);
+    }
+  }
+  scheduleExecutiveRefresh(`rt:${(data && data.action) || 'unknown'}`, 650);
+}
+
+function closeRealtimeEventSource(){
+  if (!realtimeEventSource) return;
+  try{ realtimeEventSource.close(); }catch(_){ }
+  realtimeEventSource = null;
+}
+
+function setupEventSource(attempt = 0){
+  if (!currentAdminUser || !hasApiConnection()) return;
+  if (!location.protocol || !location.protocol.startsWith('http')) return;
+  if (!('EventSource' in window)) return;
+  closeRealtimeEventSource();
+  const scope = encodeURIComponent(getScopedOrderCustomerType());
+  const eventUrl = `${API_BASE}/events/products?scope=${scope}&_t=${Date.now()}`;
+  let source = null;
+  try{ source = new EventSource(eventUrl); }catch(_){ source = null; }
+  if (!source){
+    const delay = Math.min(30000, Math.pow(2, attempt) * 1000 + Math.random() * 1000);
+    setTimeout(() => setupEventSource(attempt + 1), delay);
+    return;
+  }
+  realtimeEventSource = source;
+  source.onopen = () => {
+    realtimeMode = 'sse';
+    realtimeSseFailures = 0;
+    setRealtimeStatus('sse');
+    console.info('Admin realtime fallback connected (SSE)');
+  };
+  source.onerror = () => {
+    realtimeSseFailures += 1;
+    setRealtimeStatus('disconnected');
+    closeRealtimeEventSource();
+    const delay = Math.min(45000, Math.pow(2, attempt) * 1000 + Math.random() * 1200);
+    setTimeout(() => setupEventSource(attempt + 1), delay);
+    // Retry WS occasionally in case transport recovered.
+    if (realtimeSseFailures % 3 === 0){
+      setTimeout(() => setupSocket(0), 2000);
+    }
+  };
+  source.onmessage = async (ev) => {
+    try{
+      const data = JSON.parse(String(ev && ev.data || '{}'));
+      await handleRealtimeData(data);
+    }catch(e){
+      console.warn('[admin] sse message parse/handle failed', e);
+    }
+  };
+}
+
+// websocket to refresh list live with reconnection/backoff.
+// If WS is blocked by CDN/proxy, fallback to SSE (/events/products).
 function setupSocket(attempt = 0){
   if(!currentAdminUser || !hasApiConnection()) return;
   if(!location.protocol || !location.protocol.startsWith('http')) return;
@@ -11526,106 +11696,49 @@ function setupSocket(attempt = 0){
   const proto = (apiUrl.protocol === 'https:') ? 'wss://' : 'ws://';
   const wsUrl = `${proto}${apiUrl.host}/ws/products`;
   let socket;
-  try{ socket = new WebSocket(wsUrl); }catch(e){ socket = null; }
-  if(!socket){ const delay = Math.min(30000, Math.pow(2, attempt) * 1000 + Math.random()*1000); setTimeout(()=> setupSocket(attempt + 1), delay); return; }
-  socket.onopen = () => { console.log('Admin WS connected'); if(wsStatus){ wsStatus.classList.add('connected'); wsStatus.classList.remove('disconnected'); wsStatus.title = 'Conectado'; } };
-  socket.onclose = () => { console.log('Admin WS closed, retrying'); if(wsStatus){ wsStatus.classList.remove('connected'); wsStatus.classList.add('disconnected'); wsStatus.title = 'Desconectado'; } const delay = Math.min(30000, Math.pow(2, attempt) * 1000 + Math.random()*1000); setTimeout(()=> setupSocket(attempt + 1), delay); };
-  socket.onerror = (err) => console.error('Admin WS error', err);
+  try{ socket = new WebSocket(wsUrl); }catch(_){ socket = null; }
+  if(!socket){
+    const delay = Math.min(30000, Math.pow(2, attempt) * 1000 + Math.random()*1000);
+    setTimeout(()=> setupSocket(attempt + 1), delay);
+    return;
+  }
+  let opened = false;
+  socket.onopen = () => {
+    opened = true;
+    realtimeWsFailures = 0;
+    realtimeMode = 'ws';
+    closeRealtimeEventSource();
+    setRealtimeStatus('ws');
+    console.info('Admin WS connected');
+  };
+  socket.onclose = () => {
+    setRealtimeStatus('disconnected');
+    if (!opened){
+      realtimeWsFailures += 1;
+      // WS handshake rejected (common behind some proxies): fallback to SSE.
+      if (realtimeWsFailures >= 2){
+        setupEventSource(0);
+        return;
+      }
+    }
+    const delay = Math.min(30000, Math.pow(2, attempt) * 1000 + Math.random()*1000);
+    setTimeout(()=> setupSocket(attempt + 1), delay);
+  };
+  socket.onerror = () => {
+    // Keep logs concise to avoid noisy "critical" console spam.
+    console.warn('Admin WS transport error; retrying/fallback...');
+  };
   socket.onmessage = async (ev) => {
     try{
-      const data = JSON.parse(ev.data);
-      if (data && data.action === 'driver_location_offline'){
-        const driver = data.driver || data;
-        const id = getDriverId(driver);
-        if (id) removeDriverMarkerById(id);
-        syncDriverMapEmptyState();
-        return;
-      }
-      if (data && data.action === 'driver_location' && data.driver){
-        try{ updateDriverMarker(data.driver); }catch(_){ }
-        syncDriverMapEmptyState();
-        return;
-      }
-      if (data && data.action === 'orders_changed'){
-        scheduleOperationsRefresh(`ws:${data.action}`, 400);
-        scheduleExecutiveRefresh(`ws:${data.action}`, 300);
-        return;
-      }
-      if (data && data.action === 'order_updated' && data.order){
-        try{ mergePatchedOrderIntoCaches(data.order, data.order.id); }catch(_){ }
-        scheduleOperationsRefresh('ws:order_updated', 250);
-        scheduleExecutiveRefresh('ws:order_updated', 300);
-        return;
-      }
-      if (['created', 'updated', 'deleted', 'bulk_updated'].includes(data.action)){
-        const hasProductPayload = !!(data && data.product && (typeof data.product.id !== 'undefined' || typeof data.product.name !== 'undefined'));
-        if (hasProductPayload || data.action === 'created' || data.action === 'deleted' || data.action === 'bulk_updated'){
-          scheduleCatalogRefresh(`ws:${data.action}`, hasProductPayload ? 1200 : 1600);
-          scheduleExecutiveRefresh(`ws:${data.action}`, 450);
-        } else {
-          scheduleOperationsRefresh(`ws:${data.action}`, 500);
-          scheduleExecutiveRefresh(`ws:${data.action}`, 500);
-        }
-        return;
-      }
-      if(data.action && data.action.indexOf && data.action.indexOf('order') === 0){
-        // Debug: show raw event payload in console so we can inspect user_* fields
-        try{ console.debug('[admin WS] order event received', data); }catch(_){ }
-        // If the server sent the full order object, insert it only if source is correcto
-        if(data.action === 'order_created' && data.order){
-          try{
-            // Si no hay source, default a web
-            if(!data.order.source){ data.order.source = 'web'; }
-            // Solo insertar pedidos web en el panel web-only
-            const src = String(data.order.source).toLowerCase();
-            if(src === 'web') {
-              insertOrderAtTop(data.order);
-              showToast(`Pedido recibido: #${data.order.id}`);
-              scheduleOperationsRefresh('ws:order_created_inline', 250);
-              scheduleExecutiveRefresh('ws:order_created_inline', 280);
-            }
-            return;
-          }catch(e){ console.warn('insertOrderAtTop failed, falling back to full refresh', e); }
-        }
-        // If no full order object was provided, request it specifically by id to avoid race with full list refreshes
-        try{
-          if(data.action === 'order_created' && data.id){
-            (async ()=>{
-              const id = String(data.id);
-              try{
-                const list = await fetchOrders(String(id));
-                if(Array.isArray(list) && list.length > 0){
-                  // server has the record; solo insertar si es web
-                  try{
-                    const srv = list[0];
-                    if(srv && srv.source === 'web'){
-                      insertOrderAtTop(srv);
-                      try{ showToast(`Pedido recibido: #${srv.id}`); }catch(_){ }
-                      scheduleOperationsRefresh('ws:order_created_by_id', 250);
-                      scheduleExecutiveRefresh('ws:order_created_by_id', 300);
-                    }
-                  }catch(_){ }
-                } else {
-                  // fallback: full refresh web table
-                  scheduleOperationsRefresh('ws:order_created_fallback', 250);
-                  scheduleExecutiveRefresh('ws:order_created_fallback', 320);
-                }
-              }catch(e){ console.warn('fetch by id after ws event failed', e); scheduleOperationsRefresh('ws:order_created_fetch_fail', 250); scheduleExecutiveRefresh('ws:order_created_fetch_fail', 350); }
-            })();
-            return;
-          }
-        }catch(e){ console.warn('post-ws fetch-by-id handling failed', e); }
-      }
-      scheduleExecutiveRefresh(`ws:${data.action || 'unknown'}`, 650);
-      return;
+      const data = JSON.parse(String(ev && ev.data || '{}'));
+      await handleRealtimeData(data);
     }catch(e){
       console.warn('[admin] websocket message parse/handle failed', e);
-      return;
     }
-  }
+  };
 }
 
-// Start websocket connection
+// Start realtime transport
 try{ setupSocket(); }catch(e){ console.warn('setupSocket start failed', e); }
 
 async function openPromoModal(editId){

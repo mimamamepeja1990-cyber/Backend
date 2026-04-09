@@ -6929,9 +6929,13 @@ def delete_consumo(product_id: str, request: Request, db: Session = Depends(get_
 # WEBSOCKETS
 # -------------------------------------------------------------------
 connections: List[WebSocket] = []
+realtime_event_queues: Dict[str, asyncio.Queue] = {}
+REALTIME_QUEUE_MAX = 128
 
 async def push_event(data: dict):
     """Broadcast JSON `data` to all connected WebSocket clients and log diagnostics."""
+    encoded = jsonable_encoder(data or {})
+    serialized = json.dumps(encoded, ensure_ascii=False, separators=(',', ':')).replace('\n', '\\n')
     try:
         logger.info('push_event sending to %s connections: %s', len(connections), data)
     except Exception:
@@ -6943,6 +6947,21 @@ async def push_event(data: dict):
         except Exception:
             try:
                 connections.remove(ws)
+            except Exception:
+                pass
+    # Fan-out to SSE clients (fallback transport when WS is blocked by proxy/CDN).
+    for cid, queue in list(realtime_event_queues.items()):
+        try:
+            queue.put_nowait(serialized)
+        except asyncio.QueueFull:
+            try:
+                _ = queue.get_nowait()
+                queue.put_nowait(serialized)
+            except Exception:
+                pass
+        except Exception:
+            try:
+                realtime_event_queues.pop(cid, None)
             except Exception:
                 pass
     if tasks:
@@ -6974,6 +6993,41 @@ async def ws_products(ws: WebSocket):
     finally:
         if ws in connections:
             connections.remove(ws)
+
+
+@app.get("/events/products")
+async def events_products(request: Request):
+    client_id = uuid.uuid4().hex
+    queue: asyncio.Queue = asyncio.Queue(maxsize=REALTIME_QUEUE_MAX)
+    realtime_event_queues[client_id] = queue
+
+    async def stream():
+        # Initial heartbeat so the browser marks the stream as open quickly.
+        try:
+            yield "event: ping\ndata: {}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=20.0)
+                    yield f"data: {payload}\n\n"
+                except asyncio.TimeoutError:
+                    yield "event: ping\ndata: {}\n\n"
+        finally:
+            try:
+                realtime_event_queues.pop(client_id, None)
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 # -------------------------------------------------------------------
 # ENDPOINTS
