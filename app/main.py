@@ -18,6 +18,7 @@ import asyncio
 import logging
 import csv
 import json
+import base64
 import re
 import time
 import datetime
@@ -53,6 +54,14 @@ try:
     import mercadopago  # type: ignore
 except Exception:
     mercadopago = None
+try:
+    import firebase_admin  # type: ignore
+    from firebase_admin import credentials as firebase_credentials  # type: ignore
+    from firebase_admin import messaging as firebase_messaging  # type: ignore
+except Exception:
+    firebase_admin = None
+    firebase_credentials = None
+    firebase_messaging = None
 GIST_TOKEN = os.environ.get('BACKUP_GIST_TOKEN')
 GIST_ID = os.environ.get('BACKUP_GIST_ID')
 BACKUP_URL = os.environ.get('CATALOG_BACKUP_URL')  # optional public URL to fetch a snapshot from
@@ -129,6 +138,238 @@ handler = logging.StreamHandler()
 handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
+
+_FIREBASE_INIT_LOCK = threading.Lock()
+_FIREBASE_APP = None
+
+
+def _fcm_enabled() -> bool:
+    return _is_truthy(os.environ.get('FCM_ENABLED') or '1')
+
+
+def _firebase_web_config() -> Dict[str, Any]:
+    return {
+        'apiKey': str(os.environ.get('FIREBASE_WEB_API_KEY') or '').strip(),
+        'authDomain': str(os.environ.get('FIREBASE_WEB_AUTH_DOMAIN') or '').strip(),
+        'projectId': str(os.environ.get('FIREBASE_WEB_PROJECT_ID') or '').strip(),
+        'storageBucket': str(os.environ.get('FIREBASE_WEB_STORAGE_BUCKET') or '').strip(),
+        'messagingSenderId': str(os.environ.get('FIREBASE_WEB_MESSAGING_SENDER_ID') or '').strip(),
+        'appId': str(os.environ.get('FIREBASE_WEB_APP_ID') or '').strip(),
+        'measurementId': str(os.environ.get('FIREBASE_WEB_MEASUREMENT_ID') or '').strip(),
+    }
+
+
+def _firebase_web_config_ready(config: Optional[Dict[str, Any]] = None) -> bool:
+    cfg = config or _firebase_web_config()
+    required = ('apiKey', 'projectId', 'messagingSenderId', 'appId')
+    return all(str(cfg.get(k) or '').strip() for k in required)
+
+
+def _firebase_web_vapid_key() -> str:
+    return str(os.environ.get('FIREBASE_WEB_VAPID_KEY') or '').strip()
+
+
+def _load_firebase_service_account_dict() -> Optional[Dict[str, Any]]:
+    raw_json = str(os.environ.get('FIREBASE_SERVICE_ACCOUNT_JSON') or '').strip()
+    if raw_json:
+        try:
+            data = json.loads(raw_json)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            logger.exception('Invalid FIREBASE_SERVICE_ACCOUNT_JSON')
+    raw_b64 = str(os.environ.get('FIREBASE_SERVICE_ACCOUNT_B64') or '').strip()
+    if raw_b64:
+        try:
+            decoded = base64.b64decode(raw_b64).decode('utf-8')
+            data = json.loads(decoded)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            logger.exception('Invalid FIREBASE_SERVICE_ACCOUNT_B64')
+    path = str(os.environ.get('FIREBASE_SERVICE_ACCOUNT_PATH') or '').strip()
+    if path:
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            logger.exception('Could not read FIREBASE_SERVICE_ACCOUNT_PATH=%s', path)
+    return None
+
+
+def _ensure_firebase_admin_ready():
+    global _FIREBASE_APP
+    if _FIREBASE_APP is not None:
+        return _FIREBASE_APP
+    if not _fcm_enabled():
+        return None
+    if firebase_admin is None or firebase_credentials is None:
+        logger.warning('firebase-admin SDK not installed; push notifications disabled.')
+        return None
+    with _FIREBASE_INIT_LOCK:
+        if _FIREBASE_APP is not None:
+            return _FIREBASE_APP
+        service_account = _load_firebase_service_account_dict()
+        if not isinstance(service_account, dict):
+            logger.warning('Firebase service account is missing; push notifications disabled.')
+            return None
+        try:
+            cred = firebase_credentials.Certificate(service_account)
+            _FIREBASE_APP = firebase_admin.initialize_app(cred, name='distriar-fcm')
+        except Exception:
+            try:
+                _FIREBASE_APP = firebase_admin.get_app('distriar-fcm')
+            except Exception:
+                logger.exception('Failed to initialize Firebase Admin SDK')
+                _FIREBASE_APP = None
+        return _FIREBASE_APP
+
+
+def _fcm_data_payload(payload: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for key, value in (payload or {}).items():
+        if value is None:
+            continue
+        out[str(key)] = str(value)
+    return out
+
+
+def _send_fcm_notification_to_tokens(tokens: List[str], title: str, body: str, data: Optional[Dict[str, Any]] = None, link: Optional[str] = None) -> Dict[str, Any]:
+    app_instance = _ensure_firebase_admin_ready()
+    if not app_instance or not tokens or firebase_messaging is None:
+        return {'sent': 0, 'failed': len(tokens or []), 'invalid_tokens': []}
+    clean_tokens = []
+    seen = set()
+    for token in (tokens or []):
+        t = str(token or '').strip()
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        clean_tokens.append(t)
+    if not clean_tokens:
+        return {'sent': 0, 'failed': 0, 'invalid_tokens': []}
+
+    payload = _fcm_data_payload(data)
+    try:
+        notification = firebase_messaging.Notification(title=str(title or '').strip(), body=str(body or '').strip())
+        webpush = firebase_messaging.WebpushConfig(
+            notification=firebase_messaging.WebpushNotification(
+                title=str(title or '').strip(),
+                body=str(body or '').strip(),
+                icon='/admin/icon-192.png',
+                data=payload,
+            ),
+            fcm_options=firebase_messaging.WebpushFCMOptions(link=str(link or '/admin/index.html').strip() or '/admin/index.html'),
+        )
+        message = firebase_messaging.MulticastMessage(
+            tokens=clean_tokens,
+            notification=notification,
+            data=payload,
+            webpush=webpush,
+        )
+        batch = firebase_messaging.send_each_for_multicast(message, app=app_instance)
+        invalid_tokens: List[str] = []
+        try:
+            for idx, resp in enumerate(list(batch.responses or [])):
+                if resp.success:
+                    continue
+                exc = getattr(resp, 'exception', None)
+                code = str(getattr(exc, 'code', '') or '').lower()
+                msg = str(exc or '').lower()
+                if 'registration-token-not-registered' in code or 'unregistered' in msg or 'invalid-argument' in code:
+                    if idx < len(clean_tokens):
+                        invalid_tokens.append(clean_tokens[idx])
+        except Exception:
+            pass
+        return {
+            'sent': int(getattr(batch, 'success_count', 0) or 0),
+            'failed': int(getattr(batch, 'failure_count', 0) or 0),
+            'invalid_tokens': invalid_tokens,
+        }
+    except Exception:
+        logger.exception('FCM send failed')
+        return {'sent': 0, 'failed': len(clean_tokens), 'invalid_tokens': []}
+
+
+def _deactivate_push_tokens(db: Session, tokens: List[str]) -> None:
+    if not tokens:
+        return
+    try:
+        db.query(models.PushDeviceToken).filter(models.PushDeviceToken.token.in_(tokens)).update(
+            {
+                models.PushDeviceToken.is_active: False,
+                models.PushDeviceToken.updated_at: datetime.datetime.now(datetime.timezone.utc),
+            },
+            synchronize_session=False,
+        )
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def _enqueue_admin_push_event(event_type: str, title: str, body: str, payload: Optional[Dict[str, Any]] = None, business_scope: Optional[str] = None) -> None:
+    if not _fcm_enabled():
+        return
+    data_payload = _fcm_data_payload(payload)
+    event_key = str(event_type or '').strip().lower() or 'event'
+    data_payload.setdefault('event_type', event_key)
+    scope = _normalize_catalog_business_scope(business_scope)
+    data_payload.setdefault('business_scope', scope)
+    link = '/admin/index.html'
+    order_id = str(data_payload.get('order_id') or '').strip()
+    if order_id:
+        link = f'/admin/index.html#orders?order_id={quote_plus(order_id)}'
+        data_payload.setdefault('open_section', 'orders')
+        data_payload.setdefault('open_order_id', order_id)
+
+    def _task() -> None:
+        db_local = SessionLocal()
+        try:
+            q = db_local.query(models.PushDeviceToken).filter(models.PushDeviceToken.is_active == True)
+            if scope:
+                q = q.filter(or_(models.PushDeviceToken.business_scope == scope, models.PushDeviceToken.business_scope == 'all'))
+            rows = q.order_by(models.PushDeviceToken.updated_at.desc().nullslast(), models.PushDeviceToken.created_at.desc()).limit(2000).all()
+            tokens = [str(getattr(row, 'token', '') or '').strip() for row in rows]
+            tokens = [t for t in tokens if t]
+            if not tokens:
+                return
+            result = _send_fcm_notification_to_tokens(tokens, title=title, body=body, data=data_payload, link=link)
+            invalid = result.get('invalid_tokens') if isinstance(result, dict) else []
+            if isinstance(invalid, list) and invalid:
+                _deactivate_push_tokens(db_local, [str(x) for x in invalid if x])
+            logger.info(
+                'FCM event=%s sent=%s failed=%s tokens=%s scope=%s',
+                event_key,
+                (result or {}).get('sent'),
+                (result or {}).get('failed'),
+                len(tokens),
+                scope,
+            )
+        except Exception:
+            logger.exception('FCM enqueue task failed for event=%s', event_key)
+        finally:
+            try:
+                db_local.close()
+            except Exception:
+                pass
+
+    try:
+        thread = threading.Thread(target=_task, name=f'fcm-{event_key}', daemon=True)
+        thread.start()
+    except Exception:
+        logger.exception('Could not start FCM thread for event=%s', event_key)
+
+
+def _ensure_push_device_tokens_table() -> None:
+    try:
+        models.PushDeviceToken.__table__.create(bind=engine, checkfirst=True)
+    except Exception:
+        logger.exception('Could not ensure push_device_tokens table')
 
 # -------------------------------------------------------------------
 # Engine-level safe helpers ðŸ”§
@@ -11827,6 +12068,261 @@ def admin_operations_overview(
     return JSONResponse(status_code=200, content=jsonable_encoder(payload), headers=headers)
 
 
+def _build_admin_resumen_ejecutivo(
+    db: Session,
+    customer_type_filter: Optional[str] = None,
+    days: int = 30,
+    limit: int = 3000,
+) -> Dict[str, Any]:
+    base = _build_admin_operations_overview(
+        db=db,
+        customer_type_filter=customer_type_filter,
+        days=days,
+        limit=limit,
+    ) or {}
+    kpis = base.get('kpis') if isinstance(base, dict) else {}
+    orders_kpi = kpis.get('orders') if isinstance(kpis, dict) else {}
+    sales_kpi = kpis.get('sales') if isinstance(kpis, dict) else {}
+    catalog_kpi = kpis.get('catalog') if isinstance(kpis, dict) else {}
+    drivers_kpi = kpis.get('drivers') if isinstance(kpis, dict) else {}
+
+    # Recent activity feed (latest orders + status changes).
+    recent_raw = list_orders(skip=0, limit=60, source=None, q=None, date=None, db=db) or []
+    recent_items: List[Dict[str, Any]] = []
+    delayed_orders: List[Dict[str, Any]] = []
+    route_issues: List[Dict[str, Any]] = []
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    for row in recent_raw:
+        if not isinstance(row, dict):
+            continue
+        if customer_type_filter:
+            if _normalize_admin_customer_type_filter(row.get('customer_type')) != customer_type_filter:
+                continue
+        oid = str(row.get('id') or '').strip()
+        status_key = _normalize_order_status(row.get('status'))
+        created_dt = _parse_datetime_utc(row.get('created_at'))
+        created_label = None
+        if created_dt is not None:
+            try:
+                created_label = created_dt.astimezone(datetime.timezone.utc).isoformat()
+            except Exception:
+                created_label = None
+        total = float(_ops_order_total(row))
+        recent_items.append({
+            'order_id': oid,
+            'status': status_key,
+            'status_label': _customer_tracking_status_label(status_key),
+            'total': float(round(total, 2)),
+            'created_at': created_label,
+            'customer': str(row.get('user_full_name') or row.get('user_email') or '').strip() or None,
+            'driver': str(row.get('assigned_driver_name') or row.get('assigned_driver_username') or '').strip() or None,
+        })
+        if status_key in ('recibido', 'visto'):
+            try:
+                if created_dt is not None and (now_utc - created_dt).total_seconds() > (45 * 60):
+                    delayed_orders.append({
+                        'order_id': oid,
+                        'status': status_key,
+                        'minutes': int((now_utc - created_dt).total_seconds() // 60),
+                        'total': float(round(total, 2)),
+                    })
+            except Exception:
+                pass
+        if status_key == 'enviado':
+            driver_name = str(row.get('assigned_driver_name') or row.get('assigned_driver_username') or '').strip()
+            if not driver_name:
+                route_issues.append({
+                    'order_id': oid,
+                    'issue': 'Pedido en ruta sin repartidor asignado.',
+                })
+
+    low_stock_top = []
+    try:
+        low_stock_top = list((catalog_kpi.get('top_low_stock') if isinstance(catalog_kpi, dict) else []) or [])[:6]
+    except Exception:
+        low_stock_top = []
+
+    alertas: List[Dict[str, Any]] = []
+    if low_stock_top:
+        alertas.append({
+            'type': 'stock',
+            'title': 'Productos sin stock o bajo mínimo',
+            'count': len(low_stock_top),
+            'items': low_stock_top,
+        })
+    if delayed_orders:
+        alertas.append({
+            'type': 'demora',
+            'title': 'Pedidos demorados',
+            'count': len(delayed_orders),
+            'items': delayed_orders[:10],
+        })
+    if route_issues:
+        alertas.append({
+            'type': 'ruta',
+            'title': 'Problemas en ruta',
+            'count': len(route_issues),
+            'items': route_issues[:10],
+        })
+
+    return {
+        'generated_at': base.get('generated_at'),
+        'timezone': base.get('timezone'),
+        'customer_type': customer_type_filter,
+        'estado_actual': {
+            'pedidos_sin_ver': int(orders_kpi.get('received') or 0),
+            'pedidos_sin_preparar': int(orders_kpi.get('seen') or 0),
+            'stock_critico': int(catalog_kpi.get('low_stock_count') or 0),
+            'ventas_hoy': float(round(float(sales_kpi.get('revenue_today') or 0.0), 2)),
+            'pedidos_hoy': int(sales_kpi.get('orders_today') or 0),
+            'repartidores_online': int(drivers_kpi.get('online') or 0),
+            'repartidores_totales': int(drivers_kpi.get('total') or 0),
+        },
+        'alertas': alertas,
+        'actividad_tiempo_real': recent_items[:20],
+        'resumen': base.get('summary') if isinstance(base, dict) else {},
+    }
+
+
+@app.get('/admin/resumen-ejecutivo')
+def admin_resumen_ejecutivo(
+    request: Request,
+    days: int = 30,
+    customer_type: Optional[str] = None,
+    current_admin=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role not in ('owner', 'admin'):
+        raise HTTPException(status_code=403, detail='No autorizado')
+    scope_filter = _resolve_admin_customer_type_filter(current_admin, customer_type)
+    payload = _build_admin_resumen_ejecutivo(
+        db=db,
+        customer_type_filter=scope_filter,
+        days=days,
+    )
+    headers = _cors_headers_for_request(request)
+    return JSONResponse(status_code=200, content=jsonable_encoder(payload), headers=headers)
+
+
+@app.get('/admin/push/config')
+def admin_push_config(
+    request: Request,
+    current_admin=Depends(get_current_admin_user),
+):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role not in ('owner', 'admin', 'repartidor'):
+        raise HTTPException(status_code=403, detail='No autorizado')
+    web_cfg = _firebase_web_config()
+    payload = {
+        'enabled': bool(_fcm_enabled()),
+        'firebase_web_config_ready': bool(_firebase_web_config_ready(web_cfg)),
+        'vapid_key_present': bool(_firebase_web_vapid_key()),
+        'firebase_web_config': web_cfg,
+        'vapid_key': _firebase_web_vapid_key(),
+    }
+    headers = _cors_headers_for_request(request)
+    return JSONResponse(status_code=200, content=payload, headers=headers)
+
+
+@app.post('/admin/push/tokens/register', response_model=schemas.AdminPushTokenResponse)
+def admin_push_token_register(
+    payload: schemas.AdminPushTokenRegister,
+    request: Request,
+    current_admin=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role not in ('owner', 'admin', 'repartidor'):
+        raise HTTPException(status_code=403, detail='No autorizado')
+    token = str(getattr(payload, 'token', '') or '').strip()
+    if len(token) < 24:
+        raise HTTPException(status_code=400, detail='Token inválido')
+
+    _ensure_push_device_tokens_table()
+    scope = _resolve_admin_customer_type_filter(current_admin, getattr(payload, 'business_scope', None))
+    platform = str(getattr(payload, 'platform', '') or 'ios').strip().lower()[:30] or 'ios'
+    device_label = str(getattr(payload, 'device_label', '') or '').strip()[:120] or None
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    row = db.query(models.PushDeviceToken).filter(models.PushDeviceToken.token == token).first()
+    if row is None:
+        row = models.PushDeviceToken(
+            token=token,
+            platform=platform,
+            device_label=device_label,
+            business_scope=scope or 'mayorista',
+            admin_user_id=getattr(current_admin, 'id', None),
+            admin_username=str(getattr(current_admin, 'username', '') or '').strip() or None,
+            is_active=True,
+            last_seen_at=now_utc,
+        )
+    else:
+        row.platform = platform
+        row.device_label = device_label
+        row.business_scope = scope or row.business_scope or 'mayorista'
+        row.admin_user_id = getattr(current_admin, 'id', None)
+        row.admin_username = str(getattr(current_admin, 'username', '') or '').strip() or None
+        row.is_active = True
+        row.last_seen_at = now_utc
+    try:
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail='No se pudo guardar el token')
+
+    headers = _cors_headers_for_request(request)
+    return JSONResponse(
+        status_code=200,
+        content=jsonable_encoder(
+            {
+                'ok': True,
+                'id': row.id,
+                'platform': row.platform,
+                'business_scope': row.business_scope,
+                'token_tail': token[-10:],
+                'is_active': bool(row.is_active),
+                'updated_at': row.updated_at or row.created_at,
+            }
+        ),
+        headers=headers,
+    )
+
+
+@app.post('/admin/push/tokens/unregister')
+def admin_push_token_unregister(
+    payload: schemas.AdminPushTokenUnregister,
+    request: Request,
+    current_admin=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role not in ('owner', 'admin', 'repartidor'):
+        raise HTTPException(status_code=403, detail='No autorizado')
+    token = str(getattr(payload, 'token', '') or '').strip()
+    if not token:
+        raise HTTPException(status_code=400, detail='Token requerido')
+    _ensure_push_device_tokens_table()
+    try:
+        row = db.query(models.PushDeviceToken).filter(models.PushDeviceToken.token == token).first()
+        if row is not None:
+            row.is_active = False
+            row.updated_at = datetime.datetime.now(datetime.timezone.utc)
+            db.add(row)
+            db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    headers = _cors_headers_for_request(request)
+    return JSONResponse(status_code=200, content={'ok': True}, headers=headers)
+
+
 # -----------------------------
 # Orders
 # -----------------------------
@@ -13119,6 +13615,21 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
         except Exception:
             pass
         await push_event({"action": "order_created", "order": payload})
+        try:
+            _enqueue_admin_push_event(
+                event_type='order_new',
+                title='Pedido nuevo',
+                body=f"Nuevo pedido #{payload.get('id')} por {round(float(payload.get('total') or 0), 2)}",
+                payload={
+                    'order_id': payload.get('id'),
+                    'status': _normalize_order_status(payload.get('status') or 'recibido'),
+                    'customer_type': payload.get('customer_type') or 'mayorista',
+                    'total': payload.get('total') or 0,
+                },
+                business_scope=payload.get('customer_type') or 'mayorista',
+            )
+        except Exception:
+            logger.exception('Could not enqueue push event for new order id=%s', payload.get('id') if isinstance(payload, dict) else None)
         # If order creation decremented stock, update snapshot and notify product watchers.
         try:
             # Product stock updates
@@ -13133,6 +13644,41 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
                         await push_event({"action": "updated", "product": {"id": pid}})
                 except Exception:
                     logger.exception('push_event product updates after order failed')
+                try:
+                    low_stock_now: List[Dict[str, Any]] = []
+                    for pid in list(updated)[:120]:
+                        try:
+                            prod = crud.get_product(db, int(pid))
+                        except Exception:
+                            prod = None
+                        if not prod:
+                            continue
+                        stock_val = _ops_stock_value(prod)
+                        threshold = _ops_stock_threshold(prod)
+                        if stock_val > threshold:
+                            continue
+                        low_stock_now.append(
+                            {
+                                'id': getattr(prod, 'id', None),
+                                'name': getattr(prod, 'name', None),
+                                'stock': float(round(stock_val, 3)),
+                                'threshold': float(round(threshold, 3)),
+                            }
+                        )
+                    if low_stock_now:
+                        _enqueue_admin_push_event(
+                            event_type='stock_critical',
+                            title='Stock crítico detectado',
+                            body=f'{len(low_stock_now)} productos quedaron en stock crítico.',
+                            payload={
+                                'event_type': 'stock_critical',
+                                'items': len(low_stock_now),
+                                'customer_type': payload.get('customer_type') if isinstance(payload, dict) else 'mayorista',
+                            },
+                            business_scope=(payload.get('customer_type') if isinstance(payload, dict) else 'mayorista'),
+                        )
+                except Exception:
+                    logger.exception('Could not enqueue stock critical push after order id=%s', getattr(order, 'id', None))
             # Consumptions consumed: reduce quantities in consumos.json on disk
             consumed = getattr(order, '_consumos_consumed', None)
             if consumed:
@@ -15998,7 +16544,28 @@ def _inject_admin_config(content: str) -> str:
         maps_key = str(GOOGLE_MAPS_JS_API_KEY or '').strip()
     except Exception:
         maps_key = ''
-    return (content or '').replace('__GOOGLE_MAPS_API_KEY__', maps_key)
+    firebase_cfg = _firebase_web_config()
+    try:
+        firebase_cfg_json = json.dumps(firebase_cfg, ensure_ascii=False)
+    except Exception:
+        firebase_cfg_json = '{}'
+    try:
+        vapid_key = _firebase_web_vapid_key()
+    except Exception:
+        vapid_key = ''
+    build_version = str(
+        os.environ.get('DEPLOY_COMMIT')
+        or os.environ.get('RENDER_GIT_COMMIT')
+        or os.environ.get('HEROKU_SLUG_COMMIT')
+        or int(time.time())
+    )
+    return (
+        (content or '')
+        .replace('__GOOGLE_MAPS_API_KEY__', maps_key)
+        .replace('__FIREBASE_WEB_CONFIG__', firebase_cfg_json)
+        .replace('__FIREBASE_VAPID_KEY__', vapid_key)
+        .replace('__PWA_BUILD_VERSION__', build_version)
+    )
 
 
 # -------------------------------------------------------------------
@@ -16046,13 +16613,30 @@ if os.path.exists(FRONTEND_DIR):
         try:
             content = re.sub(r'app\.js(?:\?[^"]*)?"', f'app.js?v={ver}"', content)
             content = re.sub(r'styles\.css(?:\?[^"]*)?"', f'styles.css?v={ver}"', content)
+            content = re.sub(r'service-worker\.js(?:\?[^"]*)?"', f'service-worker.js?v={ver}"', content)
         except Exception:
             content = content.replace('app.js"', f'app.js?v={ver}"').replace('styles.css"', f'styles.css?v={ver}"')
-        return Response(content=content, media_type='text/html')
+        return Response(
+            content=content,
+            media_type='text/html',
+            headers={
+                'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+                'Pragma': 'no-cache',
+                'Expires': '0',
+            },
+        )
 
     @app.head("/admin/index.html")
     async def admin_index_head():
         return Response(status_code=200)
+
+    @app.get("/admin")
+    async def admin_root_redirect():
+        return RedirectResponse(url="/admin/index.html", status_code=307)
+
+    @app.get("/admin/")
+    async def admin_root_redirect_slash():
+        return RedirectResponse(url="/admin/index.html", status_code=307)
 
     @app.get("/admin/repartidor.html")
     async def admin_repartidor():
@@ -16072,7 +16656,37 @@ if os.path.exists(FRONTEND_DIR):
             content = re.sub(r'styles\.css(?:\?[^"]*)?"', f'styles.css?v={ver}"', content)
         except Exception:
             content = content.replace('repartidor.js"', f'repartidor.js?v={ver}"').replace('styles.css"', f'styles.css?v={ver}"')
-        return Response(content=content, media_type='text/html')
+        return Response(
+            content=content,
+            media_type='text/html',
+            headers={
+                'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+                'Pragma': 'no-cache',
+                'Expires': '0',
+            },
+        )
+
+    @app.get("/admin/service-worker.js")
+    async def admin_service_worker():
+        path = os.path.join(FRONTEND_DIR, 'service-worker.js')
+        if not os.path.exists(path):
+            raise HTTPException(status_code=404, detail='Service worker not found')
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except Exception as e:
+            logger.exception('Failed reading admin service-worker.js: %s', e)
+            raise HTTPException(status_code=500, detail='Failed to read service worker')
+        content = _inject_admin_config(content)
+        return Response(
+            content=content,
+            media_type='application/javascript',
+            headers={
+                'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+                'Pragma': 'no-cache',
+                'Expires': '0',
+            },
+        )
 
     @app.get("/admin/repartidor-app.apk")
     async def admin_repartidor_apk():
@@ -17008,6 +17622,30 @@ async def update_order_status(order_id: str, request: Request, background_tasks:
             od['status_fallback'] = True
     except Exception:
         pass
+
+    try:
+        status_push = _normalize_order_status(od.get('status') or status_norm)
+        push_titles = {
+            'visto': 'Pedido revisado',
+            'preparado': 'Pedido preparado',
+            'enviado': 'Pedido en camino',
+            'entregado': 'Pedido entregado',
+        }
+        if status_push in push_titles:
+            _enqueue_admin_push_event(
+                event_type=f'order_{status_push}',
+                title=push_titles.get(status_push) or 'Actualización de pedido',
+                body=f"Pedido #{od.get('id')} ahora está en estado {status_push}.",
+                payload={
+                    'order_id': od.get('id'),
+                    'status': status_push,
+                    'customer_type': od.get('customer_type') or 'mayorista',
+                    'total': od.get('total') or 0,
+                },
+                business_scope=od.get('customer_type') or 'mayorista',
+            )
+    except Exception:
+        logger.exception('Could not enqueue push for order status update id=%s', od.get('id') if isinstance(od, dict) else None)
 
     try:
         status_effective = _normalize_order_status(od.get('status') or status_norm)

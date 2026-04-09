@@ -225,6 +225,27 @@ class Token(BaseModel):
     token_type: str = 'bearer'
 
 
+class AdminPushTokenRegister(BaseModel):
+    token: str
+    platform: Optional[str] = 'ios'
+    device_label: Optional[str] = None
+    business_scope: Optional[str] = None
+
+
+class AdminPushTokenUnregister(BaseModel):
+    token: str
+
+
+class AdminPushTokenResponse(BaseModel):
+    ok: bool = True
+    id: Optional[int] = None
+    platform: Optional[str] = None
+    business_scope: Optional[str] = None
+    token_tail: Optional[str] = None
+    is_active: Optional[bool] = None
+    updated_at: Optional[datetime] = None
+
+
 class LoginRequest(BaseModel):
     email: str
     password: str

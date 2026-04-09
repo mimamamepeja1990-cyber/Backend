@@ -1,16 +1,38 @@
 const CACHE_PREFIX = 'distriar-admin-pwa';
-const CACHE_VERSION = 'v1';
+const CACHE_VERSION = '__PWA_BUILD_VERSION__';
 const STATIC_CACHE = `${CACHE_PREFIX}-${CACHE_VERSION}`;
+const DYNAMIC_CACHE = `${CACHE_PREFIX}-dyn-${CACHE_VERSION}`;
+
+const FIREBASE_WEB_CONFIG = (() => {
+  try {
+    const cfg = __FIREBASE_WEB_CONFIG__;
+    return cfg && typeof cfg === 'object' ? cfg : {};
+  } catch (_) {
+    return {};
+  }
+})();
 
 const APP_SHELL = [
   '/admin/index.html',
   '/admin/app.js',
   '/admin/styles.css',
   '/admin/icon.png',
+  '/admin/icon-192.png',
+  '/admin/icon-512.png',
   '/admin/manifest.webmanifest',
 ];
 
 const STATIC_EXT_RE = /\.(?:html|css|js|png|jpg|jpeg|webp|svg|gif|ico|json|webmanifest)$/i;
+const DYNAMIC_PATH_RE = /^\/(?:admin\/(?:resumen-ejecutivo|operations\/overview|sales\/stats|driver-insights|locations)|orders|products|api\/consumos|promotions)/i;
+
+function toCacheKey(request) {
+  try {
+    const url = new URL(request.url);
+    return new Request(url.pathname, { method: 'GET' });
+  } catch (_) {
+    return request;
+  }
+}
 
 function isSameOrigin(url) {
   try {
@@ -27,6 +49,47 @@ function isAdminStaticAsset(url) {
   return STATIC_EXT_RE.test(path);
 }
 
+function isDynamicData(url) {
+  if (!isSameOrigin(url)) return false;
+  return DYNAMIC_PATH_RE.test(String(url.pathname || ''));
+}
+
+function offlineHtmlResponse() {
+  const html = `
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sin conexión</title>
+    <style>
+      body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#f7f8fb;margin:0;display:flex;min-height:100vh;align-items:center;justify-content:center;color:#0f172a}
+      .card{max-width:420px;background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:20px 22px;box-shadow:0 10px 30px rgba(15,23,42,.08)}
+      h1{font-size:20px;margin:0 0 10px}
+      p{margin:0;color:#475569;line-height:1.5}
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Sin conexión</h1>
+      <p>No pudimos cargar el panel en este momento. Reintentá cuando vuelva la conexión.</p>
+    </div>
+  </body>
+</html>`;
+  return new Response(html, {
+    status: 503,
+    statusText: 'Offline',
+    headers: { 'Content-Type': 'text/html; charset=utf-8' },
+  });
+}
+
+async function putIfValid(cacheName, request, response) {
+  if (!response || !response.ok) return;
+  const cache = await caches.open(cacheName);
+  const key = toCacheKey(request);
+  await cache.put(key, response.clone());
+}
+
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(STATIC_CACHE).then((cache) => cache.addAll(APP_SHELL)).catch(() => null)
@@ -39,7 +102,7 @@ self.addEventListener('activate', (event) => {
     caches.keys().then((keys) =>
       Promise.all(
         keys
-          .filter((key) => key.startsWith(CACHE_PREFIX) && key !== STATIC_CACHE)
+          .filter((key) => key.startsWith(CACHE_PREFIX) && key !== STATIC_CACHE && key !== DYNAMIC_CACHE)
           .map((key) => caches.delete(key))
       )
     )
@@ -49,33 +112,43 @@ self.addEventListener('activate', (event) => {
 
 async function networkFirstNavigation(request) {
   try {
-    const networkResp = await fetch(request);
+    const networkResp = await fetch(request, { cache: 'no-store' });
+    await putIfValid(STATIC_CACHE, '/admin/index.html', networkResp);
     return networkResp;
   } catch (_) {
-    const cached = await caches.match('/admin/index.html');
+    const cached = await caches.match('/admin/index.html', { ignoreSearch: true });
     if (cached) return cached;
-    return new Response('Offline', { status: 503, statusText: 'Offline' });
+    return offlineHtmlResponse();
   }
 }
 
-async function staleWhileRevalidate(request) {
-  const cache = await caches.open(STATIC_CACHE);
-  const cached = await cache.match(request, { ignoreSearch: true });
-  const networkPromise = fetch(request)
-    .then((resp) => {
-      if (resp && resp.ok) {
-        cache.put(request, resp.clone()).catch(() => null);
-      }
-      return resp;
-    })
-    .catch(() => cached || null);
-
-  if (cached) {
-    return cached;
+async function networkFirstDynamic(request) {
+  const key = toCacheKey(request);
+  try {
+    const networkResp = await fetch(request, { cache: 'no-store' });
+    await putIfValid(DYNAMIC_CACHE, key, networkResp);
+    return networkResp;
+  } catch (_) {
+    const cached = await caches.match(key, { ignoreSearch: true });
+    if (cached) return cached;
+    return new Response(JSON.stringify({ offline: true }), {
+      status: 503,
+      headers: { 'Content-Type': 'application/json; charset=utf-8' },
+    });
   }
-  const networkResp = await networkPromise;
-  if (networkResp) return networkResp;
-  return new Response('Offline', { status: 503, statusText: 'Offline' });
+}
+
+async function cacheFirstStatic(request) {
+  const key = toCacheKey(request);
+  const cached = await caches.match(key, { ignoreSearch: true });
+  if (cached) return cached;
+  try {
+    const networkResp = await fetch(request);
+    await putIfValid(STATIC_CACHE, key, networkResp);
+    return networkResp;
+  } catch (_) {
+    return new Response('Offline', { status: 503, statusText: 'Offline' });
+  }
 }
 
 self.addEventListener('fetch', (event) => {
@@ -89,6 +162,68 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  if (!isAdminStaticAsset(url)) return;
-  event.respondWith(staleWhileRevalidate(request));
+  if (isDynamicData(url)) {
+    event.respondWith(networkFirstDynamic(request));
+    return;
+  }
+
+  if (isAdminStaticAsset(url)) {
+    event.respondWith(cacheFirstStatic(request));
+  }
+});
+
+self.addEventListener('message', (event) => {
+  const data = event && event.data ? event.data : {};
+  if (data && data.type === 'SKIP_WAITING') {
+    self.skipWaiting();
+  }
+});
+
+try {
+  importScripts('https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js');
+  importScripts('https://www.gstatic.com/firebasejs/10.13.2/firebase-messaging-compat.js');
+  if (FIREBASE_WEB_CONFIG && FIREBASE_WEB_CONFIG.apiKey && FIREBASE_WEB_CONFIG.messagingSenderId && FIREBASE_WEB_CONFIG.appId) {
+    firebase.initializeApp(FIREBASE_WEB_CONFIG);
+    const messaging = firebase.messaging();
+    messaging.onBackgroundMessage((payload) => {
+      const data = payload && payload.data ? payload.data : {};
+      const note = payload && payload.notification ? payload.notification : {};
+      const title = String(note.title || data.title || 'Actualización operativa');
+      const body = String(note.body || data.body || 'Hay novedades en el panel.');
+      const targetUrl = String(data.url || '/admin/index.html');
+      self.registration.showNotification(title, {
+        body,
+        icon: '/admin/icon-192.png',
+        badge: '/admin/icon-192.png',
+        data: {
+          url: targetUrl,
+          order_id: data.order_id || '',
+          open_section: data.open_section || '',
+        },
+      });
+    });
+  }
+} catch (_) {
+  // firebase is optional; PWA must continue working without push.
+}
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  const data = event && event.notification ? (event.notification.data || {}) : {};
+  const targetUrl = String(data.url || '/admin/index.html');
+  event.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true }).then((windowClients) => {
+      for (const client of windowClients) {
+        try {
+          const currentUrl = String(client.url || '');
+          if (currentUrl.includes('/admin/')) {
+            client.focus();
+            client.navigate(targetUrl);
+            return client;
+          }
+        } catch (_) {}
+      }
+      return clients.openWindow(targetUrl);
+    })
+  );
 });

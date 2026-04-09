@@ -1,25 +1,32 @@
 {
-  "name": "Distriar Panel Admin",
-  "short_name": "Admin",
-  "description": "Panel operativo para catalogo, ventas, entregas y rutas.",
-  "start_url": "/admin/index.html",
+  "id": "/admin/",
+  "name": "DistriAr Panel Ejecutivo",
+  "short_name": "DistriAr",
+  "description": "Panel operativo y ejecutivo para catálogo, ventas, entregas y rutas.",
+  "start_url": "/admin/index.html?source=pwa",
   "scope": "/admin/",
+  "display_override": ["standalone", "minimal-ui"],
   "display": "standalone",
-  "background_color": "#fbfaf9",
+  "background_color": "#0a2240",
   "theme_color": "#0a2240",
   "orientation": "portrait-primary",
   "icons": [
     {
-      "src": "/admin/icon.png",
+      "src": "/admin/icon-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any maskable"
     },
     {
-      "src": "/admin/icon.png",
+      "src": "/admin/icon-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"
+    },
+    {
+      "src": "/admin/icon.png",
+      "sizes": "96x96",
+      "type": "image/png"
     }
   ]
 }

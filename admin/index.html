@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AdministraciÃ³n</title>
+  <title>Administración</title>
   <style>
     /* Admin tabs and badges */
     .btn.tab { background: #f3f4f6; border: 1px solid #e5e7eb; padding: 6px 10px; border-radius: 999px; font-weight:600 }
@@ -16,14 +16,44 @@
   <link rel="stylesheet" href="styles.css?v=8">
   <!-- Fix: use admin-scoped image path so the favicon is served by the /admin static mount -->
   <link rel="icon" type="image/png" href="icon.png">
-  <link rel="apple-touch-icon" href="icon.png">
+  <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
+  <link rel="apple-touch-icon" sizes="512x512" href="icon-512.png">
   <link rel="manifest" href="manifest.webmanifest">
   <meta name="theme-color" content="#0a2240">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="Panel Admin">
   <script>
     window.GOOGLE_MAPS_API_KEY = "__GOOGLE_MAPS_API_KEY__";
+    window.FIREBASE_WEB_CONFIG = __FIREBASE_WEB_CONFIG__;
+    window.FIREBASE_VAPID_KEY = "__FIREBASE_VAPID_KEY__";
+    window.PWA_BUILD_VERSION = "__PWA_BUILD_VERSION__";
+
+    // Self-heal stale PWA cache/service worker that can cause blank screens.
+    (function forceAdminPwaRefreshOnce(){
+      try{
+        var resetKey = 'admin_pwa_reset_' + String(window.PWA_BUILD_VERSION || 'v0');
+        if (localStorage.getItem(resetKey) === '1') return;
+        if (!('serviceWorker' in navigator)) return;
+        navigator.serviceWorker.getRegistrations().then(function(regs){
+          var tasks = [];
+          (regs || []).forEach(function(reg){
+            try{
+              var scope = String(reg && reg.scope || '');
+              if (scope.indexOf('/admin/') !== -1) tasks.push(reg.unregister());
+            }catch(_){}
+          });
+          return Promise.all(tasks);
+        }).then(function(){
+          if (!window.caches || !caches.keys) return;
+          return caches.keys().then(function(keys){
+            return Promise.all((keys || []).filter(function(k){ return String(k || '').indexOf('distriar-admin-pwa') === 0; }).map(function(k){ return caches.delete(k); }));
+          });
+        }).finally(function(){
+          try{ localStorage.setItem(resetKey, '1'); }catch(_){}
+        });
+      }catch(_){}
+    })();
   </script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -70,12 +100,12 @@
           <input id="authUser" name="username" autocomplete="username" placeholder="Usuario" required />
         </div>
         <div class="field">
-          <label for="authPass">ContraseÃ±a</label>
-          <input id="authPass" name="password" type="password" autocomplete="current-password" placeholder="ContraseÃ±a" required />
+          <label for="authPass">Contraseña</label>
+          <input id="authPass" name="password" type="password" autocomplete="current-password" placeholder="Contraseña" required />
         </div>
         <label class="auth-show">
           <input id="authShowPass" type="checkbox" />
-          Mostrar contraseÃ±a
+          Mostrar contraseña
         </label>
         <div id="authError" class="auth-error" role="alert" aria-live="polite"></div>
         <div class="auth-actions">
@@ -89,15 +119,16 @@
     <aside class="sidebar">
       <div class="brand">
         <svg width="28" height="28" viewBox="0 0 24 24" fill="none"><path d="M12 2l3 7h7l-6 5 3 8-7-4-7 4 3-8-6-5h7z" fill="#fff"/></svg>
-        <span>CatÃ¡logo</span>
+        <span>Catálogo</span>
       </div>
       <nav>
         <a class="active" data-section="dashboard">Dashboard</a>
-        <a data-section="catalog">CatÃ¡logo</a>
+        <a data-section="executive">Panel Ejecutivo</a>
+        <a data-section="catalog">Catálogo</a>
         <a class="role-hidden" data-section="retail-prices" data-business-scope-only="minorista">Precios minorista</a>
-        <a data-section="consumos">ConsumiciÃ³n inmediata</a>
+        <a data-section="consumos">Consumición inmediata</a>
         <a data-section="promotions">Promociones</a>
-        <a data-section="promo-images">ImÃ¡genes Promocionales</a>
+        <a data-section="promo-images">Imágenes Promocionales</a>
         <a data-section="filters">Filtros</a>
         <a data-section="orders">Pedidos</a>
         <a data-section="customers">Clientes</a>
@@ -111,9 +142,9 @@
       <div class="footer-controls">
         <div class="user-panel" id="userPanel">
           <div class="user-meta">
-            <div class="user-name" id="currentUserLabel">â€”</div>
-            <div class="user-role" id="currentRoleLabel">â€”</div>
-            <div class="user-role" id="currentBusinessScopeLabel">â€”</div>
+            <div class="user-name" id="currentUserLabel">—</div>
+            <div class="user-role" id="currentRoleLabel">—</div>
+            <div class="user-role" id="currentBusinessScopeLabel">—</div>
           </div>
           <button id="logoutBtn" class="btn" type="button">Salir</button>
         </div>
@@ -123,15 +154,16 @@
       <header>
         <div class="header-left">
           <h1 id="title">Dashboard</h1>
-          <div class="counter">Productos: <span id="productCounter">â€”</span></div>
+          <div class="counter">Productos: <span id="productCounter">—</span></div>
         </div>
-          <button id="mobileMenuBtn" class="mobile-menu-btn" aria-label="Abrir menÃº" aria-expanded="false">â˜°</button>
-  <div class="api-indicator">API: <span id="apiBaseIndicator">â€”</span></div>
+          <button id="mobileMenuBtn" class="mobile-menu-btn" aria-label="Abrir menú" aria-expanded="false">☰</button>
+  <div class="api-indicator">API: <span id="apiBaseIndicator">—</span></div>
   <div class="ws-indicator" id="wsStatus" title="Estado WebSocket" aria-live="polite">WS: <span class="dot" aria-hidden="true"></span></div>
         <div class="top-actions">
           <button id="refreshBtn" class="btn">Actualizar</button>
+          <button id="enablePushBtn" class="btn" type="button">Activar alertas</button>
           <button id="installPwaBtn" class="btn hidden" type="button">Instalar app</button>
-          <button id="backupBtn" class="btn" title="Crear backup remoto (si estÃ¡ configurado)">Backup</button>
+          <button id="backupBtn" class="btn" title="Crear backup remoto (si está configurado)">Backup</button>
           <button id="newBtn" class="btn primary">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
             Nuevo producto
@@ -143,13 +175,13 @@
         <div class="dashboard-shell">
           <div class="dashboard-hero-panel">
             <div class="dashboard-hero-copy">
-              <div class="dashboard-hero-kicker">OperaciÃƒÂ³n</div>
+              <div class="dashboard-hero-kicker">Operación</div>
               <h2 id="dashboardHeroTitle" class="dashboard-hero-title">Lo importante primero</h2>
               <div class="dashboard-hero-focus">
                 <span id="dashboardHeroValue" class="dashboard-hero-value">-</span>
                 <span id="dashboardHeroLabel" class="dashboard-hero-label">alertas activas</span>
               </div>
-              <p id="dashboardHeroMeta" class="dashboard-hero-meta">PriorizÃƒÂ¡ pedidos, preparaciones y stock desde un solo bloque.</p>
+              <p id="dashboardHeroMeta" class="dashboard-hero-meta">Priorizá pedidos, preparaciones y stock desde un solo bloque.</p>
               <ul id="dashboardHeroInsights" class="dashboard-hero-insights" hidden></ul>
               <div class="dashboard-hero-actions">
                 <button id="dashboardHeroPrimaryBtn" class="btn primary" type="button" data-dashboard-action="orders">Ver pedidos</button>
@@ -158,22 +190,22 @@
             </div>
             <div id="dashboardPriorityGrid" class="dashboard-priority-grid">
               <button id="dashboardAlertUnseen" class="dashboard-priority-card tone-critical" type="button" data-dashboard-action="orders">
-                <span class="dashboard-priority-kicker">AtenciÃƒÂ³n inmediata</span>
+                <span class="dashboard-priority-kicker">Atención inmediata</span>
                 <strong class="dashboard-priority-value">-</strong>
                 <span class="dashboard-priority-label">Pedidos sin ver</span>
-                <span class="dashboard-priority-meta">Entraron al panel y todavÃƒÂ­a no se revisaron.</span>
+                <span class="dashboard-priority-meta">Entraron al panel y todavía no se revisaron.</span>
               </button>
               <button id="dashboardAlertUnprepared" class="dashboard-priority-card tone-warn" type="button" data-dashboard-action="preparations">
                 <span class="dashboard-priority-kicker">Siguiente paso</span>
                 <strong class="dashboard-priority-value">-</strong>
                 <span class="dashboard-priority-label">Pedidos sin preparar</span>
-                <span class="dashboard-priority-meta">Ya se vieron, pero todavÃƒÂ­a no quedaron listos.</span>
+                <span class="dashboard-priority-meta">Ya se vieron, pero todavía no quedaron listos.</span>
               </button>
               <button id="dashboardAlertLowStock" class="dashboard-priority-card tone-stock" type="button" data-dashboard-action="catalog">
                 <span class="dashboard-priority-kicker">Control interno</span>
                 <strong class="dashboard-priority-value">-</strong>
                 <span class="dashboard-priority-label">Stock bajo</span>
-                <span class="dashboard-priority-meta">Productos que pueden frenar venta o preparaciÃƒÂ³n.</span>
+                <span class="dashboard-priority-meta">Productos que pueden frenar venta o preparación.</span>
               </button>
             </div>
           </div>
@@ -183,20 +215,20 @@
               <div class="dashboard-group-head">
                 <div>
                   <div class="dashboard-group-kicker">Negocio</div>
-                  <h3>CÃ³mo viene la venta</h3>
+                  <h3>Cómo viene la venta</h3>
                 </div>
-                <div class="dashboard-group-note">Ãšltimos 30 dÃ­as</div>
+                <div class="dashboard-group-note">Últimos 30 días</div>
               </div>
               <div class="dashboard-kpi-grid">
                 <article class="dashboard-kpi-card">
                   <span class="dashboard-kpi-label">Ventas</span>
                   <strong id="dashboardSalesRevenue30" class="dashboard-kpi-value">-</strong>
-                  <span class="dashboard-kpi-meta">FacturaciÃƒÂ³n acumulada del perÃƒÂ­odo.</span>
+                  <span class="dashboard-kpi-meta">Facturación acumulada del período.</span>
                 </article>
                 <article class="dashboard-kpi-card">
                   <span class="dashboard-kpi-label">Pedidos</span>
                   <strong id="dashboardSalesOrders30" class="dashboard-kpi-value">-</strong>
-                  <span class="dashboard-kpi-meta">Volumen total procesado en 30 dÃƒÂ­as.</span>
+                  <span class="dashboard-kpi-meta">Volumen total procesado en 30 días.</span>
                 </article>
                 <article class="dashboard-kpi-card">
                   <span class="dashboard-kpi-label">Ticket promedio</span>
@@ -209,7 +241,7 @@
             <section class="dashboard-group-card dashboard-group-catalog">
               <div class="dashboard-group-head">
                 <div>
-                  <div class="dashboard-group-kicker">CatÃƒÂ¡logo</div>
+                  <div class="dashboard-group-kicker">Catálogo</div>
                   <h3>Salud del inventario</h3>
                 </div>
                 <div class="dashboard-group-note">Base activa</div>
@@ -223,12 +255,12 @@
                 <article class="dashboard-kpi-card" data-dashboard-action="catalog">
                   <span class="dashboard-kpi-label">Precio promedio</span>
                   <strong id="dashboardAvgPrice" class="dashboard-kpi-value">-</strong>
-                  <span class="dashboard-kpi-meta">Referencia rÃƒÂ¡pida del catÃƒÂ¡logo mayorista.</span>
+                  <span class="dashboard-kpi-meta">Referencia rápida del catálogo mayorista.</span>
                 </article>
                 <article class="dashboard-kpi-card" data-dashboard-action="filters">
-                  <span class="dashboard-kpi-label">Cobertura de categorÃƒÂ­as</span>
+                  <span class="dashboard-kpi-label">Cobertura de categorías</span>
                   <strong id="dashboardCategoryCoverage" class="dashboard-kpi-value">-</strong>
-                  <span id="dashboardCategoryCoverageMeta" class="dashboard-kpi-meta">Esperando datos del catÃƒÂ¡logo.</span>
+                  <span id="dashboardCategoryCoverageMeta" class="dashboard-kpi-meta">Esperando datos del catálogo.</span>
                 </article>
               </div>
             </section>
@@ -236,24 +268,24 @@
 
           <div class="dashboard-action-rail">
             <button class="dashboard-action-card" type="button" data-dashboard-action="orders">
-              <span class="dashboard-action-kicker">AcciÃƒÂ³n</span>
+              <span class="dashboard-action-kicker">Acción</span>
               <strong>Ir a Pedidos</strong>
-              <span>RevisÃƒÂ¡ ingresos nuevos y movimiento del dÃƒÂ­a.</span>
+              <span>Revisá ingresos nuevos y movimiento del día.</span>
             </button>
             <button class="dashboard-action-card" type="button" data-dashboard-action="preparations">
               <span class="dashboard-action-kicker">Flujo</span>
               <strong>Ir a Preparaciones</strong>
-              <span>MarcÃƒÂ¡ listos y mantenÃƒÂ© la cocina ordenada.</span>
+              <span>Marcá listos y mantené la cocina ordenada.</span>
             </button>
             <button class="dashboard-action-card" type="button" data-dashboard-action="catalog">
-              <span class="dashboard-action-kicker">CatÃƒÂ¡logo</span>
-              <strong>Ir a CatÃƒÂ¡logo</strong>
+              <span class="dashboard-action-kicker">Catálogo</span>
+              <strong>Ir a Catálogo</strong>
               <span>Stock, precios e imagen del inventario activo.</span>
             </button>
             <button class="dashboard-action-card" type="button" data-dashboard-action="filters">
               <span class="dashboard-action-kicker">Orden</span>
               <strong>Ir a Filtros</strong>
-              <span>AjustÃƒÂ¡ cÃƒÂ³mo se clasifica y se muestra el surtido.</span>
+              <span>Ajustá cómo se clasifica y se muestra el surtido.</span>
             </button>
           </div>
         </div>
@@ -292,37 +324,37 @@
         <div class="cards">
           <div class="card">
             <h3>Total activos</h3>
-            <div id="totalActive" class="stat">â€”</div>
+            <div id="totalActive" class="stat">—</div>
           </div>
           <div class="card">
             <h3>Precio promedio</h3>
-            <div id="avgPrice" class="stat">â€”</div>
+            <div id="avgPrice" class="stat">—</div>
           </div>
           <div class="card">
-            <h3>Pedidos (30 dÃ­as)</h3>
-            <div id="salesOrders30" class="stat">â€”</div>
+            <h3>Pedidos (30 días)</h3>
+            <div id="salesOrders30" class="stat">—</div>
           </div>
           <div class="card">
-            <h3>Ventas (30 dÃ­as)</h3>
-            <div id="salesRevenue30" class="stat">â€”</div>
+            <h3>Ventas (30 días)</h3>
+            <div id="salesRevenue30" class="stat">—</div>
           </div>
           <div class="card">
             <h3>Ticket promedio</h3>
-            <div id="salesAvgTicket30" class="stat">â€”</div>
+            <div id="salesAvgTicket30" class="stat">—</div>
           </div>
         </div>
         <div class="dashboard-alerts">
-          <div id="alertLowStock" class="alert-item">âš  Productos con stock bajo: â€”</div>
-          <div id="alertOrdersUnseen" class="alert-item">âš  Pedidos sin ver: â€”</div>
-          <div id="alertOrdersUnprepared" class="alert-item">âš  Pedidos sin preparar: â€”</div>
+          <div id="alertLowStock" class="alert-item">⚠ Productos con stock bajo: —</div>
+          <div id="alertOrdersUnseen" class="alert-item">⚠ Pedidos sin ver: —</div>
+          <div id="alertOrdersUnprepared" class="alert-item">⚠ Pedidos sin preparar: —</div>
         </div>
         <div class="charts">
           <div class="chart-card category-chart-card">
-            <h4>Productos por categorÃ­a</h4>
+            <h4>Productos por categoría</h4>
             <div id="categoryChart" class="category-overview"></div>
           </div>
           <div class="chart-card sales-chart-card">
-            <h4>Ventas por dÃ­a (30 dÃ­as)</h4>
+            <h4>Ventas por día (30 días)</h4>
             <canvas id="salesChart"></canvas>
           </div>
         </div>
@@ -330,13 +362,13 @@
           <div class="chart-card driver-map-card">
             <h4>Repartidores en ruta</h4>
             <div id="driverMap" class="driver-map"></div>
-            <div id="driverMapEmpty" class="driver-map-empty">Esperando ubicaciÃ³n de repartidores...</div>
+            <div id="driverMapEmpty" class="driver-map-empty">Esperando ubicación de repartidores...</div>
             <div id="driverInspector" class="driver-inspector">
               <div class="driver-inspector-head">
                 <div>
                   <div class="driver-inspector-kicker">Operativa en vivo</div>
-                  <h5 id="driverInspectorTitle">SeleccionÃ¡ un repartidor</h5>
-                  <p id="driverInspectorMeta" class="driver-inspector-meta">HacÃ© click sobre un repartidor del mapa para ver pedidos activos, ruta e historial.</p>
+                  <h5 id="driverInspectorTitle">Seleccioná un repartidor</h5>
+                  <p id="driverInspectorMeta" class="driver-inspector-meta">Hacé click sobre un repartidor del mapa para ver pedidos activos, ruta e historial.</p>
                 </div>
                 <div id="driverInspectorTabs" class="driver-inspector-tabs" role="tablist" aria-label="Vistas del repartidor">
                   <button type="button" class="btn tab active" data-driver-view="orders">Pedidos activos</button>
@@ -347,56 +379,105 @@
               <div class="driver-metrics-grid">
                 <div class="driver-metric-card">
                   <span class="driver-metric-label">Km recorridos</span>
-                  <strong id="driverMetricKm" class="driver-metric-value">â€”</strong>
-                  <span id="driverMetricKmMeta" class="driver-metric-meta">SeleccionÃ¡ un repartidor</span>
+                  <strong id="driverMetricKm" class="driver-metric-value">—</strong>
+                  <span id="driverMetricKmMeta" class="driver-metric-meta">Seleccioná un repartidor</span>
                 </div>
                 <div class="driver-metric-card">
                   <span class="driver-metric-label">Tiempo activo</span>
-                  <strong id="driverMetricTime" class="driver-metric-value">â€”</strong>
+                  <strong id="driverMetricTime" class="driver-metric-value">—</strong>
                   <span id="driverMetricTimeMeta" class="driver-metric-meta">Operativa de hoy</span>
                 </div>
                 <div class="driver-metric-card">
                   <span class="driver-metric-label">Entregas completadas</span>
-                  <strong id="driverMetricCompleted" class="driver-metric-value">â€”</strong>
+                  <strong id="driverMetricCompleted" class="driver-metric-value">—</strong>
                   <span id="driverMetricCompletedMeta" class="driver-metric-meta">Operativa de hoy</span>
                 </div>
                 <div class="driver-metric-card">
                   <span class="driver-metric-label">Eficiencia</span>
-                  <strong id="driverMetricEfficiency" class="driver-metric-value">â€”</strong>
+                  <strong id="driverMetricEfficiency" class="driver-metric-value">—</strong>
                   <span id="driverMetricEfficiencyMeta" class="driver-metric-meta">Sobre pedidos gestionados</span>
                 </div>
               </div>
               <div id="driverInspectorBody" class="driver-inspector-body">
-                <div class="empty-note">SeleccionÃ¡ un repartidor para explorar su operaciÃ³n.</div>
+                <div class="empty-note">Seleccioná un repartidor para explorar su operación.</div>
               </div>
             </div>
           </div>
         </div>
         </section>
 
-        <!-- SecciÃ³n de gestiÃ³n de imÃ¡genes promocionales (top-level) -->
+        <section id="executive" class="section hidden">
+          <div class="executive-shell">
+            <div class="executive-head">
+              <div>
+                <div class="executive-kicker">Modo ejecutivo</div>
+                <h2>Resumen en tiempo real</h2>
+                <p id="executiveUpdatedAt" class="executive-subtitle">Esperando datos...</p>
+              </div>
+              <div class="executive-head-actions">
+                <button id="executiveRefreshBtn" class="btn" type="button">Actualizar</button>
+              </div>
+            </div>
+
+            <div class="executive-grid">
+              <article class="executive-card">
+                <span class="executive-card-label">Pedidos sin ver</span>
+                <strong id="execUnseen" class="executive-card-value">-</strong>
+              </article>
+              <article class="executive-card">
+                <span class="executive-card-label">Pedidos sin preparar</span>
+                <strong id="execUnprepared" class="executive-card-value">-</strong>
+              </article>
+              <article class="executive-card">
+                <span class="executive-card-label">Stock crítico</span>
+                <strong id="execCriticalStock" class="executive-card-value">-</strong>
+              </article>
+              <article class="executive-card">
+                <span class="executive-card-label">Ventas del día</span>
+                <strong id="execRevenueToday" class="executive-card-value">-</strong>
+              </article>
+            </div>
+
+            <div class="executive-columns">
+              <article class="executive-panel">
+                <h3>Alertas</h3>
+                <div id="execAlertsList" class="executive-list">
+                  <div class="empty-note">Sin alertas críticas por ahora.</div>
+                </div>
+              </article>
+              <article class="executive-panel">
+                <h3>Actividad en tiempo real</h3>
+                <div id="execActivityList" class="executive-list">
+                  <div class="empty-note">Todavía sin actividad reciente.</div>
+                </div>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <!-- Sección de gestión de imágenes promocionales (top-level) -->
         <section id="promo-images" class="section hidden">
-          <h2>ImÃ¡genes Promocionales</h2>
+          <h2>Imágenes Promocionales</h2>
           <div id="promoControlsWrapper" style="margin-bottom:18px;display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
             <input type="file" id="promoImageInput" accept="image/*" required style="display:none;" />
             <button type="button" id="promoImageSelectBtn" class="btn">Seleccionar imagen</button>
-            <span id="promoImageFileName" style="color:#555;font-size:15px;min-width:160px;">NingÃºn archivo seleccionado</span>
+            <span id="promoImageFileName" style="color:#555;font-size:15px;min-width:160px;">Ningún archivo seleccionado</span>
             <button type="button" class="btn primary" id="promoImageUploadBtn" disabled>Subir imagen</button>
           </div>
           <div id="promoImagesList" class="promo-images-list">
-            <div class="empty-note" id="promoFallback">Seleccione una imagen o recargue la pÃ¡gina para ver las imÃ¡genes existentes.</div>
+            <div class="empty-note" id="promoFallback">Seleccione una imagen o recargue la página para ver las imágenes existentes.</div>
           </div>
         </section>
 
       <section id="catalog" class="section hidden">
         <div class="controls">
-          <input id="searchInput" placeholder="Buscar por nombre, descripciÃ³n o cÃ³digo..." />
+          <input id="searchInput" placeholder="Buscar por nombre, descripción o código..." />
           <select id="categoryFilter"><option value="">Todas</option></select>
-          <select id="sortSelect"><option value="">Ordenar</option><option value="price_asc">Precio â†‘</option><option value="price_desc">Precio â†“</option><option value="name_asc">Nombre A-Z</option><option value="name_desc">Nombre Z-A</option></select>
-          <select id="pageSizeSelect" title="Cantidad por pÃ¡gina">
-            <option value="25">25 / pÃ¡g.</option>
-            <option value="50" selected>50 / pÃ¡g.</option>
-            <option value="100">100 / pÃ¡g.</option>
+          <select id="sortSelect"><option value="">Ordenar</option><option value="price_asc">Precio ↑</option><option value="price_desc">Precio ↓</option><option value="name_asc">Nombre A-Z</option><option value="name_desc">Nombre Z-A</option></select>
+          <select id="pageSizeSelect" title="Cantidad por página">
+            <option value="25">25 / pág.</option>
+            <option value="50" selected>50 / pág.</option>
+            <option value="100">100 / pág.</option>
           </select>
           <button id="exportCsvBtn" class="btn" title="Exportar productos a CSV">Exportar CSV</button>
           <button id="importCsvBtn" class="btn" title="Importar productos desde CSV">Importar CSV</button>
@@ -406,7 +487,7 @@
         </div>
         <div id="autoImageProgress" class="auto-image-progress hidden" aria-live="polite">
           <div class="auto-image-head">
-            <span>Autoâ€‘imÃ¡genes</span>
+            <span>Auto-imágenes</span>
             <span id="autoImageProgressLabel">0%</span>
           </div>
           <div class="auto-image-track">
@@ -420,7 +501,7 @@
         <div id="bulkBar" class="bulk-bar hidden" aria-live="polite">
           <div class="bulk-left">
             <span class="bulk-count"><strong id="bulkCount">0</strong> seleccionados</span>
-            <span id="bulkHint" class="bulk-hint">EdiciÃ³n masiva: aplicÃ¡ cambios a los seleccionados.</span>
+            <span id="bulkHint" class="bulk-hint">Edición masiva: aplicá cambios a los seleccionados.</span>
           </div>
           <div class="bulk-actions">
             <select id="bulkTarget" title="Campo a modificar">
@@ -446,14 +527,14 @@
                 <th>Imagen</th>
                 <th>Nombre</th>
                 <th>Marca</th>
-                <th>CÃ³digo</th>
+                <th>Código</th>
                 <th>Categoria</th>
                 <th id="productsPrimaryPriceHead">Precio mayorista</th>
                 <th id="productsRetailPriceHead">Precio minorista</th>
                 <th>Costo</th>
                 <th>Margen</th>
                 <th>Stock</th>
-                <th>MÃ­n.</th>
+                <th>Mín.</th>
                 <th>Activo</th>
                 <th>Acciones</th>
               </tr>
@@ -461,11 +542,11 @@
             <tbody></tbody>
           </table>
         </div>
-        <div id="productsPager" class="pager" aria-label="PaginaciÃ³n de productos">
+        <div id="productsPager" class="pager" aria-label="Paginación de productos">
           <button id="prevPageBtn" class="btn" type="button">Anterior</button>
           <div class="pager-info">
-            <span id="pageInfo">PÃ¡gina 1</span>
-            <span id="pageTotalInfo" class="muted">Â· 0 productos</span>
+            <span id="pageInfo">Página 1</span>
+            <span id="pageTotalInfo" class="muted">· 0 productos</span>
           </div>
           <button id="nextPageBtn" class="btn" type="button">Siguiente</button>
         </div>
@@ -473,7 +554,7 @@
 
       <section id="retail-prices" class="section hidden role-hidden">
         <h2>Precios minorista</h2>
-        <p>Modifica solo el precio minorista. Si queda vacÃ­o, el catÃ¡logo minorista usa el precio mayorista.</p>
+        <p>Modifica solo el precio minorista. Si queda vacío, el catálogo minorista usa el precio mayorista.</p>
         <div class="controls">
           <input id="retailPriceSearch" placeholder="Buscar producto..." />
           <button id="retailRefreshBtn" class="btn">Actualizar lista</button>
@@ -497,7 +578,7 @@
       <section id="promotions" class="section hidden">
           <div class="controls">
           <input id="promoSearch" placeholder="Buscar promociones..." />
-          <button id="newPromoBtn" type="button" class="btn primary">AÃ±adir promociÃ³n</button>
+          <button id="newPromoBtn" type="button" class="btn primary">Añadir promoción</button>
           <button id="exportPromosBtn" type="button" class="btn" title="Exportar promociones">Exportar promos</button>
         </div>
         <div class="table-wrap">
@@ -517,8 +598,8 @@
       </section>
 
       <section id="consumos" class="section hidden">
-        <h2>ConsumiciÃ³n inmediata</h2>
-        <p>Seleccione productos prÃ³ximos a vencerse y asigne un descuento (%) que se aplicarÃ¡ en el catÃ¡logo pÃºblico.</p>
+        <h2>Consumición inmediata</h2>
+        <p>Seleccione productos próximos a vencerse y asigne un descuento (%) que se aplicará en el catálogo público.</p>
         <div class="controls">
           <input id="consumoSearch" placeholder="Buscar producto..." />
           <button id="loadConsumosBtn" class="btn">Cargar consumos</button>
@@ -572,7 +653,7 @@
                 <th>Items</th>
                 <th>Total</th>
                 <th>Usuario</th>
-                <th>Contacto / DirecciÃ³n</th>
+                <th>Contacto / Dirección</th>
                 <th>Estado</th>
                 <th>Fecha</th>
                 <th>Acciones</th>
@@ -599,15 +680,15 @@
         <div class="cards">
           <div class="card">
             <h3>Clientes activos</h3>
-            <div id="customersActiveCount" class="stat">â€”</div>
+            <div id="customersActiveCount" class="stat">—</div>
           </div>
           <div class="card">
             <h3>Pedidos del mes</h3>
-            <div id="customersOrdersCount" class="stat">â€”</div>
+            <div id="customersOrdersCount" class="stat">—</div>
           </div>
           <div class="card">
             <h3>Total comprado</h3>
-            <div id="customersRevenueTotal" class="stat">â€”</div>
+            <div id="customersRevenueTotal" class="stat">—</div>
           </div>
         </div>
         <div class="table-wrap">
@@ -617,8 +698,8 @@
                 <th>Cliente</th>
                 <th>Pedidos este mes</th>
                 <th>Total comprado</th>
-                <th>Producto mÃ¡s comprado</th>
-                <th>Ãšltimo pedido</th>
+                <th>Producto más comprado</th>
+                <th>Último pedido</th>
               </tr>
             </thead>
             <tbody></tbody>
@@ -629,11 +710,11 @@
 
       <section id="preparations" class="section hidden">
         <h2>Preparaciones</h2>
-        <p>Pedidos organizados automÃ¡ticamente por dÃ­a de salida segÃºn horario de corte.</p>
+        <p>Pedidos organizados automáticamente por día de salida según horario de corte.</p>
         <div class="controls center">
           <input id="preparationsSearch" placeholder="Buscar por pedido, cliente o producto..." />
-          <input id="preparationsDate" type="date" title="Filtrar por dÃ­a de salida" />
-          <button id="filterPreparationsTomorrow" class="btn" title="Ver solo pedidos para preparar maÃ±ana">MaÃ±ana</button>
+          <input id="preparationsDate" type="date" title="Filtrar por día de salida" />
+          <button id="filterPreparationsTomorrow" class="btn" title="Ver solo pedidos para preparar mañana">Mañana</button>
           <button id="clearPreparationsDate" class="btn">Limpiar fecha</button>
           <button id="markAllPreparedBtn" class="btn primary">Marcar todos preparados</button>
           <button id="refreshPreparationsBtn" class="btn">Actualizar preparaciones</button>
@@ -643,7 +724,7 @@
 
       <section id="routes" class="section hidden" data-role="owner,admin">
         <h2>Rutas</h2>
-        <p>AsignÃ¡ pedidos preparados a repartidores y generÃ¡ una ruta sugerida.</p>
+        <p>Asigná pedidos preparados a repartidores y generá una ruta sugerida.</p>
         <div class="routes-controls">
           <div class="field">
             <label for="routesDriverSelect">Repartidor</label>
@@ -687,7 +768,7 @@
                 <th>Incidencia</th>
                 <th>Evento</th>
                 <th>Cliente</th>
-                <th>DirecciÃ³n</th>
+                <th>Dirección</th>
                 <th>Foto</th>
                 <th>Total</th>
               </tr>
@@ -756,8 +837,8 @@
               <input id="userUsername" name="userUsername" placeholder="usuario" required />
             </div>
             <div class="field">
-              <label for="userPassword">ContraseÃ±a</label>
-              <input id="userPassword" name="userPassword" type="password" placeholder="contraseÃ±a" required />
+              <label for="userPassword">Contraseña</label>
+              <input id="userPassword" name="userPassword" type="password" placeholder="contraseña" required />
             </div>
             <div class="field">
               <label for="userRole">Rol</label>
@@ -811,7 +892,7 @@
                 <th>Rol</th>
                 <th>Rubro</th>
                 <th>Zona</th>
-                <th>Zona maÃ±ana</th>
+                <th>Zona mañana</th>
                 <th>Creado</th>
                 <th>Acciones</th>
               </tr>
@@ -830,7 +911,7 @@
             <button class="btn" type="submit">Ejecutar</button>
           </form>
           <div class="admin-console-help">
-            Comandos: <code>/clear @1</code> CatÃ¡logo, <code>/clear @2</code> Filtros, <code>/clear @3</code> Pedidos, <code>/clear @4</code> Clientes, <code>/clear @5</code> Preparaciones. <code>/help</code> para ayuda.
+            Comandos: <code>/clear @1</code> Catálogo, <code>/clear @2</code> Filtros, <code>/clear @3</code> Pedidos, <code>/clear @4</code> Clientes, <code>/clear @5</code> Preparaciones. <code>/help</code> para ayuda.
           </div>
         </div>
       </section>
@@ -904,7 +985,7 @@
             <input id="name" name="name" required placeholder="Nombre del producto" />
           </div>
           <div class="field">
-            <label for="code">CÃ³digo</label>
+            <label for="code">Código</label>
             <input id="code" name="code" placeholder="Ej: 144" />
           </div>
           <div class="field">
@@ -930,13 +1011,13 @@
             <input id="stock" name="stock" type="number" min="0" step="1" value="0" placeholder="0" />
           </div>
           <div class="field">
-            <label for="min_stock">Stock mÃ­nimo</label>
+            <label for="min_stock">Stock mínimo</label>
             <input id="min_stock" name="min_stock" type="number" min="0" step="1" value="0" placeholder="0" />
           </div>
           <div class="field">
             <label for="active">Activo</label>
             <select id="active" name="active">
-              <option value="true" selected>SÃ­</option>
+              <option value="true" selected>Sí</option>
               <option value="false">No</option>
             </select>
           </div>
@@ -960,20 +1041,20 @@
         </div>
         <div class="row">
           <div class="field">
-            <label for="categoryCheckboxes">CategorÃ­as</label>
+            <label for="categoryCheckboxes">Categorías</label>
             <div id="categoryCheckboxes" class="checkbox-grid" aria-live="polite"></div>
             <input type="hidden" id="category" name="category" />
           </div>
           <div class="field">
-            <label for="description">DescripciÃ³n</label>
-            <textarea id="description" name="description" rows="3" placeholder="DescripciÃ³n..." required></textarea>
+            <label for="description">Descripción</label>
+            <textarea id="description" name="description" rows="3" placeholder="Descripción..." required></textarea>
           </div>
         </div>
         <div class="row image-row">
           <div class="file-field">
             <label class="file-label" for="imageInput">Seleccionar imagen</label>
             <input id="imageInput" class="file-input" type="file" accept="image/*">
-            <div class="file-name" id="fileName">NingÃºn archivo seleccionado</div>
+            <div class="file-name" id="fileName">Ningún archivo seleccionado</div>
             <button id="uploadImageBtn" type="button" class="btn upload" disabled>Subir imagen</button>
             <progress id="uploadProgress" value="0" max="100" hidden class="progress-sm"></progress>
           </div>
@@ -987,7 +1068,7 @@
               <button id="imageUrlBtn" type="button" class="btn">Usar URL</button>
               <button id="imageSearchBtn" type="button" class="btn">Buscar en Google</button>
             </div>
-            <div class="field-hint">AbrÃ­ Google Images con el nombre exacto, copiÃ¡ la URL directa de la imagen y pegala acÃ¡.</div>
+            <div class="field-hint">Abrí Google Images con el nombre exacto, copiá la URL directa de la imagen y pegala acá.</div>
           </div>
         </div>
         <div class="form-actions">
@@ -1004,21 +1085,21 @@
       <button id="promoModalClose" class="modal-close" aria-label="Cerrar">
         <svg viewBox="0 0 24 24" width="18" height="18"><path d="M18 6L6 18M6 6l12 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
-      <h2 id="promoModalTitle">Nueva promociÃ³n</h2>
+      <h2 id="promoModalTitle">Nueva promoción</h2>
       <form id="promoForm" class="product-form">
         <div class="row">
           <div class="field">
-            <label for="promoName">Nombre de la promociÃ³n</label>
-            <input id="promoName" name="promoName" required placeholder="Titulo de la promociÃ³n" />
+            <label for="promoName">Nombre de la promoción</label>
+            <input id="promoName" name="promoName" required placeholder="Titulo de la promoción" />
           </div>
           <div class="field">
-            <label for="promoDesc">DescripciÃ³n</label>
-            <input id="promoDesc" name="promoDesc" placeholder="DescripciÃ³n breve" />
+            <label for="promoDesc">Descripción</label>
+            <input id="promoDesc" name="promoDesc" placeholder="Descripción breve" />
           </div>
         </div>
         <div class="row mt-8">
           <div class="field">
-            <label for="promoType">Tipo de promociÃ³n</label>
+            <label for="promoType">Tipo de promoción</label>
             <select id="promoType">
               <option value="percent">Descuento %</option>
               <option value="2x1">2 x 1</option>
@@ -1031,16 +1112,16 @@
         </div>
         <div class="row mt-8">
           <div class="field">
-            <label for="promoValidUntil">VÃ¡lida hasta</label>
+            <label for="promoValidUntil">Válida hasta</label>
             <input id="promoValidUntil" type="datetime-local" />
           </div>
         </div>
         <div class="controls center mt-12">
-          <input id="promoProductSearch" placeholder="Buscar productos para aÃ±adir..." />
+          <input id="promoProductSearch" placeholder="Buscar productos para añadir..." />
         </div>
         <div id="promoProductsList" class="promo-products-list"></div>
         <div class="form-actions mt-12">
-          <button type="button" id="savePromoBtn" class="btn primary" disabled>Guardar promociÃ³n</button>
+          <button type="button" id="savePromoBtn" class="btn primary" disabled>Guardar promoción</button>
           <button id="cancelPromoBtn" type="button" class="btn">Cancelar</button>
         </div>
       </form>
@@ -1060,13 +1141,13 @@
             existing.style.position = 'fixed'; existing.style.left = '0'; existing.style.right = '0'; existing.style.top = '0'; existing.style.zIndex = '99999'; existing.style.background = '#fee'; existing.style.color = '#900'; existing.style.padding = '10px 16px'; existing.style.fontWeight = '700'; existing.style.borderBottom = '2px solid #fbb';
             // content container
             const msgSpan = document.createElement('span'); msgSpan.style.flex = '1'; msgSpan.style.display = 'inline-block'; msgSpan.id = 'adminErrorBannerMsg';
-            const dismiss = document.createElement('button'); dismiss.className = 'dismiss-btn'; dismiss.type = 'button'; dismiss.title = 'Cerrar'; dismiss.innerText = 'âœ•'; dismiss.onclick = function(){ try{ existing.remove(); }catch(_){ existing.style.display='none'; } };
+            const dismiss = document.createElement('button'); dismiss.className = 'dismiss-btn'; dismiss.type = 'button'; dismiss.title = 'Cerrar'; dismiss.innerText = '✕'; dismiss.onclick = function(){ try{ existing.remove(); }catch(_){ existing.style.display='none'; } };
             existing.appendChild(msgSpan);
             existing.appendChild(dismiss);
             document.body.insertBefore(existing, document.body.firstChild);
           }
           const msgEl = document.getElementById('adminErrorBannerMsg');
-          if(msgEl) msgEl.textContent = String(msg || 'Error en el panel de administraciÃ³n');
+          if(msgEl) msgEl.textContent = String(msg || 'Error en el panel de administración');
           console.error('adminFallback:', msg);
       }catch(e){ /* ignore */ }
     };
@@ -1076,4 +1157,3 @@
   <script src="app.js?v=17"></script>
 </body>
 </html>
-

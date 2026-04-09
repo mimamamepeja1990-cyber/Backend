@@ -233,3 +233,18 @@ class PromoImage(Base):
     business_scope = Column(String(20), nullable=False, default='mayorista', index=True)
     selected = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class PushDeviceToken(Base):
+    __tablename__ = 'push_device_tokens'
+    id = Column(Integer, primary_key=True, index=True)
+    token = Column(String(512), nullable=False, unique=True, index=True)
+    platform = Column(String(30), nullable=True, default='web')
+    device_label = Column(String(120), nullable=True)
+    business_scope = Column(String(20), nullable=False, default='mayorista', index=True)
+    admin_user_id = Column(Integer, nullable=True, index=True)
+    admin_username = Column(String(80), nullable=True, index=True)
+    is_active = Column(Boolean, default=True, index=True)
+    last_seen_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())

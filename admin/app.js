@@ -2,6 +2,7 @@
 
 const SECTION_TITLES = {
   'dashboard': 'Dashboard',
+  'executive': 'Panel Ejecutivo',
   'catalog': 'Catálogo',
   'retail-prices': 'Precios minorista',
   'consumos': 'Consumición inmediata',
@@ -1421,6 +1422,12 @@ function activateSection(sectionId){
     stopDriverMapPolling();
     clearDriverRouteOverlays();
   }
+  if (sectionId === 'executive'){
+    startExecutivePolling();
+    try{ refreshExecutivePanel({ force: true, quiet: false }); }catch(_){ }
+  } else {
+    stopExecutivePolling();
+  }
   if ((sectionId === 'catalog' || sectionId === 'retail-prices' || sectionId === 'filters') && catalogRefreshPending) {
     try{ scheduleCatalogRefresh(`section:${sectionId}`, 120); }catch(_){ }
   }
@@ -1934,6 +1941,9 @@ function applyBusinessScope(scope, options = {}){
   if (currentSectionId === 'consumos'){
     try{ const p = loadConsumos(); if (p && p.catch) p.catch(()=>{}); }catch(_){ }
   }
+  if (currentSectionId === 'executive'){
+    try{ refreshExecutivePanel({ force: true, quiet: true }); }catch(_){ }
+  }
 }
 
 function setAuthLocked(locked){
@@ -1971,6 +1981,7 @@ function applyRoleAccess(user){
   updateUserUI(user);
   updateUserFormAccess();
   const role = user ? user.role : null;
+  try{ syncPushButtonState().catch(() => null); }catch(_){ }
 
   if (role === 'repartidor'){
     try{ window.location.href = 'repartidor.html'; }catch(_){ }
@@ -2132,6 +2143,7 @@ function initAuth(){
         try{ await bootstrapAuthenticatedAdmin(); }catch(_){ }
         try{ setupSocket(); }catch(_){ }
         activateSection('dashboard');
+        try{ await applyHashIntent(); }catch(_){ }
       }catch(e){
         console.error('admin login failed', e);
         setAuthError('No se pudo iniciar sesión.');
@@ -2141,10 +2153,22 @@ function initAuth(){
 
   if (logoutBtn){
     logoutBtn.addEventListener('click', () => {
+      try{
+        const token = readStoredPushToken();
+        if (token){
+          safeFetch(`${API_BASE}/admin/push/tokens/unregister`, {
+            method: 'POST',
+            headers: getScopedRequestHeaders({ 'Content-Type': 'application/json' }),
+            body: JSON.stringify({ token }),
+          }).catch(() => null);
+        }
+      }catch(_){ }
+      writeStoredPushToken('');
       clearAdminToken();
       clearSessionUser();
       setAuthLocked(true);
       currentAdminUser = null;
+      setPushButtonState('idle');
       try{ location.reload(); }catch(_){ }
     });
   }
@@ -2177,6 +2201,7 @@ function initAuth(){
         const activeLink = document.querySelector('.sidebar nav a.active[data-section]');
         const activeSection = activeLink ? activeLink.getAttribute('data-section') : null;
         activateSection(activeSection || 'dashboard');
+        try{ await applyHashIntent(); }catch(_){ }
       }
       return;
     }
@@ -2319,6 +2344,8 @@ function fetchPromoImages() {
         div.classList.add('promo-image-card');
         const imgEl = document.createElement('img');
         imgEl.src = img.url;
+        imgEl.loading = 'lazy';
+        imgEl.decoding = 'async';
         // If image fails to load (missing disk file), re-query /api/uploads
         // to see if the server can provide a DB-backed URL (e.g. /images/{id}).
         imgEl.onerror = async function() {
@@ -2856,12 +2883,25 @@ const opsInsightsSummaryEl = document.getElementById('opsInsightsSummary');
 const opsRecommendationsListEl = document.getElementById('opsRecommendationsList');
 const opsInsightsRefreshBtn = document.getElementById('opsInsightsRefreshBtn');
 const installPwaBtn = document.getElementById('installPwaBtn');
+const enablePushBtn = document.getElementById('enablePushBtn');
+const executiveRefreshBtn = document.getElementById('executiveRefreshBtn');
+const executiveUpdatedAtEl = document.getElementById('executiveUpdatedAt');
+const execUnseenEl = document.getElementById('execUnseen');
+const execUnpreparedEl = document.getElementById('execUnprepared');
+const execCriticalStockEl = document.getElementById('execCriticalStock');
+const execRevenueTodayEl = document.getElementById('execRevenueToday');
+const execAlertsListEl = document.getElementById('execAlertsList');
+const execActivityListEl = document.getElementById('execActivityList');
 const OPERATIONS_INSIGHTS_TTL_MS = 1000 * 60;
 const WS_CATALOG_REFRESH_DEBOUNCE_MS = 1600;
 const WS_OPERATIONS_REFRESH_DEBOUNCE_MS = 900;
 const ORDERS_POLL_INTERVAL_MS = 30000;
+const EXECUTIVE_POLL_INTERVAL_MS = 25000;
+const EXECUTIVE_WS_REFRESH_DEBOUNCE_MS = 1200;
 const AUTO_IMAGE_POLL_INTERVAL_MS = 15000;
 const TOKEN_PREVIEW_CACHE_MS = 30000;
+const FCM_SDK_VERSION = '10.13.2';
+const PUSH_TOKEN_STORAGE_KEY = 'admin:push:fcm_token:v1';
 let operationsInsightsCache = null;
 let operationsInsightsCacheTs = 0;
 let operationsInsightsCacheScope = '';
@@ -2872,6 +2912,15 @@ let tokenPreviewIndexCacheTs = 0;
 let wsCatalogRefreshTimer = null;
 let wsOperationsRefreshTimer = null;
 let catalogRefreshPending = false;
+let executivePollTimer = null;
+let executiveRefreshTimer = null;
+let executiveInFlight = null;
+let pushConfigCache = null;
+let pushEnableInFlight = null;
+let firebaseScriptsPromise = null;
+let pushMessagingClient = null;
+let pushForegroundHooked = false;
+let adminServiceWorkerRegistration = null;
 
 function cleanDashboardText(value){
   let out = String(value == null ? '' : value);
@@ -2927,13 +2976,31 @@ function canRegisterAdminServiceWorker(){
 
 async function registerAdminServiceWorker(){
   if (!canRegisterAdminServiceWorker()) return null;
+  if (adminServiceWorkerRegistration) return adminServiceWorkerRegistration;
   try{
-    const registration = await navigator.serviceWorker.register('/admin/service-worker.js', { scope: '/admin/' });
+    const swVersion = String(window.PWA_BUILD_VERSION || '').trim();
+    const swUrl = swVersion ? `/admin/service-worker.js?v=${encodeURIComponent(swVersion)}` : '/admin/service-worker.js';
+    const registration = await navigator.serviceWorker.register(swUrl, { scope: '/admin/' });
+    adminServiceWorkerRegistration = registration;
     return registration;
   }catch(e){
     console.warn('service worker registration failed', e);
     return null;
   }
+}
+
+async function ensureAdminServiceWorkerRegistration(){
+  if (adminServiceWorkerRegistration) return adminServiceWorkerRegistration;
+  const registered = await registerAdminServiceWorker().catch(() => null);
+  if (registered){
+    adminServiceWorkerRegistration = registered;
+    return registered;
+  }
+  try{
+    const existing = await navigator.serviceWorker.getRegistration('/admin/');
+    if (existing) adminServiceWorkerRegistration = existing;
+  }catch(_){ }
+  return adminServiceWorkerRegistration;
 }
 
 function setupPwaInstall(){
@@ -2970,6 +3037,517 @@ function setupPwaInstall(){
     }
   });
 }
+
+function canUseBrowserPush(){
+  try{
+    return !!(window.Notification && 'serviceWorker' in navigator && canRegisterAdminServiceWorker());
+  }catch(_){
+    return false;
+  }
+}
+
+function readStoredPushToken(){
+  try{ return String(localStorage.getItem(PUSH_TOKEN_STORAGE_KEY) || '').trim(); }catch(_){ return ''; }
+}
+
+function writeStoredPushToken(token){
+  try{
+    const value = String(token || '').trim();
+    if (value) localStorage.setItem(PUSH_TOKEN_STORAGE_KEY, value);
+    else localStorage.removeItem(PUSH_TOKEN_STORAGE_KEY);
+  }catch(_){ }
+}
+
+function detectPushPlatform(){
+  const ua = String((navigator && navigator.userAgent) || '').toLowerCase();
+  if (ua.includes('iphone') || ua.includes('ipad') || ua.includes('ipod')) return 'ios-pwa';
+  if (ua.includes('android')) return 'android-pwa';
+  return 'web-pwa';
+}
+
+function getPushDeviceLabel(){
+  const parts = [];
+  try{
+    if (currentAdminUser && currentAdminUser.username) parts.push(String(currentAdminUser.username));
+  }catch(_){ }
+  try{
+    if (navigator && navigator.platform) parts.push(String(navigator.platform));
+  }catch(_){ }
+  return parts.join(' - ').slice(0, 120) || 'admin-device';
+}
+
+function setPushButtonState(mode){
+  if (!enablePushBtn) return;
+  const state = String(mode || 'idle').trim().toLowerCase();
+  enablePushBtn.classList.remove('btn-warning');
+  if (state === 'hidden'){
+    enablePushBtn.classList.add('hidden');
+    return;
+  }
+  enablePushBtn.classList.remove('hidden');
+  enablePushBtn.disabled = false;
+  if (state === 'loading'){
+    enablePushBtn.disabled = true;
+    enablePushBtn.textContent = 'Activando alertas...';
+    return;
+  }
+  if (state === 'active'){
+    enablePushBtn.textContent = 'Alertas activas';
+    return;
+  }
+  if (state === 'denied'){
+    enablePushBtn.classList.add('btn-warning');
+    enablePushBtn.textContent = 'Notificaciones bloqueadas';
+    return;
+  }
+  if (state === 'unsupported'){
+    enablePushBtn.disabled = true;
+    enablePushBtn.textContent = 'Alertas no disponibles';
+    return;
+  }
+  enablePushBtn.textContent = 'Activar alertas';
+}
+
+async function syncPushButtonState(){
+  if (!enablePushBtn) return;
+  if (!currentAdminUser){
+    setPushButtonState('idle');
+    enablePushBtn.disabled = true;
+    return;
+  }
+  if (!canUseBrowserPush()){
+    setPushButtonState('unsupported');
+    return;
+  }
+  const permission = String(Notification.permission || 'default').toLowerCase();
+  if (permission === 'granted'){
+    const existingToken = readStoredPushToken();
+    setPushButtonState(existingToken ? 'active' : 'idle');
+    return;
+  }
+  if (permission === 'denied'){
+    setPushButtonState('denied');
+    return;
+  }
+  setPushButtonState('idle');
+}
+
+function loadExternalScript(src){
+  const key = String(src || '').trim();
+  if (!key) return Promise.reject(new Error('invalid-script-src'));
+  if (!loadExternalScript.cache) loadExternalScript.cache = {};
+  if (loadExternalScript.cache[key]) return loadExternalScript.cache[key];
+  loadExternalScript.cache[key] = new Promise((resolve, reject) => {
+    try{
+      const existing = Array.from(document.querySelectorAll('script[src]')).find((s) => String(s.src || '').includes(key));
+      if (existing){
+        if (existing.dataset.loaded === '1') resolve(true);
+        else existing.addEventListener('load', () => resolve(true), { once: true });
+        return;
+      }
+      const script = document.createElement('script');
+      script.src = key;
+      script.async = true;
+      script.onload = () => {
+        script.dataset.loaded = '1';
+        resolve(true);
+      };
+      script.onerror = () => reject(new Error(`script-load-failed:${key}`));
+      document.head.appendChild(script);
+    }catch(e){
+      reject(e);
+    }
+  });
+  return loadExternalScript.cache[key];
+}
+
+async function fetchPushConfig(force = false){
+  if (pushConfigCache && !force) return pushConfigCache;
+  try{
+    await ensureApiBase();
+  }catch(_){ }
+  if (!hasApiConnection()) throw new Error('api-unavailable');
+  const cfg = await safeFetch(`${API_BASE}/admin/push/config`, {
+    cache: 'no-store',
+    headers: getScopedRequestHeaders(),
+  });
+  pushConfigCache = cfg && typeof cfg === 'object' ? cfg : {};
+  return pushConfigCache;
+}
+
+async function ensureFirebaseMessagingClient(pushCfg){
+  if (pushMessagingClient) return pushMessagingClient;
+  const cfg = (pushCfg && pushCfg.firebase_web_config) || window.FIREBASE_WEB_CONFIG || {};
+  const hasCoreCfg = !!(cfg && cfg.apiKey && cfg.appId && cfg.messagingSenderId);
+  if (!hasCoreCfg) throw new Error('firebase-config-missing');
+  if (!firebaseScriptsPromise){
+    firebaseScriptsPromise = (async () => {
+      await loadExternalScript(`https://www.gstatic.com/firebasejs/${FCM_SDK_VERSION}/firebase-app-compat.js`);
+      await loadExternalScript(`https://www.gstatic.com/firebasejs/${FCM_SDK_VERSION}/firebase-messaging-compat.js`);
+      return true;
+    })();
+  }
+  await firebaseScriptsPromise;
+  const fb = window.firebase;
+  if (!fb || typeof fb.initializeApp !== 'function') throw new Error('firebase-sdk-unavailable');
+  try{
+    if (!Array.isArray(fb.apps) || !fb.apps.length){
+      fb.initializeApp(cfg);
+    }
+  }catch(_){
+    if (!Array.isArray(fb.apps) || !fb.apps.length) throw new Error('firebase-init-failed');
+  }
+  try{
+    pushMessagingClient = fb.messaging();
+  }catch(e){
+    throw new Error('firebase-messaging-unavailable');
+  }
+  return pushMessagingClient;
+}
+
+async function registerPushTokenInBackend(token, pushCfg){
+  const payload = {
+    token: String(token || '').trim(),
+    platform: detectPushPlatform(),
+    device_label: getPushDeviceLabel(),
+    business_scope: getScopedOrderCustomerType(),
+  };
+  await safeFetch(`${API_BASE}/admin/push/tokens/register`, {
+    method: 'POST',
+    headers: getScopedRequestHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(payload),
+  });
+  writeStoredPushToken(payload.token);
+  setPushButtonState('active');
+  return true;
+}
+
+async function maybeAutoEnablePush(){
+  if (!currentAdminUser || !canUseBrowserPush()) return;
+  if (String(Notification.permission || '').toLowerCase() !== 'granted') return;
+  const knownToken = readStoredPushToken();
+  if (!knownToken) return;
+  try{
+    const cfg = await fetchPushConfig(false);
+    if (!cfg || !cfg.enabled) return;
+    await registerPushTokenInBackend(knownToken, cfg);
+  }catch(_){ }
+}
+
+function hookForegroundPushMessages(messaging){
+  if (!messaging || pushForegroundHooked) return;
+  try{
+    messaging.onMessage((payload) => {
+      const data = (payload && payload.data) || {};
+      const note = (payload && payload.notification) || {};
+      const title = String(note.title || data.title || 'Actualizacion operativa');
+      const body = String(note.body || data.body || 'Hay novedades en el panel.');
+      try{ showToast(`${title}: ${body}`, 'info'); }catch(_){ }
+      const openSection = String(data.open_section || '').trim();
+      const orderId = String(data.open_order_id || data.order_id || '').trim();
+      if (openSection){
+        try{ activateSection(openSection); }catch(_){ }
+      }
+      if (orderId){
+        setTimeout(() => {
+          openOrderFromNotification(orderId).catch(() => null);
+        }, 220);
+      }
+      scheduleExecutiveRefresh('push:foreground', 300);
+    });
+    pushForegroundHooked = true;
+  }catch(_){ }
+}
+
+async function enablePushNotifications(options = {}){
+  if (pushEnableInFlight) return pushEnableInFlight;
+  const opts = options || {};
+  pushEnableInFlight = (async () => {
+    if (!currentAdminUser) throw new Error('auth-required');
+    if (!canUseBrowserPush()) throw new Error('push-unsupported');
+    setPushButtonState('loading');
+    const cfg = await fetchPushConfig(!!opts.forceConfig);
+    if (!cfg || !cfg.enabled) throw new Error('push-disabled');
+    if (!cfg.firebase_web_config_ready) throw new Error('firebase-web-config-not-ready');
+    const permission = String(Notification.permission || 'default').toLowerCase();
+    let finalPermission = permission;
+    if (permission !== 'granted'){
+      finalPermission = String(await Notification.requestPermission() || 'default').toLowerCase();
+    }
+    if (finalPermission !== 'granted') throw new Error(finalPermission === 'denied' ? 'permission-denied' : 'permission-not-granted');
+    const swReg = await ensureAdminServiceWorkerRegistration();
+    if (!swReg) throw new Error('service-worker-missing');
+    const messaging = await ensureFirebaseMessagingClient(cfg);
+    hookForegroundPushMessages(messaging);
+    const token = await messaging.getToken({
+      vapidKey: String(cfg.vapid_key || window.FIREBASE_VAPID_KEY || '').trim() || undefined,
+      serviceWorkerRegistration: swReg,
+    });
+    if (!token) throw new Error('fcm-token-missing');
+    await registerPushTokenInBackend(token, cfg);
+    return token;
+  })();
+  try{
+    const token = await pushEnableInFlight;
+    if (!options || options.quiet !== true){
+      try{ showToast('Alertas push activadas correctamente', 'success'); }catch(_){ }
+    }
+    return token;
+  }catch(e){
+    const code = String((e && e.message) || e || '').toLowerCase();
+    if (code.includes('permission-denied')){
+      setPushButtonState('denied');
+      if (!options || options.quiet !== true){
+        showToast('Notificaciones bloqueadas. Habilitalas desde la configuracion del navegador.', 'warning');
+      }
+      return null;
+    }
+    setPushButtonState('idle');
+    if (!options || options.quiet !== true){
+      const message = code.includes('push-disabled')
+        ? 'Push deshabilitado en backend.'
+        : code.includes('firebase-web-config-not-ready')
+          ? 'Falta configurar Firebase Web en el backend.'
+          : code.includes('service-worker')
+            ? 'No se pudo registrar el service worker.'
+            : 'No se pudieron activar las alertas push.';
+      showToast(message, 'error');
+    }
+    return null;
+  }finally{
+    pushEnableInFlight = null;
+    syncPushButtonState().catch(() => null);
+  }
+}
+
+function formatExecutiveUpdatedAt(raw){
+  try{
+    const dt = new Date(String(raw || '').trim());
+    if (!Number.isFinite(dt.getTime())) return 'Esperando datos...';
+    return `Actualizado ${dt.toLocaleString('es-AR', { hour12: false, day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}`;
+  }catch(_){
+    return 'Esperando datos...';
+  }
+}
+
+function setExecutiveEmpty(){
+  if (execUnseenEl) execUnseenEl.textContent = '-';
+  if (execUnpreparedEl) execUnpreparedEl.textContent = '-';
+  if (execCriticalStockEl) execCriticalStockEl.textContent = '-';
+  if (execRevenueTodayEl) execRevenueTodayEl.textContent = '-';
+  if (executiveUpdatedAtEl) executiveUpdatedAtEl.textContent = 'Esperando datos...';
+  if (execAlertsListEl) execAlertsListEl.innerHTML = '<div class="empty-note">Sin alertas criticas por ahora.</div>';
+  if (execActivityListEl) execActivityListEl.innerHTML = '<div class="empty-note">Todavia sin actividad reciente.</div>';
+}
+
+function renderExecutiveAlerts(alerts){
+  if (!execAlertsListEl) return;
+  const list = Array.isArray(alerts) ? alerts : [];
+  if (!list.length){
+    execAlertsListEl.innerHTML = '<div class="empty-note">Sin alertas criticas por ahora.</div>';
+    return;
+  }
+  const html = list.slice(0, 6).map((entry) => {
+    const type = String(entry && entry.type || 'general').trim().toLowerCase();
+    const title = cleanDashboardText(entry && entry.title ? entry.title : 'Alerta');
+    const count = Number(entry && entry.count || 0);
+    const items = Array.isArray(entry && entry.items) ? entry.items.slice(0, 3) : [];
+    const details = items.map((item) => {
+      if (type === 'stock'){
+        const name = cleanDashboardText(item && (item.name || item.product_name || item.product || 'Producto'));
+        const stock = Number(item && (item.stock ?? item.current_stock));
+        const threshold = Number(item && (item.threshold ?? item.min_stock));
+        return `<li>${escapeHtml(name)} · stock ${Number.isFinite(stock) ? formatNumber(stock, { digits: 3 }) : '-'} / min ${Number.isFinite(threshold) ? formatNumber(threshold, { digits: 3 }) : '-'}</li>`;
+      }
+      if (type === 'demora'){
+        const oid = cleanDashboardText(item && item.order_id ? item.order_id : '-');
+        const mins = Number(item && item.minutes || 0);
+        return `<li>Pedido #${escapeHtml(oid)} · demora ${formatNumber(Math.max(0, mins))} min</li>`;
+      }
+      if (type === 'ruta'){
+        const oid = cleanDashboardText(item && item.order_id ? item.order_id : '-');
+        const issue = cleanDashboardText(item && item.issue ? item.issue : 'Incidencia de ruta');
+        return `<li>Pedido #${escapeHtml(oid)} · ${escapeHtml(issue)}</li>`;
+      }
+      return `<li>${escapeHtml(cleanDashboardText(JSON.stringify(item || {})))}</li>`;
+    }).join('');
+    const meta = count > 0 ? `${formatNumber(count)} caso${count === 1 ? '' : 's'}` : '';
+    return `
+      <article class="executive-item tone-${escapeHtml(type)}">
+        <div class="executive-item-head">
+          <strong>${escapeHtml(title)}</strong>
+          <span>${escapeHtml(meta)}</span>
+        </div>
+        ${details ? `<ul>${details}</ul>` : ''}
+      </article>
+    `;
+  }).join('');
+  execAlertsListEl.innerHTML = html;
+}
+
+function renderExecutiveActivity(rows){
+  if (!execActivityListEl) return;
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length){
+    execActivityListEl.innerHTML = '<div class="empty-note">Todavia sin actividad reciente.</div>';
+    return;
+  }
+  const html = list.slice(0, 15).map((entry) => {
+    const orderId = String(entry && entry.order_id || '').trim();
+    const status = cleanDashboardText(entry && (entry.status_label || entry.status) || 'Actualizado');
+    const customer = cleanDashboardText(entry && entry.customer ? entry.customer : 'Cliente');
+    const amount = Number(entry && entry.total || 0);
+    const createdAt = formatExecutiveUpdatedAt(entry && entry.created_at).replace('Actualizado ', '');
+    const amountLabel = Number.isFinite(amount) && amount > 0 ? formatMoneyRounded(amount) : '-';
+    const actionBtn = orderId ? `<button type="button" class="btn tab executive-open-order" data-order-id="${escapeHtml(orderId)}">Abrir #${escapeHtml(orderId)}</button>` : '';
+    return `
+      <article class="executive-item tone-activity">
+        <div class="executive-item-head">
+          <strong>${escapeHtml(status)}</strong>
+          <span>${escapeHtml(createdAt)}</span>
+        </div>
+        <p>${escapeHtml(customer)} · ${escapeHtml(amountLabel)}</p>
+        ${actionBtn}
+      </article>
+    `;
+  }).join('');
+  execActivityListEl.innerHTML = html;
+  execActivityListEl.querySelectorAll('.executive-open-order').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const oid = String(btn.dataset.orderId || '').trim();
+      if (!oid) return;
+      openOrderFromNotification(oid).catch(() => null);
+    });
+  });
+}
+
+function renderExecutivePanel(payload){
+  const data = payload && typeof payload === 'object' ? payload : {};
+  const estado = data && typeof data.estado_actual === 'object' ? data.estado_actual : {};
+  if (execUnseenEl) execUnseenEl.textContent = formatNumber(Number(estado.pedidos_sin_ver || 0));
+  if (execUnpreparedEl) execUnpreparedEl.textContent = formatNumber(Number(estado.pedidos_sin_preparar || 0));
+  if (execCriticalStockEl) execCriticalStockEl.textContent = formatNumber(Number(estado.stock_critico || 0));
+  if (execRevenueTodayEl) execRevenueTodayEl.textContent = formatMoney(Number(estado.ventas_hoy || 0));
+  if (executiveUpdatedAtEl) executiveUpdatedAtEl.textContent = formatExecutiveUpdatedAt(data.generated_at);
+  renderExecutiveAlerts(data.alertas);
+  renderExecutiveActivity(data.actividad_tiempo_real);
+}
+
+async function refreshExecutivePanel(options = {}){
+  const opts = options || {};
+  if (!currentAdminUser || !hasApiConnection()) return null;
+  if (executiveInFlight && !opts.force) return executiveInFlight;
+  executiveInFlight = (async () => {
+    try{
+      const scope = getScopedOrderCustomerType();
+      const path = withScopedQuery(`${API_BASE}/admin/resumen-ejecutivo?days=30`, scope);
+      const payload = await safeFetch(path, {
+        cache: 'no-store',
+        headers: getScopedRequestHeaders(),
+      });
+      renderExecutivePanel(payload);
+      return payload;
+    }catch(e){
+      if (opts.quiet !== true){
+        try{ showToast('No se pudo actualizar el panel ejecutivo', 'error'); }catch(_){ }
+      }
+      return null;
+    }finally{
+      executiveInFlight = null;
+    }
+  })();
+  return executiveInFlight;
+}
+
+function startExecutivePolling(){
+  if (executivePollTimer) return;
+  executivePollTimer = setInterval(() => {
+    if (currentSectionId !== 'executive') return;
+    refreshExecutivePanel({ quiet: true }).catch(() => null);
+  }, EXECUTIVE_POLL_INTERVAL_MS);
+}
+
+function stopExecutivePolling(){
+  if (!executivePollTimer) return;
+  clearInterval(executivePollTimer);
+  executivePollTimer = null;
+}
+
+function scheduleExecutiveRefresh(reason = 'event', delayMs = EXECUTIVE_WS_REFRESH_DEBOUNCE_MS){
+  if (executiveRefreshTimer){
+    clearTimeout(executiveRefreshTimer);
+    executiveRefreshTimer = null;
+  }
+  executiveRefreshTimer = setTimeout(() => {
+    executiveRefreshTimer = null;
+    if (currentSectionId !== 'executive') return;
+    refreshExecutivePanel({ quiet: true }).catch((e) => {
+      console.warn('executive refresh failed', reason, e);
+    });
+  }, Math.max(180, Number(delayMs) || EXECUTIVE_WS_REFRESH_DEBOUNCE_MS));
+}
+
+async function openOrderFromNotification(orderId){
+  const oid = String(orderId || '').trim();
+  if (!oid) return;
+  try{
+    if (currentSectionId !== 'orders'){
+      activateSection('orders');
+      await new Promise((resolve) => setTimeout(resolve, 180));
+    }
+  }catch(_){ }
+  try{
+    const list = await fetchOrders(oid, '', '', 60).catch(() => null);
+    const order = Array.isArray(list) ? (list.find((row) => String(row && row.id || '').trim() === oid) || list[0]) : null;
+    if (order){
+      showOrderDetail(order);
+      return;
+    }
+  }catch(_){ }
+  try{
+    const searchEl = document.getElementById('orderSearch_web');
+    if (searchEl) searchEl.value = oid;
+    await refreshOrders('web');
+  }catch(_){ }
+}
+
+function parseHashIntent(rawHash){
+  const text = String(rawHash || '').trim().replace(/^#/, '');
+  if (!text) return null;
+  const qIdx = text.indexOf('?');
+  const section = cleanDashboardText(qIdx >= 0 ? text.slice(0, qIdx) : text).toLowerCase();
+  const queryRaw = qIdx >= 0 ? text.slice(qIdx + 1) : '';
+  const query = new URLSearchParams(queryRaw);
+  const orderId = String(query.get('order_id') || query.get('open_order_id') || '').trim();
+  return { section, orderId };
+}
+
+async function applyHashIntent(){
+  if (!currentAdminUser) return;
+  const intent = parseHashIntent(location.hash);
+  if (!intent) return;
+  if (intent.section){
+    try{ activateSection(intent.section); }catch(_){ }
+  }
+  if (intent.orderId){
+    await openOrderFromNotification(intent.orderId).catch(() => null);
+  }
+}
+
+if (enablePushBtn){
+  enablePushBtn.addEventListener('click', () => {
+    enablePushNotifications().catch(() => null);
+  });
+}
+if (executiveRefreshBtn){
+  executiveRefreshBtn.addEventListener('click', () => {
+    refreshExecutivePanel({ force: true }).catch(() => null);
+  });
+}
+
+window.addEventListener('hashchange', () => {
+  applyHashIntent().catch(() => null);
+});
 
 function normalizeDashboardStaticCopy(){
   setNodeText('.dashboard-hero-kicker', 'Operacion');
@@ -3043,8 +3621,13 @@ function ensureSalesChartCardLayout(){
 
 normalizeDashboardStaticCopy();
 ensureSalesChartCardLayout();
+setExecutiveEmpty();
 setupPwaInstall();
-registerAdminServiceWorker();
+ensureAdminServiceWorkerRegistration().catch(() => null);
+syncPushButtonState().catch(() => null);
+window.addEventListener('load', () => {
+  applyHashIntent().catch(() => null);
+});
 
 function shouldLiveRefreshOrders(){
   return ['dashboard', 'orders', 'preparations', 'routes', 'deliveries'].includes(String(currentSectionId || ''));
@@ -4540,11 +5123,11 @@ function syncDashboardSummary(){
   }
   if (dashboardCategoryCoverageMetaEl){
     if (totalActive <= 0){
-      dashboardCategoryCoverageMetaEl.textContent = 'Esperando datos del catÃ¡logo.';
+      dashboardCategoryCoverageMetaEl.textContent = 'Esperando datos del catálogo.';
     } else if (uncategorized > 0){
-      dashboardCategoryCoverageMetaEl.textContent = `${formatNumber(activeCategories)} categorÃ­as activas · ${formatNumber(uncategorized)} sin categorizar`;
+      dashboardCategoryCoverageMetaEl.textContent = `${formatNumber(activeCategories)} categorías activas · ${formatNumber(uncategorized)} sin categorizar`;
     } else {
-      dashboardCategoryCoverageMetaEl.textContent = `${formatNumber(activeCategories)} categorÃ­as activas · cobertura completa`;
+      dashboardCategoryCoverageMetaEl.textContent = `${formatNumber(activeCategories)} categorías activas · cobertura completa`;
     }
   }
   const hero = getDashboardHeroImpactConfig();
@@ -5977,7 +6560,7 @@ if(imageInput) imageInput.onchange = () =>{
   try{ if(imageUrlInput) imageUrlInput.value = ''; }catch(_){ }
   if(f){
     const reader = new FileReader();
-    reader.onload = e => { const img = document.createElement('img'); img.src = e.target.result; imagePreview.appendChild(img); };
+    reader.onload = e => { const img = document.createElement('img'); img.loading = 'lazy'; img.decoding = 'async'; img.src = e.target.result; imagePreview.appendChild(img); };
     reader.readAsDataURL(f);
     uploadImageBtn.disabled = false; // enable upload
     imageUrl = null; // reset url until uploaded
@@ -6051,7 +6634,7 @@ if (imageUrlBtn) imageUrlBtn.onclick = async () => {
     try{ if(imageInput) imageInput.value = ''; }catch(_){ }
     if (uploadImageBtn) uploadImageBtn.disabled = true;
     const previewSrc = buildImagePreviewSrc(imageUrl);
-    imagePreview.innerHTML = previewSrc ? `<img src="${previewSrc}" onerror="this.onerror=null;this.src='../images/default.png'"/>` : '';
+    imagePreview.innerHTML = previewSrc ? `<img src="${previewSrc}" loading="lazy" decoding="async" onerror="this.onerror=null;this.src='../images/default.png'"/>` : '';
     try{ fileNameEl.textContent = imageUrl ? imageUrl.split('/').pop() : 'Ningún archivo seleccionado'; }catch(_){ }
     showToast('Imagen cargada desde URL');
   }catch(e){
@@ -6309,7 +6892,7 @@ function renderProducts(products){
 
     tr.innerHTML = `
       <td class="col-select"><input type="checkbox" class="rowSelect" data-id="${escapeHtml(id)}" ${checked ? 'checked' : ''} aria-label="Seleccionar producto" /></td>
-      <td>${imgSrc ? `<img src="${imgSrc}" alt="${escapeHtml(p.name || '')}" width="60" height="60" style="border-radius:10px;object-fit:cover;background:#fff7ed;border:1px solid rgba(2,6,23,0.06)" onerror="this.onerror=null;this.src='icon.png'">` : ''}</td>
+      <td>${imgSrc ? `<img src="${imgSrc}" alt="${escapeHtml(p.name || '')}" loading="lazy" decoding="async" width="60" height="60" style="border-radius:10px;object-fit:cover;background:#fff7ed;border:1px solid rgba(2,6,23,0.06)" onerror="this.onerror=null;this.src='icon.png'">` : ''}</td>
       <td>${escapeHtml(p.name || '')}</td>
       <td>${brand ? escapeHtml(brand) : '<span class="cell-muted">—</span>'}</td>
       <td>${productCode ? (escapeHtml(productCode) + (isDupSku ? ' <span class="cell-danger">Duplicado</span>' : '')) : '<span class="cell-warn">Falta</span>'}</td>
@@ -6869,7 +7452,7 @@ function updateStats(products){
   dashboardState.avgPrice = Number.isFinite(avg) ? avg : 0;
   updateLowStockAlert(list);
   const categoryEntries = buildDashboardCategoryEntries(list);
-  const uncategorized = categoryEntries.find((entry) => String(entry.label || '').toLowerCase() === 'sin categorÃ­a');
+  const uncategorized = categoryEntries.find((entry) => String(entry.label || '').toLowerCase() === 'sin categoría');
   dashboardState.activeCategories = categoryEntries.length;
   dashboardState.uncategorized = Number((categoryEntries.find((entry) => String(entry.label || '').toLowerCase().includes('sin categor')) || {}).count || 0);
   dashboardState.categoryCoverage = totalActive > 0 ? (((totalActive - dashboardState.uncategorized) / totalActive) * 100) : 0;
@@ -7145,7 +7728,7 @@ async function onEdit(id){
       else if(p.image_url.startsWith('/')) previewSrc = API_BASE + p.image_url;
       else previewSrc = API_BASE + '/' + p.image_url.replace(/^\//, '');
     }
-  imagePreview.innerHTML = previewSrc ? `<img src="${previewSrc}" onerror="this.onerror=null;this.src='../images/default.png'"/>` : '';
+  imagePreview.innerHTML = previewSrc ? `<img src="${previewSrc}" loading="lazy" decoding="async" onerror="this.onerror=null;this.src='../images/default.png'"/>` : '';
     imageUrl = p.image_url;
     selectedFile = null; fileNameEl.textContent = p.image_url ? p.image_url.split('/').pop() : 'Ningún archivo seleccionado';
     try{ if(imageUrlInput) imageUrlInput.value = p.image_url || ''; }catch(_){ }
@@ -7207,7 +7790,7 @@ async function onDuplicate(id){
       else if(u.startsWith('/')) previewSrc = API_BASE + u;
       else previewSrc = API_BASE + '/' + u.replace(/^\//, '');
     }
-    imagePreview.innerHTML = previewSrc ? `<img src="${previewSrc}" onerror="this.onerror=null;this.src='icon.png'"/>` : '';
+    imagePreview.innerHTML = previewSrc ? `<img src="${previewSrc}" loading="lazy" decoding="async" onerror="this.onerror=null;this.src='icon.png'"/>` : '';
 
     document.getElementById('modalTitle').textContent = 'Duplicar producto';
     await openModal();
@@ -10801,6 +11384,8 @@ async function bootstrapAuthenticatedAdmin(){
   try{ loadOrderMapsCoordCache(); }catch(e){ console.warn('loadOrderMapsCoordCache failed', e); }
   try{ await refresh(); }catch(e){ console.warn('authenticated refresh failed', e); }
   try{ await refreshOrders('web'); }catch(e){ console.warn('authenticated refreshOrders failed', e); }
+  try{ await refreshExecutivePanel({ quiet: true }); }catch(e){ console.warn('authenticated executive refresh failed', e); }
+  try{ await maybeAutoEnablePush(); }catch(e){ console.warn('authenticated push setup failed', e); }
   try{ startAutoImageProgressPolling(); }catch(e){ console.warn('authenticated auto image polling failed', e); }
 }
 
@@ -10925,6 +11510,8 @@ try{
       refreshRoutes(false);
     } else if (section === 'deliveries'){
       refreshDeliveries(false);
+    } else if (section === 'executive'){
+      refreshExecutivePanel({ quiet: true });
     }
   }, ORDERS_POLL_INTERVAL_MS);
 }catch(e){ console.warn('orders polling setup failed', e); }
@@ -10961,19 +11548,23 @@ function setupSocket(attempt = 0){
       }
       if (data && data.action === 'orders_changed'){
         scheduleOperationsRefresh(`ws:${data.action}`, 400);
+        scheduleExecutiveRefresh(`ws:${data.action}`, 300);
         return;
       }
       if (data && data.action === 'order_updated' && data.order){
         try{ mergePatchedOrderIntoCaches(data.order, data.order.id); }catch(_){ }
         scheduleOperationsRefresh('ws:order_updated', 250);
+        scheduleExecutiveRefresh('ws:order_updated', 300);
         return;
       }
       if (['created', 'updated', 'deleted', 'bulk_updated'].includes(data.action)){
         const hasProductPayload = !!(data && data.product && (typeof data.product.id !== 'undefined' || typeof data.product.name !== 'undefined'));
         if (hasProductPayload || data.action === 'created' || data.action === 'deleted' || data.action === 'bulk_updated'){
           scheduleCatalogRefresh(`ws:${data.action}`, hasProductPayload ? 1200 : 1600);
+          scheduleExecutiveRefresh(`ws:${data.action}`, 450);
         } else {
           scheduleOperationsRefresh(`ws:${data.action}`, 500);
+          scheduleExecutiveRefresh(`ws:${data.action}`, 500);
         }
         return;
       }
@@ -10991,6 +11582,7 @@ function setupSocket(attempt = 0){
               insertOrderAtTop(data.order);
               showToast(`Pedido recibido: #${data.order.id}`);
               scheduleOperationsRefresh('ws:order_created_inline', 250);
+              scheduleExecutiveRefresh('ws:order_created_inline', 280);
             }
             return;
           }catch(e){ console.warn('insertOrderAtTop failed, falling back to full refresh', e); }
@@ -11010,23 +11602,26 @@ function setupSocket(attempt = 0){
                       insertOrderAtTop(srv);
                       try{ showToast(`Pedido recibido: #${srv.id}`); }catch(_){ }
                       scheduleOperationsRefresh('ws:order_created_by_id', 250);
+                      scheduleExecutiveRefresh('ws:order_created_by_id', 300);
                     }
                   }catch(_){ }
                 } else {
                   // fallback: full refresh web table
                   scheduleOperationsRefresh('ws:order_created_fallback', 250);
+                  scheduleExecutiveRefresh('ws:order_created_fallback', 320);
                 }
-              }catch(e){ console.warn('fetch by id after ws event failed', e); scheduleOperationsRefresh('ws:order_created_fetch_fail', 250); }
+              }catch(e){ console.warn('fetch by id after ws event failed', e); scheduleOperationsRefresh('ws:order_created_fetch_fail', 250); scheduleExecutiveRefresh('ws:order_created_fetch_fail', 350); }
             })();
             return;
           }
         }catch(e){ console.warn('post-ws fetch-by-id handling failed', e); }
       }
-      const closeBtn = document.getElementById('closePromoFallback'); if(closeBtn) closeBtn.onclick = ()=> { fm.remove(); };
-      // if snapshot file exists, we can load products and show, but avoid blocking
-      try{ const resp = await fetch('../catalogo/products.json'); if(resp.ok){ const items = await resp.json(); const list = (items && items.length) ? items.map(i=> `<div>${i.name}</div>`).join('') : 'Ninguno'; const _pf = document.getElementById('promoProductsFallback'); if(_pf) _pf.innerHTML = list; } }catch(e){}
+      scheduleExecutiveRefresh(`ws:${data.action || 'unknown'}`, 650);
       return;
-    }catch(e){ console.error('[admin] failed to create fallback modal', e); showToast('No se pudo abrir el modal y el fallback falló', 'error'); return; }
+    }catch(e){
+      console.warn('[admin] websocket message parse/handle failed', e);
+      return;
+    }
   }
 }
 
