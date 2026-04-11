@@ -1,0 +1,8 @@
+[
+  { "texto": "ravioles de jamon y queso", "categoria": "pastas", "embedding": null, "source": "seed", "updatedAt": "2026-01-01T00:00:00.000Z" },
+  { "texto": "jamon cocido feteado", "categoria": "fiambres", "embedding": null, "source": "seed", "updatedAt": "2026-01-01T00:00:00.000Z" },
+  { "texto": "queso cremoso", "categoria": "lacteos", "embedding": null, "source": "seed", "updatedAt": "2026-01-01T00:00:00.000Z" },
+  { "texto": "mayonesa hellmanns", "categoria": "aderezos", "embedding": null, "source": "seed", "updatedAt": "2026-01-01T00:00:00.000Z" },
+  { "texto": "salsa de tomate", "categoria": "aderezos", "embedding": null, "source": "seed", "updatedAt": "2026-01-01T00:00:00.000Z" }
+]
+

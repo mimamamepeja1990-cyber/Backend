@@ -503,6 +503,80 @@ def _scoped_snapshot_filename(filename: str, business_scope: Optional[str] = Non
     return f'{root}.{scope}{ext}'
 
 
+N8N_WEBHOOK_DEFAULT_URL = 'https://distriar.app.n8n.cloud/webhook-test/pedidos-eventos'
+N8N_WEBHOOK_URL = str(
+    os.environ.get('N8N_WEBHOOK_URL')
+    or os.environ.get('N8N_WEBHOOK_PEDIDOS_URL')
+    or N8N_WEBHOOK_DEFAULT_URL
+).strip()
+N8N_WEBHOOK_ENABLED = _is_truthy(os.environ.get('N8N_WEBHOOK_ENABLED') or ('1' if N8N_WEBHOOK_URL else '0'))
+N8N_WEBHOOK_TIMEOUT_SEC = max(2.0, _env_float('N8N_WEBHOOK_TIMEOUT_SEC', 6.0))
+N8N_WEBHOOK_RETRIES = max(1, min(_env_int('N8N_WEBHOOK_RETRIES', 2), 5))
+N8N_WEBHOOK_RETRY_DELAY_SEC = max(0.1, _env_float('N8N_WEBHOOK_RETRY_DELAY_SEC', 0.7))
+
+
+def _mask_webhook_url(url: Optional[str]) -> str:
+    raw = str(url or '').strip()
+    if not raw:
+        return ''
+    if len(raw) <= 56:
+        return raw
+    return f'{raw[:44]}...{raw[-9:]}'
+
+
+def _enqueue_n8n_event(
+    event_type: str,
+    payload: Optional[Dict[str, Any]] = None,
+    business_scope: Optional[str] = None,
+) -> None:
+    if not N8N_WEBHOOK_ENABLED:
+        return
+    webhook_url = str(N8N_WEBHOOK_URL or '').strip()
+    if not webhook_url:
+        return
+    event_key = str(event_type or '').strip() or 'event'
+    scope = _normalize_catalog_business_scope(business_scope, default='all')
+    body = {
+        'event': event_key,
+        'source': 'backend',
+        'business_scope': scope,
+        'sent_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        'data': jsonable_encoder(payload or {}),
+    }
+
+    def _task() -> None:
+        timeout = httpx.Timeout(N8N_WEBHOOK_TIMEOUT_SEC, connect=min(5.0, N8N_WEBHOOK_TIMEOUT_SEC))
+        last_error: Optional[str] = None
+        for attempt in range(1, N8N_WEBHOOK_RETRIES + 1):
+            try:
+                with httpx.Client(timeout=timeout) as client:
+                    resp = client.post(webhook_url, json=body)
+                if 200 <= int(resp.status_code) < 300:
+                    logger.info('n8n webhook sent event=%s status=%s attempt=%s', event_key, resp.status_code, attempt)
+                    return
+                last_error = f'status={resp.status_code}'
+                transient_http = resp.status_code in (408, 409, 425, 429) or resp.status_code >= 500
+                if not transient_http:
+                    break
+            except Exception as exc:
+                last_error = str(exc)[:240]
+            if attempt < N8N_WEBHOOK_RETRIES:
+                time.sleep(N8N_WEBHOOK_RETRY_DELAY_SEC * attempt)
+        logger.warning(
+            'n8n webhook failed event=%s retries=%s url=%s reason=%s',
+            event_key,
+            N8N_WEBHOOK_RETRIES,
+            _mask_webhook_url(webhook_url),
+            last_error or 'unknown_error',
+        )
+
+    try:
+        thread = threading.Thread(target=_task, name=f'n8n-{event_key}', daemon=True)
+        thread.start()
+    except Exception:
+        logger.exception('Could not start n8n webhook thread for event=%s', event_key)
+
+
 # --- Geocoding (optional, for delivery route optimization) ---
 GEOCODE_PROVIDER = str(os.environ.get('GEOCODE_PROVIDER') or '').strip().lower() or 'nominatim'
 GEOCODE_GOOGLE_API_KEY = str(os.environ.get('GEOCODE_GOOGLE_API_KEY') or '').strip() or None
@@ -5283,12 +5357,25 @@ _AUTO_CATEGORY_EXCLUDE_TERMS = {
     'panificados': ['pan rallado', 'rallado'],
     'hamburguesas': ['pan de hamburguesa'],
     'pollo': ['suprema rebozada', 'hamburguesa de pollo', 'medallon de pollo'],
-    'fiambres': ['chorizo', 'morcilla', 'salchicha parrillera'],
-    'embutidos': ['jamon cocido', 'jamon crudo', 'paleta'],
+    'fiambres': [
+        'chorizo', 'morcilla', 'salchicha parrillera',
+        'milanesa', 'milanesas', 'suprema rebozada', 'supremas rebozadas',
+        'nugget', 'nuggets', 'queso', 'quesos', 'mozzarella', 'muzzarella',
+    ],
+    'embutidos': [
+        'jamon cocido', 'jamon crudo', 'paleta',
+        'milanesa', 'milanesas', 'suprema rebozada', 'supremas rebozadas',
+        'queso', 'quesos',
+    ],
     'lacteos': ['queso', 'quesos'],
     'almacen': ['gaseosa', 'queso', 'jamon'],
 }
 _AUTO_BROAD_CATEGORIES = {'lacteos', 'almacen', 'congelados', 'bebidas', 'panificados', 'pastas'}
+_AUTO_CATEGORY_MUTEX_MAP = {
+    'quesos': {'fiambres', 'embutidos'},
+    'milanesas': {'fiambres', 'embutidos'},
+    'hamburguesas': {'fiambres', 'embutidos'},
+}
 _AUTO_GENERIC_CATEGORIES = {
     '',
     'general',
@@ -5480,6 +5567,24 @@ def _append_unique_value(target: List[str], value: Any) -> None:
         target.append(normalized)
 
 
+def _enforce_auto_category_consistency(primary: Any, values: List[Any]) -> List[str]:
+    primary_norm = _normalize_auto_category_value(primary)
+    blocked = set(_AUTO_CATEGORY_MUTEX_MAP.get(primary_norm) or [])
+    out: List[str] = []
+    seen = set()
+    for value in list(values or []):
+        normalized = _normalize_auto_category_value(value)
+        if not normalized or normalized in seen:
+            continue
+        if blocked and normalized != primary_norm and normalized in blocked:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+    if primary_norm and primary_norm not in seen:
+        out.insert(0, primary_norm)
+    return out
+
+
 def _score_auto_rule(
     rule: Dict[str, Any],
     name_text: str,
@@ -5596,6 +5701,7 @@ def _derive_product_categories(product_row: Dict[str, Any]) -> Dict[str, Any]:
     if primary:
         filters = [value for value in filters if value != primary]
         filters.insert(0, primary)
+    filters = _enforce_auto_category_consistency(primary, filters)
 
     confidence = 'none'
     if selected_matches:
@@ -13684,6 +13790,21 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
             )
         except Exception:
             logger.exception('Could not enqueue push event for new order id=%s', payload.get('id') if isinstance(payload, dict) else None)
+        try:
+            _enqueue_n8n_event(
+                event_type='order_created',
+                payload={
+                    'order_id': payload.get('id'),
+                    'status': _normalize_order_status(payload.get('status') or 'recibido'),
+                    'customer_type': payload.get('customer_type') or 'mayorista',
+                    'source': payload.get('source') or 'web',
+                    'total': payload.get('total') or 0,
+                    'order': payload,
+                },
+                business_scope=payload.get('customer_type') or 'mayorista',
+            )
+        except Exception:
+            logger.exception('Could not enqueue n8n event for new order id=%s', payload.get('id') if isinstance(payload, dict) else None)
         # If order creation decremented stock, update snapshot and notify product watchers.
         try:
             # Product stock updates
@@ -13728,6 +13849,15 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
                                 'event_type': 'stock_critical',
                                 'items': len(low_stock_now),
                                 'customer_type': payload.get('customer_type') if isinstance(payload, dict) else 'mayorista',
+                            },
+                            business_scope=(payload.get('customer_type') if isinstance(payload, dict) else 'mayorista'),
+                        )
+                        _enqueue_n8n_event(
+                            event_type='stock_critical',
+                            payload={
+                                'items_count': len(low_stock_now),
+                                'items': low_stock_now,
+                                'trigger_order_id': payload.get('id') if isinstance(payload, dict) else None,
                             },
                             business_scope=(payload.get('customer_type') if isinstance(payload, dict) else 'mayorista'),
                         )
@@ -17700,6 +17830,23 @@ async def update_order_status(order_id: str, request: Request, background_tasks:
             )
     except Exception:
         logger.exception('Could not enqueue push for order status update id=%s', od.get('id') if isinstance(od, dict) else None)
+
+    try:
+        status_n8n = _normalize_order_status(od.get('status') or status_norm)
+        _enqueue_n8n_event(
+            event_type='order_status_changed',
+            payload={
+                'order_id': od.get('id'),
+                'status': status_n8n,
+                'customer_type': od.get('customer_type') or 'mayorista',
+                'source': od.get('source') or 'web',
+                'total': od.get('total') or 0,
+                'order': od,
+            },
+            business_scope=od.get('customer_type') or 'mayorista',
+        )
+    except Exception:
+        logger.exception('Could not enqueue n8n event for order status update id=%s', od.get('id') if isinstance(od, dict) else None)
 
     try:
         status_effective = _normalize_order_status(od.get('status') or status_norm)

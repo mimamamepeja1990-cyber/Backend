@@ -2194,3 +2194,128 @@ body.auth-locked .auth-overlay{display:flex}
   }
 }
 
+/* -------------------------------------------------
+   Mobile Hardening (layout stability)
+-------------------------------------------------- */
+@media (max-width:900px){
+  html, body{
+    overflow-x:hidden;
+  }
+  .app{
+    max-width:100vw;
+    overflow-x:hidden;
+  }
+  main{
+    width:100%;
+    min-width:0;
+    padding:14px;
+  }
+  header{
+    width:100%;
+    margin-bottom:14px;
+    gap:10px;
+  }
+  .header-left{
+    width:100%;
+    min-width:0;
+    gap:8px;
+  }
+  .header-left h1{
+    margin:0;
+    font-size:36px;
+    line-height:1.05;
+  }
+  .counter, .api-indicator, .ws-indicator{
+    width:100%;
+    min-width:0;
+  }
+  .top-actions{
+    width:100%;
+    display:grid;
+    grid-template-columns:repeat(2, minmax(0, 1fr));
+    gap:8px;
+  }
+  .top-actions .btn{
+    width:100%;
+    justify-content:center;
+    min-height:42px;
+  }
+  .controls{
+    display:grid;
+    grid-template-columns:1fr;
+    gap:8px;
+  }
+  .controls > *{
+    min-width:0;
+    width:100%;
+  }
+  .dashboard-hero-panel,
+  .dashboard-priority-grid,
+  .dashboard-metric-groups,
+  .dashboard-kpi-grid,
+  .dashboard-action-rail{
+    grid-template-columns:1fr !important;
+  }
+  .driver-map{
+    height:260px;
+  }
+  .modal{
+    padding:12px;
+  }
+  .modal-card{
+    width:min(96vw, 560px);
+  }
+  .auth-overlay{
+    padding:12px;
+  }
+  .auth-card{
+    max-height:calc(100vh - 24px);
+    overflow:auto;
+  }
+}
+
+@media (max-width:700px){
+  .top-actions{
+    grid-template-columns:1fr;
+  }
+  .top-actions .btn{
+    min-height:44px;
+  }
+
+  /* Keep complex orders rows readable (avoid generic table-card clash). */
+  #ordersTable_todos tbody td,
+  #ordersTable_web tbody td,
+  #ordersTable_app tbody td{
+    display:block;
+    width:auto;
+    padding:6px 0;
+  }
+  #ordersTable_todos tbody td::before,
+  #ordersTable_web tbody td::before,
+  #ordersTable_app tbody td::before{
+    content:none !important;
+    display:none !important;
+  }
+  #ordersTable_todos tbody td > *,
+  #ordersTable_web tbody td > *,
+  #ordersTable_app tbody td > *{
+    max-width:100%;
+  }
+
+  /* Correct mobile labels for current products table columns. */
+  #productsTable tbody td:nth-child(1)::before{content:'' !important; display:none !important;}
+  #productsTable tbody td:nth-child(2)::before{content:"Imagen"}
+  #productsTable tbody td:nth-child(3)::before{content:"Nombre"}
+  #productsTable tbody td:nth-child(4)::before{content:"Marca"}
+  #productsTable tbody td:nth-child(5)::before{content:"Codigo"}
+  #productsTable tbody td:nth-child(6)::before{content:"Categoria"}
+  #productsTable tbody td:nth-child(7)::before{content:"Precio mayorista"}
+  #productsTable tbody td:nth-child(8)::before{content:"Precio minorista"}
+  #productsTable tbody td:nth-child(9)::before{content:"Costo"}
+  #productsTable tbody td:nth-child(10)::before{content:"Margen"}
+  #productsTable tbody td:nth-child(11)::before{content:"Stock"}
+  #productsTable tbody td:nth-child(12)::before{content:"Minimo"}
+  #productsTable tbody td:nth-child(13)::before{content:"Activo"}
+  #productsTable tbody td:nth-child(14)::before{content:"Acciones"}
+}
+

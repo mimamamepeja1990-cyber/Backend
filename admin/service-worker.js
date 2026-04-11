@@ -25,6 +25,10 @@ const APP_SHELL = [
 const STATIC_EXT_RE = /\.(?:html|css|js|png|jpg|jpeg|webp|svg|gif|ico|json|webmanifest)$/i;
 const DYNAMIC_PATH_RE = /^\/(?:admin\/(?:resumen-ejecutivo|operations\/overview|sales\/stats|driver-insights|locations)|orders|products|api\/consumos|promotions)/i;
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
+}
+
 function toCacheKey(request) {
   try {
     const url = new URL(request.url);
@@ -116,6 +120,13 @@ async function networkFirstNavigation(request) {
     await putIfValid(STATIC_CACHE, '/admin/index.html', networkResp);
     return networkResp;
   } catch (_) {
+    // Short retry helps on cold starts (e.g. free-tier spin-up) before falling back.
+    try {
+      await sleep(900);
+      const retryResp = await fetch(request, { cache: 'no-store' });
+      await putIfValid(STATIC_CACHE, '/admin/index.html', retryResp);
+      return retryResp;
+    } catch (_) {}
     const cached = await caches.match('/admin/index.html', { ignoreSearch: true });
     if (cached) return cached;
     return offlineHtmlResponse();
@@ -131,8 +142,9 @@ async function networkFirstDynamic(request) {
   } catch (_) {
     const cached = await caches.match(key, { ignoreSearch: true });
     if (cached) return cached;
-    return new Response(JSON.stringify({ offline: true }), {
-      status: 503,
+    // Avoid synthetic 503s that break UX/noise console in flaky mobile networks.
+    return new Response(JSON.stringify({ offline: true, source: 'sw-fallback' }), {
+      status: 200,
       headers: { 'Content-Type': 'application/json; charset=utf-8' },
     });
   }
@@ -147,14 +159,20 @@ async function cacheFirstStatic(request) {
     await putIfValid(STATIC_CACHE, key, networkResp);
     return networkResp;
   } catch (_) {
-    return new Response('Offline', { status: 503, statusText: 'Offline' });
+    // Return an empty 204 instead of 503 to prevent noisy resource errors.
+    return new Response('', { status: 204, statusText: 'No Content' });
   }
 }
 
 self.addEventListener('fetch', (event) => {
   const request = event.request;
   if (!request || request.method !== 'GET') return;
-  const url = new URL(request.url);
+  let url;
+  try {
+    url = new URL(request.url);
+  } catch (_) {
+    return;
+  }
   if (!isSameOrigin(url)) return;
 
   if (request.mode === 'navigate') {

@@ -2936,26 +2936,26 @@ let adminServiceWorkerRegistration = null;
 function cleanDashboardText(value){
   let out = String(value == null ? '' : value);
   const replacements = [
-    ['ÃƒÂ¡', 'a'], ['Ã¡', 'a'], ['á', 'a'],
-    ['ÃƒÂ©', 'e'], ['Ã©', 'e'], ['é', 'e'],
-    ['ÃƒÂ­', 'i'], ['Ã­', 'i'], ['í', 'i'],
-    ['ÃƒÂ³', 'o'], ['Ã³', 'o'], ['ó', 'o'],
-    ['ÃƒÂº', 'u'], ['Ãº', 'u'], ['ú', 'u'],
-    ['ÃƒÂ', 'A'], ['Ã', 'A'], ['Á', 'A'],
-    ['ÃƒÂ‰', 'E'], ['Ã‰', 'E'], ['É', 'E'],
-    ['ÃƒÂ', 'I'], ['Ã', 'I'], ['Í', 'I'],
-    ['ÃƒÂ“', 'O'], ['Ã“', 'O'], ['Ó', 'O'],
-    ['ÃƒÂš', 'U'], ['Ãš', 'U'], ['Ú', 'U'],
-    ['ÃƒÂ±', 'n'], ['Ã±', 'n'], ['ñ', 'n'],
-    ['ÃƒÂ¼', 'u'], ['Ã¼', 'u'], ['ü', 'u'],
+    ['ÃƒÂ¡', 'á'], ['Ã¡', 'á'],
+    ['ÃƒÂ©', 'é'], ['Ã©', 'é'],
+    ['ÃƒÂ­', 'í'], ['Ã­', 'í'],
+    ['ÃƒÂ³', 'ó'], ['Ã³', 'ó'],
+    ['ÃƒÂº', 'ú'], ['Ãº', 'ú'],
+    ['ÃƒÂ', 'Á'], ['Ã', 'Á'],
+    ['ÃƒÂ‰', 'É'], ['Ã‰', 'É'],
+    ['ÃƒÂ', 'Í'], ['Ã', 'Í'],
+    ['ÃƒÂ“', 'Ó'], ['Ã“', 'Ó'],
+    ['ÃƒÂš', 'Ú'], ['Ãš', 'Ú'],
+    ['ÃƒÂ±', 'ñ'], ['Ã±', 'ñ'],
+    ['ÃƒÂ¼', 'ü'], ['Ã¼', 'ü'],
     ['Â·', ' - '], ['·', ' - '],
-    ['Ã¢â‚¬â€', '-'], ['â€”', '-'], ['—', '-'], ['–', '-'],
+    ['Ã¢â‚¬â€', '—'], ['â€”', '—'],
     ['Ã‚', ''], ['Â', ''],
   ];
   replacements.forEach(([from, to]) => {
     out = out.split(from).join(to);
   });
-  out = out.replace(/\s+-\s+/g, ' - ');
+  out = out.replace(/\s+—\s+/g, ' — ');
   out = out.replace(/\s+/g, ' ').trim();
   return out;
 }
@@ -3561,34 +3561,34 @@ window.addEventListener('hashchange', () => {
 });
 
 function normalizeDashboardStaticCopy(){
-  setNodeText('.dashboard-hero-kicker', 'Operacion');
+  setNodeText('.dashboard-hero-kicker', 'Operación');
   setNodeText(dashboardHeroLabelEl, 'alertas activas');
-  setNodeText('#dashboardPriorityGrid [data-dashboard-action="orders"] .dashboard-priority-kicker', 'Atencion inmediata');
+  setNodeText('#dashboardPriorityGrid [data-dashboard-action="orders"] .dashboard-priority-kicker', 'Atención inmediata');
   setNodeText('#dashboardPriorityGrid [data-dashboard-action="orders"] .dashboard-priority-label', 'Pedidos sin ver');
-  setNodeText('#dashboardPriorityGrid [data-dashboard-action="orders"] .dashboard-priority-meta', 'Entraron al panel y todavia no se revisaron.');
+  setNodeText('#dashboardPriorityGrid [data-dashboard-action="orders"] .dashboard-priority-meta', 'Entraron al panel y todavía no se revisaron.');
   setNodeText('#dashboardPriorityGrid [data-dashboard-action="preparations"] .dashboard-priority-label', 'Pedidos sin preparar');
-  setNodeText('#dashboardPriorityGrid [data-dashboard-action="preparations"] .dashboard-priority-meta', 'Ya se vieron, pero todavia no quedaron listos.');
+  setNodeText('#dashboardPriorityGrid [data-dashboard-action="preparations"] .dashboard-priority-meta', 'Ya se vieron, pero todavía no quedaron listos.');
   setNodeText('#dashboardPriorityGrid [data-dashboard-action="catalog"] .dashboard-priority-label', 'Stock bajo');
-  setNodeText('#dashboardPriorityGrid [data-dashboard-action="catalog"] .dashboard-priority-meta', 'Productos que pueden frenar venta o preparacion.');
+  setNodeText('#dashboardPriorityGrid [data-dashboard-action="catalog"] .dashboard-priority-meta', 'Productos que pueden frenar venta o preparación.');
   setNodeText('.dashboard-group-business .dashboard-group-kicker', 'Negocio');
-  setNodeText('.dashboard-group-business h3', 'Como viene la venta');
-  setNodeText('.dashboard-group-business .dashboard-group-note', 'Ultimos 30 dias');
-  setNodeText('.dashboard-group-catalog .dashboard-group-kicker', 'Catalogo');
+  setNodeText('.dashboard-group-business h3', 'Cómo viene la venta');
+  setNodeText('.dashboard-group-business .dashboard-group-note', 'Últimos 30 días');
+  setNodeText('.dashboard-group-catalog .dashboard-group-kicker', 'Catálogo');
   setNodeText('.dashboard-group-catalog h3', 'Salud del inventario');
   setNodeText('.dashboard-group-catalog .dashboard-group-note', 'Base activa');
-  setNodeText('#dashboardSalesRevenue30 + .dashboard-kpi-meta', 'Facturacion acumulada del periodo.');
-  setNodeText('#dashboardSalesOrders30 + .dashboard-kpi-meta', 'Volumen total procesado en 30 dias.');
-  setNodeText('#dashboardAvgPrice + .dashboard-kpi-meta', `Referencia rapida del catalogo ${isRetailBusinessScope() ? 'minorista' : 'mayorista'}.`);
-  setNodeText('article[data-dashboard-action="filters"] .dashboard-kpi-label', 'Cobertura de categorias');
-  setNodeText(dashboardCategoryCoverageMetaEl, 'Esperando datos del catalogo.');
-  setNodeText('.dashboard-action-card[data-dashboard-action="orders"] .dashboard-action-kicker', 'Accion');
+  setNodeText('#dashboardSalesRevenue30 + .dashboard-kpi-meta', 'Facturación acumulada del período.');
+  setNodeText('#dashboardSalesOrders30 + .dashboard-kpi-meta', 'Volumen total procesado en 30 días.');
+  setNodeText('#dashboardAvgPrice + .dashboard-kpi-meta', `Referencia rápida del catálogo ${isRetailBusinessScope() ? 'minorista' : 'mayorista'}.`);
+  setNodeText('article[data-dashboard-action="filters"] .dashboard-kpi-label', 'Cobertura de categorías');
+  setNodeText(dashboardCategoryCoverageMetaEl, 'Esperando datos del catálogo.');
+  setNodeText('.dashboard-action-card[data-dashboard-action="orders"] .dashboard-action-kicker', 'Acción');
   setNodeText('.dashboard-action-card[data-dashboard-action="orders"] strong', 'Ir a Pedidos');
-  setNodeText('.dashboard-action-card[data-dashboard-action="orders"] span:last-child', 'Revisa ingresos nuevos y movimiento del dia.');
+  setNodeText('.dashboard-action-card[data-dashboard-action="orders"] span:last-child', 'Revisá ingresos nuevos y movimiento del día.');
   setNodeText('.dashboard-action-card[data-dashboard-action="preparations"] strong', 'Ir a Preparaciones');
-  setNodeText('.dashboard-action-card[data-dashboard-action="preparations"] span:last-child', 'Marca listos y mantene la cocina ordenada.');
-  setNodeText('.dashboard-action-card[data-dashboard-action="catalog"] .dashboard-action-kicker', 'Catalogo');
-  setNodeText('.dashboard-action-card[data-dashboard-action="catalog"] strong', 'Ir a Catalogo');
-  setNodeText('.dashboard-action-card[data-dashboard-action="filters"] span:last-child', 'Ajusta como se clasifica y se muestra el surtido.');
+  setNodeText('.dashboard-action-card[data-dashboard-action="preparations"] span:last-child', 'Marcá listos y mantené la cocina ordenada.');
+  setNodeText('.dashboard-action-card[data-dashboard-action="catalog"] .dashboard-action-kicker', 'Catálogo');
+  setNodeText('.dashboard-action-card[data-dashboard-action="catalog"] strong', 'Ir a Catálogo');
+  setNodeText('.dashboard-action-card[data-dashboard-action="filters"] span:last-child', 'Ajustá cómo se clasifica y se muestra el surtido.');
 }
 
 function ensureSalesChartCardLayout(){
