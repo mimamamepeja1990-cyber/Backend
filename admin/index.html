@@ -16,9 +16,9 @@
   <link rel="stylesheet" href="styles.css?v=8">
   <!-- Fix: use admin-scoped image path so the favicon is served by the /admin static mount -->
   <link rel="icon" type="image/png" href="icon.png">
-  <link rel="apple-touch-icon" sizes="192x192" href="icon-192.png">
-  <link rel="apple-touch-icon" sizes="512x512" href="icon-512.png">
-  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" sizes="192x192" href="icon-192-v2.png">
+  <link rel="apple-touch-icon" sizes="512x512" href="icon-512-v2.png">
+  <link rel="manifest" href="manifest.webmanifest?v=2">
   <meta name="theme-color" content="#0a2240">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -438,6 +438,40 @@
                 <strong id="execRevenueToday" class="executive-card-value">-</strong>
               </article>
             </div>
+
+            <article id="execWeeklyPanel" class="executive-panel executive-weekly-panel hidden">
+              <div class="executive-weekly-head">
+                <div>
+                  <h3>Resumen semanal</h3>
+                  <p id="execWeeklyPeriod" class="executive-weekly-period">Últimos 7 días</p>
+                </div>
+              </div>
+              <div class="executive-weekly-grid">
+                <article class="executive-weekly-card">
+                  <span class="executive-weekly-label">Producto líder</span>
+                  <strong id="execWeeklyTopProduct" class="executive-weekly-value">-</strong>
+                  <span id="execWeeklyTopProductMeta" class="executive-weekly-meta">Sin datos semanales</span>
+                </article>
+                <article class="executive-weekly-card">
+                  <span class="executive-weekly-label">Repartidor top</span>
+                  <strong id="execWeeklyBestDriver" class="executive-weekly-value">-</strong>
+                  <span id="execWeeklyBestDriverMeta" class="executive-weekly-meta">Sin actividad registrada</span>
+                </article>
+                <article class="executive-weekly-card">
+                  <span class="executive-weekly-label">Cliente top</span>
+                  <strong id="execWeeklyTopCustomer" class="executive-weekly-value">-</strong>
+                  <span id="execWeeklyTopCustomerMeta" class="executive-weekly-meta">Sin compras destacadas</span>
+                </article>
+                <article class="executive-weekly-card">
+                  <span class="executive-weekly-label">Facturación semanal</span>
+                  <strong id="execWeeklyRevenue" class="executive-weekly-value">-</strong>
+                  <span id="execWeeklyRevenueMeta" class="executive-weekly-meta">Ticket promedio: -</span>
+                </article>
+              </div>
+              <div id="execWeeklyHighlights" class="executive-list">
+                <div class="empty-note">El resumen aparecerá cuando haya datos semanales.</div>
+              </div>
+            </article>
 
             <div class="executive-columns">
               <article class="executive-panel">

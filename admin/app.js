@@ -555,7 +555,7 @@ function requestDriverRoadSegment(service, stops){
         destination,
         waypoints,
         optimizeWaypoints: false,
-        travelMode: google.maps.TravelMode.DRIVING,
+        travelMode: getGoogleDrivingTravelMode(),
         provideRouteAlternatives: false,
       },
       (result, status) => {
@@ -707,6 +707,26 @@ function advanceDriverRoute(id){
   animateDriverMarkerTo(id, marker, target, queue.segMs, () => advanceDriverRoute(id));
 }
 
+function getGoogleRoadmapTypeId(){
+  try{
+    return (window.google && window.google.maps && window.google.maps.MapTypeId && window.google.maps.MapTypeId.ROADMAP)
+      ? window.google.maps.MapTypeId.ROADMAP
+      : 'roadmap';
+  }catch(_){
+    return 'roadmap';
+  }
+}
+
+function getGoogleDrivingTravelMode(){
+  try{
+    return (window.google && window.google.maps && window.google.maps.TravelMode && window.google.maps.TravelMode.DRIVING)
+      ? window.google.maps.TravelMode.DRIVING
+      : 'DRIVING';
+  }catch(_){
+    return 'DRIVING';
+  }
+}
+
 async function loadGoogleMapsApi(){
   if (window.google && window.google.maps) return true;
   const key = (window.GOOGLE_MAPS_API_KEY || '').trim();
@@ -760,7 +780,7 @@ async function initDriverMap(){
   driverMap = new google.maps.Map(container, {
     center,
     zoom: 12,
-    mapTypeId: google.maps.MapTypeId.ROADMAP,
+    mapTypeId: getGoogleRoadmapTypeId(),
     mapTypeControl: false,
     streetViewControl: false,
     fullscreenControl: true,
@@ -832,7 +852,7 @@ function updateDriverMarker(driver){
               {
                 origin: origin,
                 destination: dest,
-                travelMode: google.maps.TravelMode.DRIVING,
+                travelMode: getGoogleDrivingTravelMode(),
                 provideRouteAlternatives: false,
               },
               (result, status) => {
@@ -1742,6 +1762,23 @@ function getAdminToken(){
   }catch(_){ return ''; }
 }
 
+function isJwtLikelyExpired(token, skewSeconds = 30){
+  try{
+    const raw = String(token || '').trim();
+    if (!raw || raw.split('.').length < 2) return false;
+    const part = raw.split('.')[1] || '';
+    const normalized = part.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized + '='.repeat((4 - (normalized.length % 4 || 4)) % 4);
+    const json = JSON.parse(atob(padded));
+    const exp = Number(json && json.exp);
+    if (!Number.isFinite(exp) || exp <= 0) return false;
+    const now = Math.floor(Date.now() / 1000);
+    return exp <= (now + Math.max(0, Number(skewSeconds) || 0));
+  }catch(_){
+    return false;
+  }
+}
+
 function setAdminToken(token){
   try{
     if (token) localStorage.setItem(ADMIN_TOKEN_KEY, String(token));
@@ -2195,7 +2232,12 @@ function initAuth(){
       setAuthStep('scope');
       return;
     }
-    const token = getAdminToken();
+    let token = getAdminToken();
+    if (token && isJwtLikelyExpired(token, 45)){
+      clearAdminToken();
+      clearSessionUser();
+      token = '';
+    }
     if (token){
       const sessionUser = getSessionUser();
       const me = await safeFetch(API_BASE + '/admin/auth/me').catch(() => null);
@@ -2903,6 +2945,17 @@ const execCriticalStockEl = document.getElementById('execCriticalStock');
 const execRevenueTodayEl = document.getElementById('execRevenueToday');
 const execAlertsListEl = document.getElementById('execAlertsList');
 const execActivityListEl = document.getElementById('execActivityList');
+const execWeeklyPanelEl = document.getElementById('execWeeklyPanel');
+const execWeeklyPeriodEl = document.getElementById('execWeeklyPeriod');
+const execWeeklyTopProductEl = document.getElementById('execWeeklyTopProduct');
+const execWeeklyTopProductMetaEl = document.getElementById('execWeeklyTopProductMeta');
+const execWeeklyBestDriverEl = document.getElementById('execWeeklyBestDriver');
+const execWeeklyBestDriverMetaEl = document.getElementById('execWeeklyBestDriverMeta');
+const execWeeklyTopCustomerEl = document.getElementById('execWeeklyTopCustomer');
+const execWeeklyTopCustomerMetaEl = document.getElementById('execWeeklyTopCustomerMeta');
+const execWeeklyRevenueEl = document.getElementById('execWeeklyRevenue');
+const execWeeklyRevenueMetaEl = document.getElementById('execWeeklyRevenueMeta');
+const execWeeklyHighlightsEl = document.getElementById('execWeeklyHighlights');
 const OPERATIONS_INSIGHTS_TTL_MS = 1000 * 60;
 const WS_CATALOG_REFRESH_DEBOUNCE_MS = 1600;
 const WS_OPERATIONS_REFRESH_DEBOUNCE_MS = 900;
@@ -2926,12 +2979,14 @@ let catalogRefreshPending = false;
 let executivePollTimer = null;
 let executiveRefreshTimer = null;
 let executiveInFlight = null;
+let executiveWeeklyInFlight = null;
 let pushConfigCache = null;
 let pushEnableInFlight = null;
 let firebaseScriptsPromise = null;
 let pushMessagingClient = null;
 let pushForegroundHooked = false;
 let adminServiceWorkerRegistration = null;
+let isStandalonePwaRuntime = false;
 
 function cleanDashboardText(value){
   let out = String(value == null ? '' : value);
@@ -3047,6 +3102,36 @@ function setupPwaInstall(){
       setPwaInstallButtonVisible(false);
     }
   });
+}
+
+function detectStandalonePwaMode(){
+  try{
+    if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) return true;
+  }catch(_){ }
+  try{
+    if (window.navigator && window.navigator.standalone === true) return true;
+  }catch(_){ }
+  try{
+    const ref = String(document.referrer || '').toLowerCase();
+    if (ref.startsWith('android-app://')) return true;
+  }catch(_){ }
+  return false;
+}
+
+function syncPwaExclusiveUi(options = {}){
+  const opts = options || {};
+  isStandalonePwaRuntime = detectStandalonePwaMode();
+  if (execWeeklyPanelEl){
+    execWeeklyPanelEl.classList.toggle('hidden', !isStandalonePwaRuntime);
+  }
+  if (!isStandalonePwaRuntime){
+    setExecutiveWeeklyEmpty();
+    return;
+  }
+  if (opts.skipRefresh) return;
+  if (currentSectionId === 'executive' && currentAdminUser && hasApiConnection()){
+    refreshExecutiveWeeklyPanel({ quiet: true }).catch(() => null);
+  }
 }
 
 function canUseBrowserPush(){
@@ -3349,6 +3434,101 @@ function setExecutiveEmpty(){
   if (executiveUpdatedAtEl) executiveUpdatedAtEl.textContent = 'Esperando datos...';
   if (execAlertsListEl) execAlertsListEl.innerHTML = '<div class="empty-note">Sin alertas criticas por ahora.</div>';
   if (execActivityListEl) execActivityListEl.innerHTML = '<div class="empty-note">Todavia sin actividad reciente.</div>';
+  setExecutiveWeeklyEmpty();
+}
+
+function setExecutiveWeeklyEmpty(){
+  if (execWeeklyPeriodEl) execWeeklyPeriodEl.textContent = 'Últimos 7 días';
+  if (execWeeklyTopProductEl) execWeeklyTopProductEl.textContent = '-';
+  if (execWeeklyTopProductMetaEl) execWeeklyTopProductMetaEl.textContent = 'Sin datos semanales';
+  if (execWeeklyBestDriverEl) execWeeklyBestDriverEl.textContent = '-';
+  if (execWeeklyBestDriverMetaEl) execWeeklyBestDriverMetaEl.textContent = 'Sin actividad registrada';
+  if (execWeeklyTopCustomerEl) execWeeklyTopCustomerEl.textContent = '-';
+  if (execWeeklyTopCustomerMetaEl) execWeeklyTopCustomerMetaEl.textContent = 'Sin compras destacadas';
+  if (execWeeklyRevenueEl) execWeeklyRevenueEl.textContent = '-';
+  if (execWeeklyRevenueMetaEl) execWeeklyRevenueMetaEl.textContent = 'Ticket promedio: -';
+  if (execWeeklyHighlightsEl){
+    execWeeklyHighlightsEl.innerHTML = '<div class="empty-note">El resumen aparecerá cuando haya datos semanales.</div>';
+  }
+}
+
+function formatExecutivePeriodDate(value){
+  const raw = String(value || '').trim();
+  if (!raw) return '-';
+  try{
+    const dt = new Date(`${raw}T12:00:00`);
+    if (!Number.isFinite(dt.getTime())) return raw;
+    return dt.toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit' });
+  }catch(_){
+    return raw;
+  }
+}
+
+function renderExecutiveWeeklyPanel(payload){
+  if (!execWeeklyPanelEl || !isStandalonePwaRuntime) return;
+  const data = payload && typeof payload === 'object' ? payload : {};
+  const period = data && typeof data.period === 'object' ? data.period : {};
+  const fromLabel = formatExecutivePeriodDate(period.from);
+  const toLabel = formatExecutivePeriodDate(period.to);
+  const daysLabel = Number(period.days || 7);
+  if (execWeeklyPeriodEl){
+    execWeeklyPeriodEl.textContent = `${fromLabel} a ${toLabel} · ${formatNumber(daysLabel)} días`;
+  }
+  const kpis = data && typeof data.kpis === 'object' ? data.kpis : {};
+  const topProduct = data && typeof data.top_product === 'object' ? data.top_product : {};
+  const bestDriver = data && typeof data.best_driver === 'object' ? data.best_driver : {};
+  const topCustomer = data && typeof data.top_customer === 'object' ? data.top_customer : {};
+
+  if (execWeeklyTopProductEl){
+    execWeeklyTopProductEl.textContent = cleanDashboardText(topProduct.name || 'Sin líder');
+  }
+  if (execWeeklyTopProductMetaEl){
+    const qty = Number(topProduct.qty || 0);
+    const revenue = Number(topProduct.revenue || 0);
+    const qtyLabel = qty > 0 ? `${formatNumber(qty, { digits: 3 })} un.` : 'Sin unidades';
+    const revenueLabel = revenue > 0 ? formatMoneyRounded(revenue) : '-';
+    execWeeklyTopProductMetaEl.textContent = `${qtyLabel} · ${revenueLabel}`;
+  }
+
+  if (execWeeklyBestDriverEl){
+    execWeeklyBestDriverEl.textContent = cleanDashboardText(bestDriver.driver_name || 'Sin ranking');
+  }
+  if (execWeeklyBestDriverMetaEl){
+    const success = Number(bestDriver.success_rate || 0) * 100;
+    const speed = bestDriver.avg_completion_minutes;
+    const delivered = Number(bestDriver.delivered_orders || 0);
+    const speedLabel = (speed == null || !Number.isFinite(Number(speed))) ? 'sin tiempo medio' : `${formatNumber(Number(speed), { digits: 1 })} min`;
+    execWeeklyBestDriverMetaEl.textContent = `${formatNumber(success, { digits: 1 })}% éxito · ${speedLabel} · ${formatNumber(delivered)} entregas`;
+  }
+
+  if (execWeeklyTopCustomerEl){
+    execWeeklyTopCustomerEl.textContent = cleanDashboardText(topCustomer.name || 'Sin cliente líder');
+  }
+  if (execWeeklyTopCustomerMetaEl){
+    const revenue = Number(topCustomer.revenue || 0);
+    const orders = Number(topCustomer.orders || 0);
+    execWeeklyTopCustomerMetaEl.textContent = `${formatMoneyRounded(revenue)} · ${formatNumber(orders)} pedido${orders === 1 ? '' : 's'}`;
+  }
+
+  if (execWeeklyRevenueEl){
+    execWeeklyRevenueEl.textContent = formatMoney(Number(kpis.revenue_total || 0));
+  }
+  if (execWeeklyRevenueMetaEl){
+    execWeeklyRevenueMetaEl.textContent = `Ticket promedio: ${formatMoney(Number(kpis.avg_ticket || 0))}`;
+  }
+
+  if (execWeeklyHighlightsEl){
+    const highlights = Array.isArray(data.highlights) ? data.highlights.slice(0, 4) : [];
+    if (!highlights.length){
+      execWeeklyHighlightsEl.innerHTML = '<div class="empty-note">El resumen semanal no tiene hallazgos todavía.</div>';
+    } else {
+      execWeeklyHighlightsEl.innerHTML = highlights.map((line) => `
+        <article class="executive-item tone-activity">
+          <p>${escapeHtml(cleanDashboardText(line))}</p>
+        </article>
+      `).join('');
+    }
+  }
 }
 
 function renderExecutiveAlerts(alerts){
@@ -3444,6 +3624,37 @@ function renderExecutivePanel(payload){
   renderExecutiveActivity(data.actividad_tiempo_real);
 }
 
+async function refreshExecutiveWeeklyPanel(options = {}){
+  const opts = options || {};
+  if (!isStandalonePwaRuntime){
+    setExecutiveWeeklyEmpty();
+    return null;
+  }
+  if (!currentAdminUser || !hasApiConnection()) return null;
+  if (executiveWeeklyInFlight && !opts.force) return executiveWeeklyInFlight;
+  executiveWeeklyInFlight = (async () => {
+    try{
+      const scope = getScopedOrderCustomerType();
+      const path = withScopedQuery(`${API_BASE}/admin/resumen-semanal-pwa?days=7`, scope);
+      const payload = await safeFetch(path, {
+        cache: 'no-store',
+        headers: getScopedRequestHeaders(),
+      });
+      renderExecutiveWeeklyPanel(payload);
+      return payload;
+    }catch(e){
+      if (opts.quiet !== true){
+        try{ showToast('No se pudo actualizar el resumen semanal del PWA', 'error'); }catch(_){ }
+      }
+      setExecutiveWeeklyEmpty();
+      return null;
+    }finally{
+      executiveWeeklyInFlight = null;
+    }
+  })();
+  return executiveWeeklyInFlight;
+}
+
 async function refreshExecutivePanel(options = {}){
   const opts = options || {};
   if (!currentAdminUser || !hasApiConnection()) return null;
@@ -3457,6 +3668,7 @@ async function refreshExecutivePanel(options = {}){
         headers: getScopedRequestHeaders(),
       });
       renderExecutivePanel(payload);
+      await refreshExecutiveWeeklyPanel({ quiet: true, force: !!opts.force });
       return payload;
     }catch(e){
       if (opts.quiet !== true){
@@ -3634,6 +3846,19 @@ normalizeDashboardStaticCopy();
 ensureSalesChartCardLayout();
 setExecutiveEmpty();
 setupPwaInstall();
+syncPwaExclusiveUi({ skipRefresh: true });
+try{
+  const standaloneMedia = window.matchMedia ? window.matchMedia('(display-mode: standalone)') : null;
+  if (standaloneMedia && typeof standaloneMedia.addEventListener === 'function'){
+    standaloneMedia.addEventListener('change', () => syncPwaExclusiveUi());
+  }else if (standaloneMedia && typeof standaloneMedia.addListener === 'function'){
+    standaloneMedia.addListener(() => syncPwaExclusiveUi());
+  }
+}catch(_){ }
+window.addEventListener('focus', () => syncPwaExclusiveUi({ skipRefresh: currentSectionId !== 'executive' }));
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) syncPwaExclusiveUi({ skipRefresh: currentSectionId !== 'executive' });
+});
 ensureAdminServiceWorkerRegistration().catch(() => null);
 syncPushButtonState().catch(() => null);
 window.addEventListener('load', () => {
@@ -4326,7 +4551,7 @@ async function initBranchesMap(){
   branchesMap = new google.maps.Map(branchesMapContainer, {
     center: { lat: -32.8895, lng: -68.8458 },
     zoom: 13,
-    mapTypeId: google.maps.MapTypeId.ROADMAP,
+    mapTypeId: getGoogleRoadmapTypeId(),
     mapTypeControl: false,
     streetViewControl: false,
     fullscreenControl: true,

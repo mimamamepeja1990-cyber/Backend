@@ -17,13 +17,13 @@ const APP_SHELL = [
   '/admin/app.js',
   '/admin/styles.css',
   '/admin/icon.png',
-  '/admin/icon-192.png',
-  '/admin/icon-512.png',
+  '/admin/icon-192-v2.png',
+  '/admin/icon-512-v2.png',
   '/admin/manifest.webmanifest',
 ];
 
 const STATIC_EXT_RE = /\.(?:html|css|js|png|jpg|jpeg|webp|svg|gif|ico|json|webmanifest)$/i;
-const DYNAMIC_PATH_RE = /^\/(?:admin\/(?:resumen-ejecutivo|operations\/overview|sales\/stats|driver-insights|locations)|orders|products|api\/consumos|promotions)/i;
+const DYNAMIC_PATH_RE = /^\/(?:admin\/(?:resumen-ejecutivo|resumen-semanal-pwa|operations\/overview|sales\/stats|driver-insights|locations)|orders|products|api\/consumos|promotions)/i;
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
@@ -211,8 +211,8 @@ try {
       const targetUrl = String(data.url || '/admin/index.html');
       self.registration.showNotification(title, {
         body,
-        icon: '/admin/icon-192.png',
-        badge: '/admin/icon-192.png',
+        icon: '/admin/icon-192-v2.png',
+        badge: '/admin/icon-192-v2.png',
         data: {
           url: targetUrl,
           order_id: data.order_id || '',

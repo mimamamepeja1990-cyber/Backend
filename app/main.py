@@ -320,12 +320,16 @@ def _enqueue_admin_push_event(event_type: str, title: str, body: str, payload: O
     data_payload.setdefault('event_type', event_key)
     scope = _normalize_catalog_business_scope(business_scope)
     data_payload.setdefault('business_scope', scope)
-    link = '/admin/index.html'
+    link = str(data_payload.get('url') or '/admin/index.html').strip() or '/admin/index.html'
     order_id = str(data_payload.get('order_id') or '').strip()
+    open_section = str(data_payload.get('open_section') or '').strip()
+    if (not order_id) and open_section:
+        link = f'/admin/index.html#{quote_plus(open_section)}'
     if order_id:
         link = f'/admin/index.html#orders?order_id={quote_plus(order_id)}'
         data_payload.setdefault('open_section', 'orders')
         data_payload.setdefault('open_order_id', order_id)
+    data_payload.setdefault('url', link)
 
     def _task() -> None:
         db_local = SessionLocal()
@@ -610,6 +614,9 @@ TRACKING_ROUTE_START_HOUR = max(0, min(23, _env_int('TRACKING_ROUTE_START_HOUR',
 TRACKING_ROUTE_START_MINUTE = max(0, min(59, _env_int('TRACKING_ROUTE_START_MINUTE', 30)))
 TRACKING_LIVE_MAX_AGE_MINUTES = max(1, _env_int('TRACKING_LIVE_MAX_AGE_MINUTES', 25))
 TRACKING_FALLBACK_SPEED_KMH = max(10.0, _env_float('TRACKING_FALLBACK_SPEED_KMH', 26.0))
+DRIVER_LIFECYCLE_EVENT_COOLDOWN_SEC = max(10, _env_int('DRIVER_LIFECYCLE_EVENT_COOLDOWN_SEC', 60))
+DRIVER_LIFECYCLE_STALE_SEC = max(300, _env_int('DRIVER_LIFECYCLE_STALE_SEC', 60 * 60 * 12))
+DRIVER_RETURN_RADIUS_M = max(20.0, _env_float('DRIVER_RETURN_RADIUS_M', max(DRIVER_DEPOT_RADIUS_M * 1.5, 55.0)))
 
 _GEOCODE_CACHE: Dict[str, Dict[str, Any]] = {}
 _GEOCODE_CACHE_LOCK = threading.Lock()
@@ -620,6 +627,8 @@ _GEOCODE_CACHE_DIRTY = False
 _ROUTE_START_CACHE: Dict[str, Any] = {}
 DRIVER_LOCATIONS: Dict[str, Dict[str, Any]] = {}
 DRIVER_LOCATIONS_LOCK = threading.Lock()
+DRIVER_LIFECYCLE_STATE: Dict[str, Dict[str, Any]] = {}
+DRIVER_LIFECYCLE_LOCK = threading.Lock()
 APP_EVENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
 ADMIN_STRESS_TEST_LOCK = threading.Lock()
 ADMIN_STRESS_TEST_STATE: Dict[str, Any] = {
@@ -12344,6 +12353,267 @@ def _build_admin_resumen_ejecutivo(
     }
 
 
+def _build_admin_weekly_pwa_summary(
+    db: Session,
+    customer_type_filter: Optional[str] = None,
+    days: int = 7,
+    limit: int = 6000,
+) -> Dict[str, Any]:
+    tzinfo, tz_name = _resolve_dashboard_tzinfo()
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    today_local = now_utc.astimezone(tzinfo).date()
+    days_window = max(7, min(21, _ops_safe_int(days, 7)))
+    sample_limit = max(1000, min(25000, _ops_safe_int(limit, 6000)))
+    from_local = today_local - datetime.timedelta(days=days_window - 1)
+
+    orders_raw = list_orders(skip=0, limit=sample_limit, source=None, q=None, date=None, db=db) or []
+    scoped_orders: List[Dict[str, Any]] = []
+    for row in (orders_raw or []):
+        if not isinstance(row, dict):
+            continue
+        if customer_type_filter:
+            if _normalize_admin_customer_type_filter(row.get('customer_type')) != customer_type_filter:
+                continue
+        created_local = _ops_order_created_local_date(row, tzinfo)
+        if created_local is None or created_local < from_local or created_local > today_local:
+            continue
+        scoped_orders.append(row)
+
+    orders_total = 0
+    non_cancelled_orders = 0
+    cancelled_orders = 0
+    delivered_orders = 0
+    revenue_total = 0.0
+
+    product_stats: Dict[str, Dict[str, Any]] = {}
+    customer_stats: Dict[str, Dict[str, Any]] = {}
+    driver_stats: Dict[str, Dict[str, Any]] = {}
+
+    for order_data in scoped_orders:
+        orders_total += 1
+        status_key = _normalize_order_status(order_data.get('status'))
+        total_value = _ops_order_total(order_data)
+        is_cancelled = status_key == 'cancelado'
+        if is_cancelled:
+            cancelled_orders += 1
+        else:
+            non_cancelled_orders += 1
+            revenue_total += total_value
+        if status_key == 'entregado':
+            delivered_orders += 1
+
+        if not is_cancelled:
+            customer_id = str(order_data.get('user_id') or '').strip()
+            customer_name = str(order_data.get('user_full_name') or '').strip()
+            customer_email = str(order_data.get('user_email') or '').strip().lower()
+            customer_key = customer_id or customer_email or customer_name.lower()
+            customer_label = customer_name or customer_email or (f'Cliente #{customer_id}' if customer_id else 'Cliente')
+            if customer_key:
+                customer_bucket = customer_stats.get(customer_key)
+                if customer_bucket is None:
+                    customer_bucket = {
+                        'id': customer_id or None,
+                        'name': customer_label,
+                        'email': customer_email or None,
+                        'orders': 0,
+                        'revenue': 0.0,
+                    }
+                    customer_stats[customer_key] = customer_bucket
+                customer_bucket['orders'] = int(customer_bucket.get('orders') or 0) + 1
+                customer_bucket['revenue'] = float(customer_bucket.get('revenue') or 0.0) + total_value
+
+            for item in _ops_parse_order_items(order_data.get('items')):
+                qty = _ops_safe_float(item.get('qty') or item.get('quantity') or 0.0, 0.0)
+                if qty <= 0:
+                    continue
+                meta = item.get('meta') if isinstance(item.get('meta'), dict) else {}
+                item_id = str(item.get('id') or meta.get('id') or meta.get('product_id') or '').strip()
+                item_name = str(
+                    meta.get('name')
+                    or meta.get('title')
+                    or item.get('name')
+                    or meta.get('product_name')
+                    or item_id
+                    or 'Producto'
+                ).strip() or 'Producto'
+                item_key = item_id or item_name.lower()
+                unit_price = _ops_safe_float(
+                    meta.get('price')
+                    or meta.get('unit_price')
+                    or item.get('price')
+                    or item.get('unit_price')
+                    or 0.0,
+                    0.0,
+                )
+                revenue_item = max(0.0, qty * unit_price)
+                product_bucket = product_stats.get(item_key)
+                if product_bucket is None:
+                    product_bucket = {
+                        'product_id': item_id or None,
+                        'name': item_name,
+                        'qty': 0.0,
+                        'revenue': 0.0,
+                        'orders': 0,
+                    }
+                    product_stats[item_key] = product_bucket
+                product_bucket['qty'] = float(product_bucket.get('qty') or 0.0) + qty
+                product_bucket['revenue'] = float(product_bucket.get('revenue') or 0.0) + revenue_item
+                product_bucket['orders'] = int(product_bucket.get('orders') or 0) + 1
+
+        driver_id = order_data.get('assigned_driver_id')
+        driver_username = str(order_data.get('assigned_driver_username') or '').strip() or None
+        driver_name = str(order_data.get('assigned_driver_name') or driver_username or '').strip() or None
+        if driver_id is None and not driver_username:
+            driver_id = order_data.get('delivered_by_id')
+            if not driver_username:
+                driver_username = str(order_data.get('delivered_by_username') or '').strip() or None
+            if not driver_name:
+                driver_name = str(driver_username or '').strip() or None
+        if driver_id is not None or driver_username:
+            driver_key = str(driver_id if driver_id is not None else driver_username or '').strip().lower()
+            if driver_key:
+                driver_bucket = driver_stats.get(driver_key)
+                if driver_bucket is None:
+                    driver_bucket = {
+                        'driver_id': driver_id,
+                        'driver_username': driver_username,
+                        'driver_name': driver_name or driver_username or f'Repartidor {driver_id}',
+                        'assigned_orders': 0,
+                        'delivered_orders': 0,
+                        'cancelled_orders': 0,
+                        'speed_samples': 0,
+                        'speed_minutes_total': 0.0,
+                    }
+                    driver_stats[driver_key] = driver_bucket
+                driver_bucket['assigned_orders'] = int(driver_bucket.get('assigned_orders') or 0) + 1
+                if status_key == 'entregado':
+                    driver_bucket['delivered_orders'] = int(driver_bucket.get('delivered_orders') or 0) + 1
+                    delivered_dt = _parse_datetime_utc(order_data.get('delivered_at')) or _parse_datetime_utc(order_data.get('updated_at'))
+                    start_dt = (
+                        _parse_datetime_utc(order_data.get('sent_at'))
+                        or _parse_datetime_utc(order_data.get('prepared_at'))
+                        or _parse_datetime_utc(order_data.get('created_at'))
+                    )
+                    if delivered_dt is not None and start_dt is not None:
+                        try:
+                            duration_minutes = max(1.0, (delivered_dt - start_dt).total_seconds() / 60.0)
+                            if math.isfinite(duration_minutes):
+                                driver_bucket['speed_samples'] = int(driver_bucket.get('speed_samples') or 0) + 1
+                                driver_bucket['speed_minutes_total'] = float(driver_bucket.get('speed_minutes_total') or 0.0) + duration_minutes
+                        except Exception:
+                            pass
+                elif status_key == 'cancelado':
+                    driver_bucket['cancelled_orders'] = int(driver_bucket.get('cancelled_orders') or 0) + 1
+
+    top_products = sorted(
+        product_stats.values(),
+        key=lambda row: (float(row.get('qty') or 0.0), float(row.get('revenue') or 0.0)),
+        reverse=True,
+    )[:10]
+    for row in top_products:
+        row['qty'] = float(round(_ops_safe_float(row.get('qty'), 0.0), 3))
+        row['revenue'] = float(round(_ops_safe_float(row.get('revenue'), 0.0), 2))
+        row['orders'] = int(row.get('orders') or 0)
+
+    top_customers = sorted(
+        customer_stats.values(),
+        key=lambda row: (float(row.get('revenue') or 0.0), int(row.get('orders') or 0)),
+        reverse=True,
+    )[:5]
+    for row in top_customers:
+        row['revenue'] = float(round(_ops_safe_float(row.get('revenue'), 0.0), 2))
+        row['orders'] = int(row.get('orders') or 0)
+
+    driver_ranking: List[Dict[str, Any]] = []
+    for row in driver_stats.values():
+        assigned_orders = max(0, int(row.get('assigned_orders') or 0))
+        delivered_orders_driver = max(0, int(row.get('delivered_orders') or 0))
+        cancelled_orders_driver = max(0, int(row.get('cancelled_orders') or 0))
+        speed_samples = max(0, int(row.get('speed_samples') or 0))
+        speed_minutes_total = _ops_safe_float(row.get('speed_minutes_total'), 0.0)
+        avg_minutes = (speed_minutes_total / speed_samples) if speed_samples > 0 else None
+        success_rate = (delivered_orders_driver / assigned_orders) if assigned_orders > 0 else 0.0
+        speed_component = 8.0 if avg_minutes is None else max(0.0, 40.0 - (min(avg_minutes, 240.0) / 6.0))
+        volume_component = min(30.0, delivered_orders_driver * 3.0)
+        score = (success_rate * 100.0) + speed_component + volume_component
+        driver_ranking.append(
+            {
+                'driver_id': row.get('driver_id'),
+                'driver_username': row.get('driver_username'),
+                'driver_name': row.get('driver_name') or row.get('driver_username') or 'Repartidor',
+                'assigned_orders': assigned_orders,
+                'delivered_orders': delivered_orders_driver,
+                'cancelled_orders': cancelled_orders_driver,
+                'success_rate': float(round(success_rate, 4)),
+                'avg_completion_minutes': None if avg_minutes is None else float(round(avg_minutes, 1)),
+                'score': float(round(score, 2)),
+            }
+        )
+    driver_ranking.sort(
+        key=lambda row: (
+            float(row.get('score') or 0.0),
+            float(row.get('success_rate') or 0.0),
+            -float(row.get('avg_completion_minutes') or 99999.0),
+            int(row.get('delivered_orders') or 0),
+        ),
+        reverse=True,
+    )
+    driver_ranking = driver_ranking[:5]
+
+    avg_ticket = (revenue_total / non_cancelled_orders) if non_cancelled_orders > 0 else 0.0
+    top_product = top_products[0] if top_products else None
+    top_customer = top_customers[0] if top_customers else None
+    best_driver = driver_ranking[0] if driver_ranking else None
+
+    highlights: List[str] = []
+    if top_product:
+        highlights.append(
+            f"Producto líder: {top_product.get('name')} con {top_product.get('qty')} unidades."
+        )
+    if best_driver:
+        speed_text = (
+            f"{best_driver.get('avg_completion_minutes')} min promedio"
+            if best_driver.get('avg_completion_minutes') is not None
+            else 'sin velocidad promedio todavía'
+        )
+        highlights.append(
+            f"Repartidor destacado: {best_driver.get('driver_name')} ({round(float(best_driver.get('success_rate') or 0.0) * 100.0, 1)}% éxito, {speed_text})."
+        )
+    if top_customer:
+        highlights.append(
+            f"Cliente top: {top_customer.get('name')} con {_format_ars_money(top_customer.get('revenue') or 0.0)} en {top_customer.get('orders')} pedidos."
+        )
+    if not highlights:
+        highlights.append('Todavía no hay suficiente actividad para armar un resumen semanal sólido.')
+
+    return {
+        'generated_at': now_utc,
+        'timezone': tz_name,
+        'customer_type': customer_type_filter,
+        'period': {
+            'days': days_window,
+            'from': from_local.isoformat(),
+            'to': today_local.isoformat(),
+        },
+        'kpis': {
+            'orders_total': int(orders_total),
+            'orders_confirmed': int(non_cancelled_orders),
+            'orders_cancelled': int(cancelled_orders),
+            'orders_delivered': int(delivered_orders),
+            'revenue_total': float(round(revenue_total, 2)),
+            'avg_ticket': float(round(avg_ticket, 2)),
+        },
+        'top_products': top_products,
+        'top_product': top_product,
+        'driver_ranking': driver_ranking,
+        'best_driver': best_driver,
+        'top_customers': top_customers,
+        'top_customer': top_customer,
+        'highlights': highlights,
+        'source_sample_size': len(scoped_orders),
+    }
+
+
 @app.get('/admin/resumen-ejecutivo')
 def admin_resumen_ejecutivo(
     request: Request,
@@ -12357,6 +12627,27 @@ def admin_resumen_ejecutivo(
         raise HTTPException(status_code=403, detail='No autorizado')
     scope_filter = _resolve_admin_customer_type_filter(current_admin, customer_type)
     payload = _build_admin_resumen_ejecutivo(
+        db=db,
+        customer_type_filter=scope_filter,
+        days=days,
+    )
+    headers = _cors_headers_for_request(request)
+    return JSONResponse(status_code=200, content=jsonable_encoder(payload), headers=headers)
+
+
+@app.get('/admin/resumen-semanal-pwa')
+def admin_resumen_semanal_pwa(
+    request: Request,
+    days: int = 7,
+    customer_type: Optional[str] = None,
+    current_admin=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
+    role = str(getattr(current_admin, 'role', '') or '').strip().lower()
+    if role not in ('owner', 'admin'):
+        raise HTTPException(status_code=403, detail='No autorizado')
+    scope_filter = _resolve_admin_customer_type_filter(current_admin, customer_type)
+    payload = _build_admin_weekly_pwa_summary(
         db=db,
         customer_type_filter=scope_filter,
         days=days,
@@ -16204,6 +16495,268 @@ def admin_driver_insights(
     return JSONResponse(status_code=200, content=jsonable_encoder(payload), headers=headers)
 
 
+def _driver_lifecycle_key(driver_id: Optional[int], driver_username: Optional[str]) -> str:
+    did = str(driver_id).strip() if driver_id is not None else ''
+    duser = str(driver_username or '').strip().lower()
+    if did:
+        return f'id:{did}'
+    if duser:
+        return f'user:{duser}'
+    return 'unknown'
+
+
+def _driver_assigned_active_order_count(driver_id: Optional[int], driver_username: Optional[str]) -> int:
+    if driver_id is None and not driver_username:
+        return 0
+    clauses: List[str] = []
+    params: Dict[str, Any] = {}
+    if driver_id is not None:
+        try:
+            params['driver_id'] = int(driver_id)
+            clauses.append('assigned_driver_id = :driver_id')
+        except Exception:
+            pass
+    if driver_username:
+        params['driver_username'] = str(driver_username).strip()
+        clauses.append('assigned_driver_username = :driver_username')
+    if not clauses:
+        return 0
+    where_sql = ' OR '.join(clauses)
+    try:
+        with engine.connect() as conn:
+            count_val = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM orders "
+                    f"WHERE ({where_sql}) "
+                    "AND LOWER(COALESCE(status, 'recibido')) IN ('visto', 'preparado', 'enviado')"
+                ),
+                params,
+            ).scalar()
+        return max(0, int(count_val or 0))
+    except Exception:
+        return 0
+
+
+def _driver_is_outside_depot(lat: Any, lon: Any, radius_m: Optional[float] = None) -> Optional[bool]:
+    lat_val = _coerce_coord(lat)
+    lon_val = _coerce_coord(lon)
+    if lat_val is None or lon_val is None:
+        return None
+    try:
+        start_lat, start_lon = _get_route_start_point()
+    except Exception:
+        start_lat, start_lon = None, None
+    if not _is_mendoza_point(start_lat, start_lon):
+        return None
+    use_radius = float(radius_m) if radius_m is not None else float(DRIVER_DEPOT_RADIUS_M or 0.0)
+    if use_radius <= 0:
+        return None
+    try:
+        distance_m = _haversine_km(float(lat_val), float(lon_val), float(start_lat), float(start_lon)) * 1000.0
+    except Exception:
+        return None
+    return bool(distance_m >= use_radius)
+
+
+def _driver_lifecycle_can_emit_locked(state: Dict[str, Any], event_key: str, now_ts: float) -> bool:
+    event_times = state.get('event_times')
+    if not isinstance(event_times, dict):
+        event_times = {}
+        state['event_times'] = event_times
+    try:
+        last_ts = float(event_times.get(event_key) or 0.0)
+    except Exception:
+        last_ts = 0.0
+    if last_ts > 0 and (now_ts - last_ts) < DRIVER_LIFECYCLE_EVENT_COOLDOWN_SEC:
+        return False
+    event_times[event_key] = float(now_ts)
+    return True
+
+
+def _emit_driver_lifecycle_event(
+    event_type: str,
+    driver_name: Optional[str],
+    driver_id: Optional[int],
+    driver_username: Optional[str],
+    business_scope: Optional[str] = None,
+) -> None:
+    fallback_name = f'Repartidor {driver_id}' if driver_id is not None else 'Repartidor'
+    display_name = str(driver_name or driver_username or fallback_name).strip() or 'Repartidor'
+    event_key = str(event_type or '').strip().lower()
+    title_map = {
+        'driver_departed': 'Repartidor en ruta',
+        'driver_finished_route': 'Ruta completada',
+        'driver_returned': 'Repartidor de regreso',
+    }
+    body_map = {
+        'driver_departed': f'{display_name} ha salido.',
+        'driver_finished_route': f'{display_name} ha terminado de repartir.',
+        'driver_returned': f'{display_name} ha vuelto al depósito.',
+    }
+    title = title_map.get(event_key, 'Actualización de repartidor')
+    body = body_map.get(event_key, f'Hay novedades del repartidor {display_name}.')
+    payload = {
+        'driver_id': driver_id,
+        'driver_username': str(driver_username or '').strip() or None,
+        'driver_name': display_name,
+        'open_section': 'deliveries',
+        'url': '/admin/index.html#deliveries',
+    }
+    _enqueue_admin_push_event(
+        event_type=event_key,
+        title=title,
+        body=body,
+        payload=payload,
+        business_scope=business_scope,
+    )
+    try:
+        _enqueue_n8n_event(
+            event_type=event_key,
+            payload=payload,
+            business_scope=business_scope,
+        )
+    except Exception:
+        logger.exception('Could not enqueue n8n event for driver lifecycle event=%s driver=%s', event_key, display_name)
+    try:
+        _push_event_threadsafe(
+            {
+                'action': 'driver_lifecycle',
+                'event': event_key,
+                'driver': payload,
+            }
+        )
+    except Exception:
+        pass
+
+
+def _sync_driver_lifecycle_from_location(
+    driver_id: Optional[int],
+    driver_username: Optional[str],
+    driver_name: Optional[str],
+    lat: Any,
+    lon: Any,
+    business_scope: Optional[str] = None,
+    active_count_override: Optional[int] = None,
+    recorded_at: Optional[datetime.datetime] = None,
+) -> None:
+    if driver_id is None and not driver_username:
+        return
+    outside_depot = _driver_is_outside_depot(lat, lon, radius_m=DRIVER_DEPOT_RADIUS_M)
+    if outside_depot is None:
+        return
+    if active_count_override is None:
+        active_count = _driver_assigned_active_order_count(driver_id, driver_username)
+    else:
+        try:
+            active_count = max(0, int(active_count_override))
+        except Exception:
+            active_count = 0
+    now_dt = _parse_datetime_utc(recorded_at) or datetime.datetime.now(datetime.timezone.utc)
+    now_ts = now_dt.timestamp()
+    state_key = _driver_lifecycle_key(driver_id, driver_username)
+    emit_events: List[str] = []
+
+    with DRIVER_LIFECYCLE_LOCK:
+        state = DRIVER_LIFECYCLE_STATE.get(state_key)
+        if not isinstance(state, dict):
+            state = {}
+        last_seen_dt = _parse_datetime_utc(state.get('last_seen_at'))
+        if last_seen_dt is not None:
+            try:
+                if (now_dt - last_seen_dt).total_seconds() > DRIVER_LIFECYCLE_STALE_SEC:
+                    state = {}
+            except Exception:
+                pass
+        phase = str(state.get('phase') or 'idle').strip().lower()
+        if phase not in ('idle', 'out', 'completed'):
+            phase = 'idle'
+
+        if phase == 'idle':
+            if outside_depot and active_count > 0:
+                if _driver_lifecycle_can_emit_locked(state, 'driver_departed', now_ts):
+                    emit_events.append('driver_departed')
+                phase = 'out'
+        elif phase == 'out':
+            if active_count <= 0:
+                if _driver_lifecycle_can_emit_locked(state, 'driver_finished_route', now_ts):
+                    emit_events.append('driver_finished_route')
+                phase = 'completed'
+        elif phase == 'completed':
+            inside_for_return = _driver_is_outside_depot(lat, lon, radius_m=DRIVER_RETURN_RADIUS_M)
+            if inside_for_return is False:
+                if _driver_lifecycle_can_emit_locked(state, 'driver_returned', now_ts):
+                    emit_events.append('driver_returned')
+                phase = 'idle'
+            elif active_count > 0:
+                # New route started before returning to depot (rare fallback).
+                if _driver_lifecycle_can_emit_locked(state, 'driver_departed', now_ts):
+                    emit_events.append('driver_departed')
+                phase = 'out'
+
+        state['phase'] = phase
+        state['last_seen_at'] = now_dt
+        state['last_outside_depot'] = bool(outside_depot)
+        state['last_active_count'] = int(active_count)
+        state['driver_name'] = str(driver_name or state.get('driver_name') or '').strip() or None
+        DRIVER_LIFECYCLE_STATE[state_key] = state
+
+    if emit_events:
+        scope = _normalize_catalog_business_scope(business_scope)
+        for event_key in emit_events:
+            _emit_driver_lifecycle_event(
+                event_type=event_key,
+                driver_name=driver_name,
+                driver_id=driver_id,
+                driver_username=driver_username,
+                business_scope=scope,
+            )
+
+
+def _sync_driver_lifecycle_after_delivery(
+    driver_id: Optional[int],
+    driver_username: Optional[str],
+    driver_name: Optional[str],
+    business_scope: Optional[str] = None,
+    recorded_at: Optional[datetime.datetime] = None,
+) -> None:
+    if driver_id is None and not driver_username:
+        return
+    active_count = _driver_assigned_active_order_count(driver_id, driver_username)
+    if active_count > 0:
+        return
+    now_dt = _parse_datetime_utc(recorded_at) or datetime.datetime.now(datetime.timezone.utc)
+    now_ts = now_dt.timestamp()
+    state_key = _driver_lifecycle_key(driver_id, driver_username)
+    should_emit_finished = False
+
+    with DRIVER_LIFECYCLE_LOCK:
+        state = DRIVER_LIFECYCLE_STATE.get(state_key)
+        if not isinstance(state, dict):
+            state = {}
+        phase = str(state.get('phase') or 'idle').strip().lower()
+        if phase == 'completed':
+            state['last_seen_at'] = now_dt
+            state['last_active_count'] = 0
+            DRIVER_LIFECYCLE_STATE[state_key] = state
+            return
+        if _driver_lifecycle_can_emit_locked(state, 'driver_finished_route', now_ts):
+            should_emit_finished = True
+        state['phase'] = 'completed'
+        state['last_seen_at'] = now_dt
+        state['last_active_count'] = 0
+        state['driver_name'] = str(driver_name or state.get('driver_name') or '').strip() or None
+        DRIVER_LIFECYCLE_STATE[state_key] = state
+
+    if should_emit_finished:
+        _emit_driver_lifecycle_event(
+            event_type='driver_finished_route',
+            driver_name=driver_name,
+            driver_id=driver_id,
+            driver_username=driver_username,
+            business_scope=_normalize_catalog_business_scope(business_scope),
+        )
+
+
 def _maybe_mark_driver_departure_enviado(
     driver_id: Optional[int],
     driver_username: Optional[str],
@@ -16364,6 +16917,18 @@ def admin_driver_location(
                     asyncio.create_task(push_event({"action": "orders_changed", "reason": "driver_departure"}))
                 except Exception:
                     pass
+            try:
+                _sync_driver_lifecycle_from_location(
+                    driver_id=driver_id,
+                    driver_username=str(driver_username or '').strip() or None,
+                    driver_name=str(driver_name or '').strip() or None,
+                    lat=float(lat),
+                    lon=float(lon),
+                    business_scope=_get_admin_assigned_business_scope(current_admin),
+                    recorded_at=recorded_at,
+                )
+            except Exception:
+                logger.exception('Could not sync driver lifecycle for location update user=%s', driver_username)
     except Exception:
         pass
 
@@ -17797,6 +18362,25 @@ async def update_order_status(order_id: str, request: Request, background_tasks:
             _shift_driver_route_after_delivery(od)
     except Exception:
         pass
+
+    try:
+        if status_norm == 'entregado' and isinstance(od, dict):
+            driver_id_for_finish = od.get('assigned_driver_id')
+            if driver_id_for_finish is None:
+                driver_id_for_finish = od.get('delivered_by_id')
+            driver_username_for_finish = str(od.get('assigned_driver_username') or '').strip() or None
+            if not driver_username_for_finish:
+                driver_username_for_finish = str(od.get('delivered_by_username') or '').strip() or None
+            driver_name_for_finish = str(od.get('assigned_driver_name') or driver_username_for_finish or '').strip() or None
+            _sync_driver_lifecycle_after_delivery(
+                driver_id=driver_id_for_finish if driver_id_for_finish is not None else None,
+                driver_username=driver_username_for_finish,
+                driver_name=driver_name_for_finish,
+                business_scope=od.get('customer_type') or 'mayorista',
+                recorded_at=od.get('delivered_at'),
+            )
+    except Exception:
+        logger.exception('Could not sync driver lifecycle after delivered order id=%s', od.get('id') if isinstance(od, dict) else None)
 
     # Ensure status is present in response
     try:
