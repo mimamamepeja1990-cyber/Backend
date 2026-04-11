@@ -19,6 +19,8 @@ class Product(Base):
     # Optional brand label shown in catalog/admin.
     brand = Column(String(200), nullable=True)
     image_url = Column(String(500), nullable=True)
+    # Original image URL submitted by user/import (if applicable).
+    image_source_url = Column(String(1000), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     active = Column(Boolean, default=True)
@@ -165,6 +167,17 @@ class Image(Base):
     mime = Column(String(128), nullable=True)
     filename = Column(String(256), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class ProductEmbedding(Base):
+    __tablename__ = "product_embeddings"
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(Integer, nullable=False, unique=True, index=True)
+    model = Column(String(120), nullable=False, default='local-hash-v1')
+    source_text = Column(Text, nullable=True)
+    vector = Column(_JSON, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
 
 class OrderTokenPreview(Base):

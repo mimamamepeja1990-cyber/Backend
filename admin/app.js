@@ -2293,6 +2293,10 @@ initAuth();
 // Small helper to wrap fetch and provide consistent errors and JSON parsing
 async function safeFetch(url, opts) {
   const next = opts ? Object.assign({}, opts) : {};
+  const method = String(next.method || 'GET').trim().toUpperCase() || 'GET';
+  const isRetryableMethod = method === 'GET' || method === 'HEAD';
+  const maxAttempts = isRetryableMethod ? 3 : 1;
+  const retryDelayMs = (attemptNumber) => Math.min(2400, 450 * attemptNumber + Math.round(Math.random() * 250));
   let shouldAttachAuthHeaders = true;
   let isApiOriginRequest = false;
   try{
@@ -2312,44 +2316,61 @@ async function safeFetch(url, opts) {
       next.headers = headers;
     }catch(_){ }
   }
-  let res;
-  try{
-    res = await fetch(url, next);
-  }catch(err){
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1){
+    let res;
     try{
-      const resolved = new URL(url, location.origin);
-      const apiOrigin = new URL(API_BASE, location.origin).origin;
-      if (resolved.origin === apiOrigin){
-        apiBaseCheckedAt = Date.now();
-        apiBaseReachable = false;
-        if(apiBaseIndicator) apiBaseIndicator.textContent = API_BASE + ' (sin conexión)';
+      res = await fetch(url, next);
+    }catch(err){
+      if (isApiOriginRequest && attempt < maxAttempts){
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+        continue;
       }
-    }catch(_){ }
-    throw err;
+      try{
+        const resolved = new URL(url, location.origin);
+        const apiOrigin = new URL(API_BASE, location.origin).origin;
+        if (resolved.origin === apiOrigin){
+          apiBaseCheckedAt = Date.now();
+          apiBaseReachable = false;
+          if(apiBaseIndicator) apiBaseIndicator.textContent = API_BASE + ' (sin conexión)';
+        }
+      }catch(_){ }
+      throw err;
+    }
+    if (!res) throw new Error('no-response');
+    if (isApiOriginRequest){
+      try{
+        apiBaseCheckedAt = Date.now();
+        apiBaseReachable = true;
+        if(apiBaseIndicator) apiBaseIndicator.textContent = API_BASE;
+      }catch(_){ }
+    }
+    const ct = res.headers.get('content-type') || '';
+    let payload = null;
+    try {
+      if (ct.indexOf('application/json') !== -1) payload = await res.json();
+      else payload = await res.text();
+    } catch (e) {
+      payload = null;
+    }
+    if (!res.ok) {
+      const status = Number(res.status || 0);
+      if (
+        isApiOriginRequest &&
+        isRetryableMethod &&
+        attempt < maxAttempts &&
+        (status === 502 || status === 503 || status === 504)
+      ){
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+        continue;
+      }
+      const err = new Error('http-error:' + res.status);
+      err.status = res.status;
+      err.payload = payload;
+      throw err;
+    }
+    return payload;
   }
-  if (!res) throw new Error('no-response');
-  if (isApiOriginRequest){
-    try{
-      apiBaseCheckedAt = Date.now();
-      apiBaseReachable = true;
-      if(apiBaseIndicator) apiBaseIndicator.textContent = API_BASE;
-    }catch(_){ }
-  }
-  const ct = res.headers.get('content-type') || '';
-  let payload = null;
-  try {
-    if (ct.indexOf('application/json') !== -1) payload = await res.json();
-    else payload = await res.text();
-  } catch (e) {
-    payload = null;
-  }
-  if (!res.ok) {
-    const err = new Error('http-error:' + res.status);
-    err.status = res.status;
-    err.payload = payload;
-    throw err;
-  }
-  return payload;
+  throw new Error('fetch-retries-exhausted');
 }
 
 async function ensureApiBase(options){
@@ -4055,6 +4076,7 @@ function syncUserFormRoleState(){
 }
 let currentEditId = null;
 let imageUrl = null;
+let imageSourceUrl = null;
 let selectedFile = null;
 let autoImagePollTimer = null;
 let retailProductsCache = [];
@@ -6065,6 +6087,19 @@ function parseCsvNumber(raw){
   return n;
 }
 
+function normalizeImportedImageLink(raw){
+  try{
+    const value = String(raw || '').trim();
+    if (!value) return '';
+    if (value.startsWith('//')) return 'https:' + value;
+    if (value.startsWith('www.')) return 'https://' + value;
+    if (/^[a-z0-9.-]+\.[a-z]{2,}(\/|$)/i.test(value) && !/^https?:\/\//i.test(value)) return 'https://' + value;
+    return value;
+  }catch(_){
+    return '';
+  }
+}
+
 function normalizeImportColumnKey(value){
   try{
     return String(value || '')
@@ -6125,10 +6160,17 @@ async function importCsvFile(file){
       const cost = parseCsvNumber(r.cost || r.costo);
       const stock = parseCsvNumber(r.stock);
       const minStock = parseCsvNumber(r.min_stock || r.stock_min || r['stock mínimo']);
+      const importedImageUrlRaw = getImportRowValueByAliases(r, ['image_url', 'imagen_url', 'url_imagen', 'image', 'imagen', 'url']);
+      const importedImageSourceRaw = getImportRowValueByAliases(r, ['image_source_url', 'source_url', 'url_original', 'url_origen', 'imagen_origen']);
+      const importedImageUrl = normalizeImportedImageLink(importedImageUrlRaw);
+      const importedImageSource = normalizeImportedImageLink(importedImageSourceRaw);
       if (scopedPrice !== null) u[getScopedProductPriceField()] = round2(scopedPrice);
       if (cost !== null) u.cost = round2(cost);
       if (stock !== null) u.stock = Math.max(0, Math.round(stock));
       if (minStock !== null) u.min_stock = Math.max(0, Math.round(minStock));
+      if (importedImageUrl) u.image_url = importedImageUrl;
+      if (importedImageSource) u.image_source_url = importedImageSource;
+      else if (importedImageUrl && /^(https?:)?\/\//i.test(importedImageUrl)) u.image_source_url = importedImageUrl;
       updates.push(u);
     }
     if (!updates.length){
@@ -6141,8 +6183,9 @@ async function importCsvFile(file){
       body: JSON.stringify(updates),
     });
     const updated = Number(res && res.updated != null ? res.updated : 0) || 0;
-    if (missing.length) showToast(`Importación: ${updated} actualizados · ${missing.length} SKUs no encontrados`, 'warning');
-    else showToast(`Importación: ${updated} actualizados`);
+    const embUpdated = Number(res && res.embeddings_updated != null ? res.embeddings_updated : 0) || 0;
+    if (missing.length) showToast(`Importación: ${updated} actualizados · embeddings ${embUpdated} · ${missing.length} SKUs no encontrados`, 'warning');
+    else showToast(`Importación: ${updated} actualizados · embeddings ${embUpdated}`);
     await ensureAllProductsCache({ force: true }).catch(()=>null);
     await refresh();
   }catch(e){
@@ -6822,6 +6865,7 @@ if(imageInput) imageInput.onchange = () =>{
     reader.readAsDataURL(f);
     uploadImageBtn.disabled = false; // enable upload
     imageUrl = null; // reset url until uploaded
+    imageSourceUrl = null;
   } else {
     uploadImageBtn.disabled = true;
   }
@@ -6834,6 +6878,7 @@ if(uploadImageBtn) uploadImageBtn.onclick = async () =>{
   try{
     const res = await uploadImage(selectedFile);
     imageUrl = res.image_url;
+    imageSourceUrl = null;
     showToast('Imagen subida correctamente');
   }catch(err){
     console.error(err); showToast('Error al subir imagen', 'error');
@@ -6872,6 +6917,16 @@ function buildImagePreviewSrc(rawUrl){
   }catch(_){ return ''; }
 }
 
+function looksLikeExternalImageUrl(rawUrl){
+  try{
+    const u = String(rawUrl || '').trim();
+    if (!u) return false;
+    return u.startsWith('http://') || u.startsWith('https://') || u.startsWith('//');
+  }catch(_){
+    return false;
+  }
+}
+
 async function uploadImageFromUrl(url){
   return await safeFetch(`${API_BASE}/upload-image-url`, {
     method: 'POST',
@@ -6888,12 +6943,14 @@ if (imageUrlBtn) imageUrlBtn.onclick = async () => {
   try{
     const res = await uploadImageFromUrl(raw);
     imageUrl = (res && res.image_url) ? res.image_url : raw;
+    imageSourceUrl = (res && (res.image_source_url || res.source_url)) ? String(res.image_source_url || res.source_url).trim() : raw;
     selectedFile = null;
     try{ if(imageInput) imageInput.value = ''; }catch(_){ }
     if (uploadImageBtn) uploadImageBtn.disabled = true;
     const previewSrc = buildImagePreviewSrc(imageUrl);
     imagePreview.innerHTML = previewSrc ? `<img src="${previewSrc}" loading="lazy" decoding="async" onerror="this.onerror=null;this.src='../images/default.png'"/>` : '';
     try{ fileNameEl.textContent = imageUrl ? imageUrl.split('/').pop() : 'Ningún archivo seleccionado'; }catch(_){ }
+    try{ if (imageUrlInput) imageUrlInput.value = imageSourceUrl || raw; }catch(_){ }
     showToast('Imagen cargada desde URL');
   }catch(e){
     console.error('uploadImageFromUrl failed', e);
@@ -7730,7 +7787,7 @@ function updateStats(products){
 }
 
 // Modal and form behaviors
-if(newBtn) newBtn.onclick = () => { openModal(); };
+if(newBtn) newBtn.onclick = () => { currentEditId = null; imageUrl = null; imageSourceUrl = null; selectedFile = null; try{ productForm.reset(); }catch(_){ } try{ if(imageUrlInput) imageUrlInput.value = ''; }catch(_){ } openModal(); };
 if(modalClose) modalClose.onclick = () => closeModal();
 if(cancelBtn) cancelBtn.onclick = () => closeModal();
 // Bind the save button and form submit to handleSave so "Guardar" actually triggers product create/update
@@ -7858,6 +7915,7 @@ async function handleSave(ev){
     description: productForm.description.value.trim(),
     category: productForm.category.value.trim() || null,
     image_url: imageUrl,
+    image_source_url: imageSourceUrl || (imageUrlInput ? String(imageUrlInput.value || '').trim() || null : null),
     active: (activeSelect ? String(activeSelect.value) !== 'false' : true),
     min_stock: parsedMinStock
   };
@@ -7988,8 +8046,9 @@ async function onEdit(id){
     }
   imagePreview.innerHTML = previewSrc ? `<img src="${previewSrc}" loading="lazy" decoding="async" onerror="this.onerror=null;this.src='../images/default.png'"/>` : '';
     imageUrl = p.image_url;
+    imageSourceUrl = p.image_source_url || (looksLikeExternalImageUrl(p.image_url) ? p.image_url : null);
     selectedFile = null; fileNameEl.textContent = p.image_url ? p.image_url.split('/').pop() : 'Ningún archivo seleccionado';
-    try{ if(imageUrlInput) imageUrlInput.value = p.image_url || ''; }catch(_){ }
+    try{ if(imageUrlInput) imageUrlInput.value = imageSourceUrl || p.image_url || ''; }catch(_){ }
 
     // populate category checkboxes (ensure filters sync first, then mapping)
     try{
@@ -8019,9 +8078,10 @@ async function onDuplicate(id){
     // Reset modal state
     try{ productForm.reset(); }catch(_){ }
     imageUrl = p.image_url || null;
+    imageSourceUrl = p.image_source_url || (looksLikeExternalImageUrl(p.image_url) ? p.image_url : null);
     selectedFile = null;
     try{ fileNameEl.textContent = imageUrl ? String(imageUrl).split('/').pop() : 'Ningun archivo seleccionado'; }catch(_){ }
-    try{ if(imageUrlInput) imageUrlInput.value = imageUrl || ''; }catch(_){ }
+    try{ if(imageUrlInput) imageUrlInput.value = imageSourceUrl || imageUrl || ''; }catch(_){ }
 
     // Prefill with a safe duplicate (force new SKU + zero stock)
     productForm.name.value = String(p.name || '').trim() ? (String(p.name).trim() + ' (Copia)') : 'Producto (Copia)';
@@ -11113,7 +11173,7 @@ async function openModal(){
   setTimeout(()=> productForm.name.focus(), 120);
 }
 function closeModal(){
-  modal.classList.add('hidden'); modal.setAttribute('aria-hidden', 'true'); currentEditId = null; imageUrl = null; selectedFile = null; fileNameEl.textContent = 'Ningun archivo seleccionado'; imagePreview.innerHTML = ''; try{ if(imageUrlInput) imageUrlInput.value = ''; }catch(_){ } productForm.reset(); try{ if(productForm.sale_unit) productForm.sale_unit.value = 'unit'; }catch(_){ } try{ if(productForm.kg_per_unit) productForm.kg_per_unit.value = '1'; }catch(_){ } try{ syncProductUnitFields(); }catch(_){ } validateForm();
+  modal.classList.add('hidden'); modal.setAttribute('aria-hidden', 'true'); currentEditId = null; imageUrl = null; imageSourceUrl = null; selectedFile = null; fileNameEl.textContent = 'Ningun archivo seleccionado'; imagePreview.innerHTML = ''; try{ if(imageUrlInput) imageUrlInput.value = ''; }catch(_){ } productForm.reset(); try{ if(productForm.sale_unit) productForm.sale_unit.value = 'unit'; }catch(_){ } try{ if(productForm.kg_per_unit) productForm.kg_per_unit.value = '1'; }catch(_){ } try{ syncProductUnitFields(); }catch(_){ } validateForm();
 }
 // Close modal when clicking outside the modal card
 if(modal) modal.addEventListener('click', e => { if(e.target === modal) closeModal(); });

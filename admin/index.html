@@ -1166,6 +1166,17 @@
   <div id="toast" class="toast hidden" role="status" aria-live="polite" aria-atomic="true"></div>
   <script>
     // Global admin error banner for easier debugging when JS fails to load or throws
+    window.isTransientAdminError = function(reason){
+      try{
+        var raw = reason && reason.message ? reason.message : (typeof reason === 'string' ? reason : JSON.stringify(reason));
+        var msg = String(raw || '').toLowerCase();
+        if (!msg) return false;
+        if (msg.indexOf('http-error:502') !== -1 || msg.indexOf('http-error:503') !== -1 || msg.indexOf('http-error:504') !== -1) return true;
+        if (msg.indexOf('failed to fetch') !== -1 || msg.indexOf('networkerror') !== -1 || msg.indexOf('load failed') !== -1) return true;
+        if (msg.indexOf('the operation was aborted') !== -1 || msg.indexOf('aborterror') !== -1) return true;
+      }catch(_){ }
+      return false;
+    };
     window.adminFallback = function(msg){
       try{
         var existing = document.getElementById('adminErrorBanner');
@@ -1187,7 +1198,18 @@
       }catch(e){ /* ignore */ }
     };
     window.addEventListener('error', function(e){ try{ window.adminFallback('JS error: ' + (e && e.message ? e.message : e)); }catch(_){} });
-    window.addEventListener('unhandledrejection', function(e){ try{ var r = e && e.reason ? (e.reason.message || JSON.stringify(e.reason)) : e; window.adminFallback('Unhandled promise rejection: ' + r); }catch(_){} });
+    window.addEventListener('unhandledrejection', function(e){
+      try{
+        var reason = e && e.reason ? e.reason : e;
+        if (window.isTransientAdminError && window.isTransientAdminError(reason)){
+          try{ if (e && typeof e.preventDefault === 'function') e.preventDefault(); }catch(_){}
+          console.warn('Transient request error ignored for banner', reason);
+          return;
+        }
+        var r = reason ? (reason.message || JSON.stringify(reason)) : e;
+        window.adminFallback('Unhandled promise rejection: ' + r);
+      }catch(_){}
+    });
   </script>
   <script src="app.js?v=17"></script>
 </body>

@@ -12,6 +12,7 @@ class ProductBase(BaseModel):
     category: Optional[str] = None
     brand: Optional[str] = None
     image_url: Optional[str] = None
+    image_source_url: Optional[str] = None
     active: Optional[bool] = True
     stock: Optional[int] = 0
     min_stock: Optional[int] = 0
@@ -33,6 +34,7 @@ class ProductUpdate(BaseModel):
     category: Optional[str] = None
     brand: Optional[str] = None
     image_url: Optional[str] = None
+    image_source_url: Optional[str] = None
     active: Optional[bool] = None
     stock: Optional[int] = None
     min_stock: Optional[int] = None
@@ -44,6 +46,7 @@ class ProductUpdate(BaseModel):
 class ProductResponse(ProductBase):
     id: int
     image_url: Optional[str] = None
+    image_source_url: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     stock: Optional[int] = 0
@@ -67,6 +70,7 @@ class ProductBulkUpdateItem(BaseModel):
     category: Optional[str] = None
     brand: Optional[str] = None
     image_url: Optional[str] = None
+    image_source_url: Optional[str] = None
     active: Optional[bool] = None
     stock: Optional[int] = None
     min_stock: Optional[int] = None

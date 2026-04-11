@@ -23,6 +23,7 @@ import re
 import time
 import datetime
 import math
+import hashlib
 import random
 import unicodedata
 import uuid
@@ -847,6 +848,7 @@ def _startup_bootstrap_sync() -> None:
     try:
         _ensure_admin_user_columns()
         _ensure_promo_image_columns()
+        _ensure_product_embeddings_table()
         _ensure_default_admin_owner()
     except Exception:
         logger.exception('ensure_default_admin_owner failed')
@@ -974,6 +976,7 @@ def _startup_bootstrap_sync() -> None:
             prod_needed = {
                 'code': 'VARCHAR(100)',
                 'brand': 'VARCHAR(200)',
+                'image_source_url': 'VARCHAR(1000)',
                 'stock': 'INTEGER DEFAULT 0',
                 'min_stock': 'INTEGER DEFAULT 0',
                 'stock_kg': 'REAL DEFAULT 0',
@@ -1143,7 +1146,7 @@ def _startup_bootstrap_sync() -> None:
                     logger.info('Restoring products from configured backup');
                     items = json.loads(content)
                     for p in items:
-                        db.add(models.Product(code=(str(p.get('code') or p.get('codigo') or '').strip() or None), name=p.get('name'), price=p.get('price') or 0, price_retail=p.get('price_retail'), description=p.get('description') or '', category=p.get('category') or '', image_url=p.get('image_url') or None, active=bool(p.get('active', True))))
+                        db.add(models.Product(code=(str(p.get('code') or p.get('codigo') or '').strip() or None), name=p.get('name'), price=p.get('price') or 0, price_retail=p.get('price_retail'), description=p.get('description') or '', category=p.get('category') or '', image_url=p.get('image_url') or None, image_source_url=(p.get('image_source_url') or None), active=bool(p.get('active', True))))
                     db.commit()
                     restored = True
             except Exception as _err:
@@ -1159,7 +1162,7 @@ def _startup_bootstrap_sync() -> None:
                         if items and isinstance(items, list):
                             logger.info('Restoring products from local snapshot %s', local_path)
                             for p in items:
-                                db.add(models.Product(code=(str(p.get('code') or p.get('codigo') or '').strip() or None), name=p.get('name'), price=p.get('price') or 0, price_retail=p.get('price_retail'), description=p.get('description') or '', category=p.get('category') or '', image_url=p.get('image_url') or None, active=bool(p.get('active', True))))
+                                db.add(models.Product(code=(str(p.get('code') or p.get('codigo') or '').strip() or None), name=p.get('name'), price=p.get('price') or 0, price_retail=p.get('price_retail'), description=p.get('description') or '', category=p.get('category') or '', image_url=p.get('image_url') or None, image_source_url=(p.get('image_source_url') or None), active=bool(p.get('active', True))))
                             db.commit()
                             restored = True
                 except Exception as _err:
@@ -1386,6 +1389,7 @@ def _load_products_serialized(
             except Exception:
                 existing = set()
             cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
+            if 'image_source_url' in existing: cols.append('image_source_url')
             if 'code' in existing: cols.append('code')
             if 'brand' in existing: cols.append('brand')
             if 'price_retail' in existing: cols.append('price_retail')
@@ -4652,6 +4656,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
                                 description=body_json.get('description') or '',
                                 category=body_json.get('category') or '',
                                 image_url=body_json.get('image_url') or '',
+                                image_source_url=(str(body_json.get('image_source_url') or '').strip() or None),
                                 active=bool(body_json.get('active', True)),
                                 stock=int(body_json.get('stock') or 0),
                                 stock_kg=float(body_json.get('stock_kg') or body_json.get('stock') or 0.0),
@@ -4667,7 +4672,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
                                     if isinstance(created, dict):
                                         res = created
                                     else:
-                                        res = {k: getattr(created, k) for k in ('id','code','name','price','price_retail','description','category','image_url','active','stock','stock_kg','kg_per_unit','discount','sale_unit') if hasattr(created, k)}
+                                        res = {k: getattr(created, k) for k in ('id','code','name','price','price_retail','description','category','image_url','image_source_url','active','stock','stock_kg','kg_per_unit','discount','sale_unit') if hasattr(created, k)}
                                     # log the fallback usage
                                     try:
                                         base = os.path.dirname(os.path.dirname(__file__))
@@ -4698,7 +4703,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
                         if pid is not None:
                             # Build permissive updates dict
                             updates = {}
-                            for k in ('code','name','price','price_retail','description','category','image_url','active','stock','stock_kg','kg_per_unit','discount','sale_unit'):
+                            for k in ('code','name','price','price_retail','description','category','image_url','image_source_url','active','stock','stock_kg','kg_per_unit','discount','sale_unit'):
                                 if k in body_json:
                                     updates[k] = body_json[k]
                             if 'price' in updates:
@@ -4760,7 +4765,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
                                     updated = crud.update_product(db, int(pid), upd_obj)
                                     if updated:
                                         # Normalize to dict
-                                        res = updated if isinstance(updated, dict) else {k: getattr(updated, k) for k in ('id','code','name','price','price_retail','description','category','image_url','active','stock','stock_kg','kg_per_unit','discount','sale_unit') if hasattr(updated,k)}
+                                        res = updated if isinstance(updated, dict) else {k: getattr(updated, k) for k in ('id','code','name','price','price_retail','description','category','image_url','image_source_url','active','stock','stock_kg','kg_per_unit','discount','sale_unit') if hasattr(updated,k)}
                                         try:
                                             base = os.path.dirname(os.path.dirname(__file__))
                                             with open(os.path.join(base, 'server_log.txt'), 'a', encoding='utf-8') as f:
@@ -7179,7 +7184,7 @@ async def upload_image_url(payload: Dict[str, Any] = Body(default=None)):
         raise HTTPException(status_code=400, detail='URL inválida')
     if normalized.startswith('/'):
         # Accept local paths as-is
-        return {"image_url": normalized, "source_url": normalized, "stored": False}
+        return {"image_url": normalized, "source_url": normalized, "image_source_url": normalized, "stored": False}
     if not re.match(r'^https?://', normalized, re.IGNORECASE):
         raise HTTPException(status_code=400, detail='URL inválida')
 
@@ -7201,7 +7206,7 @@ async def upload_image_url(payload: Dict[str, Any] = Body(default=None)):
             db.close()
 
     img_id = await anyio.to_thread.run_sync(task)
-    return {"image_url": f"/images/{img_id}", "source_url": normalized, "stored": True}
+    return {"image_url": f"/images/{img_id}", "source_url": normalized, "image_source_url": normalized, "stored": True}
 
 
 @app.get('/images/{image_id}')
@@ -9730,6 +9735,7 @@ async def create_product(payload: schemas.ProductCreate, request: Request, backg
                 'description': getv('description', ''),
                 'category': getv('category', ''),
                 'image_url': getv('image_url', ''),
+                'image_source_url': getv('image_source_url', None),
                 'active': bool(getv('active', True)),
                 'created_at': getv('created_at', None),
                 'updated_at': getv('updated_at', None),
@@ -9741,6 +9747,7 @@ async def create_product(payload: schemas.ProductCreate, request: Request, backg
                 'sale_unit': str(getv('sale_unit', 'unit') or 'unit')
             }
             sync_result = None
+            embedding_result = None
             try:
                 if result.get('id'):
                     sync_result = _auto_sync_catalog_categories(
@@ -9748,8 +9755,14 @@ async def create_product(payload: schemas.ProductCreate, request: Request, backg
                         product_ids=[int(result.get('id'))],
                         business_scope=business_scope,
                     )
+                    embedding_result = _refresh_product_embeddings(db, [int(result.get('id'))])
             except Exception:
                 logger.exception('POST /products auto-categorize failed for id=%s', result.get('id'))
+            try:
+                result['embeddings_updated'] = int((embedding_result or {}).get('updated') or 0)
+                result['embeddings_failed'] = int((embedding_result or {}).get('failed') or 0)
+            except Exception:
+                pass
             return result, sync_result
         finally:
             try:
@@ -9769,7 +9782,7 @@ async def create_product(payload: schemas.ProductCreate, request: Request, backg
         # Normalize result to plain dict
         if not isinstance(result, dict):
             try:
-                result = {k: getattr(result, k) for k in ('id','code','name','price','price_retail','description','category','image_url','active','stock','stock_kg','kg_per_unit','discount','sale_unit') if hasattr(result, k)}
+                result = {k: getattr(result, k) for k in ('id','code','name','price','price_retail','description','category','image_url','image_source_url','active','stock','stock_kg','kg_per_unit','discount','sale_unit') if hasattr(result, k)}
             except Exception:
                 result = dict(result.__dict__) if hasattr(result, '__dict__') else dict(result)
         try:
@@ -9924,6 +9937,7 @@ _IMPORT_HEADER_ALIASES = {
     'sale_unit': {'sale_unit', 'unidad', 'unidad_venta', 'tipo_venta', 'unidad_de_venta'},
     'active': {'active', 'activo'},
     'image_url': {'image', 'imagen', 'image_url', 'imagen_url', 'url', 'foto', 'picture', 'img', 'url_imagen', 'url_de_imagen', 'imagen_link', 'image_link', 'foto_url', 'img_url', 'link_imagen'},
+    'image_source_url': {'image_source_url', 'source_url', 'url_origen', 'url_original', 'imagen_origen', 'imagen_url_original', 'link_fuente_imagen'},
 }
 
 _IMPORT_HEADER_MAP = {alias: key for key, aliases in _IMPORT_HEADER_ALIASES.items() for alias in aliases}
@@ -10090,6 +10104,10 @@ def _auto_fetch_and_set_image(
         db.commit()
         db.refresh(img)
         prod.image_url = f"/images/{img.id}"
+        try:
+            prod.image_source_url = str(candidate or '').strip() or None
+        except Exception:
+            prod.image_source_url = None
         db.add(prod)
         db.commit()
         try:
@@ -10103,6 +10121,7 @@ def _auto_fetch_and_set_image(
                 pass
         return {
             'image_url': prod.image_url,
+            'image_source_url': getattr(prod, 'image_source_url', None),
             'provider': provider,
             'photographer': photo.get('photographer'),
             'photographer_url': photo.get('photographer_url'),
@@ -10442,19 +10461,32 @@ def _find_image_by_filename(db: Session, name_text: Optional[str], allow_contain
     return None
 
 
-def _resolve_import_image_url(db: Session, code: Optional[str], name: Optional[str], provided: Optional[str]) -> Optional[str]:
-    if provided is not None:
-        normalized = _normalize_import_image_url(provided)
-        if normalized:
-            # If it's a filename or relative token, try to resolve to stored image
-            if not re.match(r'^https?://', normalized, re.IGNORECASE) and not normalized.startswith('/'):
-                try:
-                    img = _find_image_by_filename(db, normalized, allow_contains=True)
-                    if img:
-                        return f"/images/{img.id}"
-                except Exception:
-                    pass
-            return normalized
+def _resolve_import_image_fields(
+    db: Session,
+    code: Optional[str],
+    name: Optional[str],
+    provided_image_url: Optional[str],
+    provided_source_url: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    source_candidate = _normalize_import_image_url(provided_source_url)
+    image_candidate = _normalize_import_image_url(provided_image_url)
+    direct_candidate = image_candidate or source_candidate
+
+    if direct_candidate:
+        # External URL: keep visible original URL in a dedicated field.
+        if re.match(r'^https?://', direct_candidate, re.IGNORECASE):
+            return direct_candidate, direct_candidate
+        # If it's a filename or relative token, try to resolve to stored image.
+        if not direct_candidate.startswith('/'):
+            try:
+                img = _find_image_by_filename(db, direct_candidate, allow_contains=True)
+                if img:
+                    resolved = f"/images/{img.id}"
+                    return resolved, source_candidate or (image_candidate if re.match(r'^https?://', str(image_candidate or ''), re.IGNORECASE) else None)
+            except Exception:
+                pass
+        # Relative/local path.
+        return direct_candidate, (source_candidate if source_candidate and re.match(r'^https?://', source_candidate, re.IGNORECASE) else None)
 
     try:
         code_text = str(code or '').strip()
@@ -10473,14 +10505,14 @@ def _resolve_import_image_url(db: Session, code: Optional[str], name: Optional[s
         if code_lower:
             prod = db.query(models.Product).filter(func.lower(func.trim(models.Product.code)) == code_lower).first()
             if prod and getattr(prod, 'image_url', None):
-                return prod.image_url
+                return getattr(prod, 'image_url', None), getattr(prod, 'image_source_url', None)
     except Exception:
         pass
     try:
         if name_lower:
             prod = db.query(models.Product).filter(func.lower(func.trim(models.Product.name)) == name_lower).first()
             if prod and getattr(prod, 'image_url', None):
-                return prod.image_url
+                return getattr(prod, 'image_url', None), getattr(prod, 'image_source_url', None)
     except Exception:
         pass
 
@@ -10489,14 +10521,14 @@ def _resolve_import_image_url(db: Session, code: Optional[str], name: Optional[s
         if code_text:
             img = _find_image_by_filename(db, code_text, allow_contains=True)
             if img:
-                return f"/images/{img.id}"
+                return f"/images/{img.id}", None
     except Exception:
         pass
     try:
         if name_text:
             img = _find_image_by_filename(db, name_text, allow_contains=True)
             if img:
-                return f"/images/{img.id}"
+                return f"/images/{img.id}", None
     except Exception:
         pass
 
@@ -10504,7 +10536,7 @@ def _resolve_import_image_url(db: Session, code: Optional[str], name: Optional[s
         if code_norm:
             img = db.query(models.Image).filter(models.Image.filename.ilike(f"%{code_norm}%")).order_by(models.Image.id.desc()).first()
             if img:
-                return f"/images/{img.id}"
+                return f"/images/{img.id}", None
     except Exception:
         pass
 
@@ -10514,10 +10546,139 @@ def _resolve_import_image_url(db: Session, code: Optional[str], name: Optional[s
             if token:
                 img = db.query(models.Image).filter(models.Image.filename.ilike(f"%{token}%")).order_by(models.Image.id.desc()).first()
                 if img:
-                    return f"/images/{img.id}"
+                    return f"/images/{img.id}", None
     except Exception:
         pass
-    return None
+    return None, None
+
+
+def _resolve_import_image_url(db: Session, code: Optional[str], name: Optional[str], provided: Optional[str]) -> Optional[str]:
+    image_url, _ = _resolve_import_image_fields(db, code, name, provided, None)
+    return image_url
+
+
+PRODUCT_EMBEDDING_MODEL = 'local-hash-v1'
+PRODUCT_EMBEDDING_DIM = 96
+
+
+def _normalize_embedding_text(value: Any) -> str:
+    try:
+        text_value = str(value or '').strip().lower()
+    except Exception:
+        return ''
+    if not text_value:
+        return ''
+    try:
+        text_value = unicodedata.normalize('NFKD', text_value)
+        text_value = ''.join(ch for ch in text_value if not unicodedata.combining(ch))
+    except Exception:
+        pass
+    text_value = re.sub(r'[^a-z0-9]+', ' ', text_value).strip()
+    return text_value
+
+
+def _build_product_embedding_source(product: Any) -> str:
+    if isinstance(product, dict):
+        getv = product.get
+    else:
+        getv = lambda key, default='': getattr(product, key, default)
+    fields = [
+        getv('code', ''),
+        getv('name', ''),
+        getv('brand', ''),
+        getv('category', ''),
+        getv('description', ''),
+    ]
+    cleaned = [str(v).strip() for v in fields if v is not None and str(v).strip()]
+    return ' | '.join(cleaned)
+
+
+def _compute_local_embedding_vector(text_value: str, dim: int = PRODUCT_EMBEDDING_DIM) -> List[float]:
+    normalized = _normalize_embedding_text(text_value)
+    if not normalized:
+        return []
+    tokens = [tok for tok in normalized.split(' ') if tok]
+    if not tokens:
+        return []
+    dim_val = max(8, int(dim or PRODUCT_EMBEDDING_DIM))
+    vec = [0.0] * dim_val
+    for token in tokens:
+        digest = hashlib.sha256(token.encode('utf-8')).digest()
+        idx = int.from_bytes(digest[:4], 'big') % dim_val
+        sign = -1.0 if (digest[4] & 1) else 1.0
+        weight = 1.0 + min(len(token), 16) / 20.0
+        vec[idx] += sign * weight
+    norm = math.sqrt(sum(v * v for v in vec))
+    if norm <= 0:
+        return []
+    return [round((v / norm), 6) for v in vec]
+
+
+def _embedding_vector_to_cell(vector: Any) -> Optional[str]:
+    if not isinstance(vector, list) or not vector:
+        return None
+    parts = []
+    for item in vector:
+        try:
+            parts.append(f"{float(item):.6f}")
+        except Exception:
+            parts.append('0.000000')
+    return '|'.join(parts)
+
+
+def _ensure_product_embeddings_table() -> None:
+    try:
+        models.ProductEmbedding.__table__.create(bind=engine, checkfirst=True)
+    except Exception:
+        logger.exception('Could not ensure product_embeddings table')
+
+
+def _refresh_product_embeddings(db: Session, product_ids: List[int]) -> Dict[str, Any]:
+    ids: List[int] = []
+    for raw in (product_ids or []):
+        try:
+            pid = int(raw)
+            if pid > 0:
+                ids.append(pid)
+        except Exception:
+            continue
+    if not ids:
+        return {'updated': 0, 'failed': 0}
+
+    _ensure_product_embeddings_table()
+    updated = 0
+    failed = 0
+    seen = set()
+    for pid in ids:
+        if pid in seen:
+            continue
+        seen.add(pid)
+        try:
+            product = db.query(models.Product).filter(models.Product.id == pid).first()
+            if not product:
+                continue
+            source_text = _build_product_embedding_source(product)
+            vector = _compute_local_embedding_vector(source_text)
+            row = db.query(models.ProductEmbedding).filter(models.ProductEmbedding.product_id == pid).first()
+            if row is None:
+                row = models.ProductEmbedding(product_id=pid)
+                db.add(row)
+            row.model = PRODUCT_EMBEDDING_MODEL
+            row.source_text = source_text
+            row.vector = vector
+            updated += 1
+        except Exception:
+            failed += 1
+            logger.exception('Failed refreshing embedding for product_id=%s', pid)
+    try:
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.exception('Could not commit product embeddings refresh')
+    return {'updated': updated, 'failed': failed}
 
 
 @app.get("/products/duplicates")
@@ -10539,6 +10700,7 @@ async def bulk_update_products(payload: List[schemas.ProductBulkUpdateItem], req
         try:
             result = crud.bulk_update_products(db, payload or [], actor=actor)
             sync_result = None
+            embedding_result = None
             try:
                 ids_to_sync = []
                 for item in (result or {}).get('results') or []:
@@ -10554,16 +10716,17 @@ async def bulk_update_products(payload: List[schemas.ProductBulkUpdateItem], req
                         product_ids=ids_to_sync,
                         business_scope=business_scope,
                     )
+                    embedding_result = _refresh_product_embeddings(db, ids_to_sync)
             except Exception:
                 logger.exception('PATCH /products/bulk auto-categorize failed')
-            return result, sync_result
+            return result, sync_result, embedding_result
         finally:
             try:
                 db.close()
             except Exception:
                 pass
 
-    result, sync_result = await anyio.to_thread.run_sync(task)
+    result, sync_result, embedding_result = await anyio.to_thread.run_sync(task)
     try:
         await push_event({"action": "bulk_updated", "updated": int((result or {}).get('updated') or 0)})
     except Exception:
@@ -10574,6 +10737,12 @@ async def bulk_update_products(payload: List[schemas.ProductBulkUpdateItem], req
     except Exception:
         pass
     _invalidate_products_cache()
+    try:
+        if isinstance(result, dict):
+            result['embeddings_updated'] = int((embedding_result or {}).get('updated') or 0)
+            result['embeddings_failed'] = int((embedding_result or {}).get('failed') or 0)
+    except Exception:
+        pass
     return result or {'updated': 0, 'results': []}
 
 
@@ -10676,7 +10845,13 @@ async def import_products_excel(
                 scoped_price_retail = price_list_2 if price_list_2 is not None else price_retail
                 cost = _coerce_float(row.get('cost'))
                 discount = _coerce_float(row.get('discount'))
-                image_url = _resolve_import_image_url(db, code, name, row.get('image_url'))
+                image_url, image_source_url = _resolve_import_image_fields(
+                    db,
+                    code,
+                    name,
+                    row.get('image_url'),
+                    row.get('image_source_url'),
+                )
 
                 existing = None
                 try:
@@ -10753,6 +10928,12 @@ async def import_products_excel(
                             image_url = image_url
                         if image_url:
                             updates['image_url'] = image_url
+                    if image_source_url is not None:
+                        try:
+                            image_source_url = str(image_source_url).strip()
+                        except Exception:
+                            image_source_url = image_source_url
+                        updates['image_source_url'] = image_source_url or None
 
                     if not updates:
                         skipped += 1
@@ -10783,6 +10964,7 @@ async def import_products_excel(
                     category=category or '',
                     brand=brand,
                     image_url=image_url,
+                    image_source_url=image_source_url,
                     active=True if active is None else active,
                     stock=0 if stock is None else max(0, int(stock)),
                     min_stock=0 if min_stock is None else max(0, int(min_stock)),
@@ -10803,6 +10985,7 @@ async def import_products_excel(
                             'name': name,
                             'code': code,
                             'image_url': image_url,
+                            'image_source_url': image_source_url,
                         })
                     except Exception:
                         pass
@@ -10818,6 +11001,7 @@ async def import_products_excel(
                 skipped += 1
                 errors.append({'row': idx, 'error': str(e)[:200]})
         sync_result = None
+        embedding_result = None
         try:
             ids_to_sync = [int(v) for v in (created_ids + updated_ids) if v]
             if ids_to_sync:
@@ -10826,6 +11010,7 @@ async def import_products_excel(
                     product_ids=ids_to_sync,
                     business_scope=business_scope,
                 )
+                embedding_result = _refresh_product_embeddings(db, ids_to_sync)
         except Exception:
             logger.exception('products/import-excel auto-categorize failed')
 
@@ -10839,6 +11024,8 @@ async def import_products_excel(
             'errors': errors[:50],
             'created_ids': [c for c in created_ids if c],
             'updated_ids': [u for u in updated_ids if u],
+            'embeddings_updated': int((embedding_result or {}).get('updated') or 0),
+            'embeddings_failed': int((embedding_result or {}).get('failed') or 0),
         }, created_products, sync_result
     result, created_products, sync_result = await anyio.to_thread.run_sync(task)
     try:
@@ -10901,6 +11088,7 @@ async def auto_image_products(
                     'name': r.name,
                     'code': getattr(r, 'code', None),
                     'image_url': getattr(r, 'image_url', None),
+                    'image_source_url': getattr(r, 'image_source_url', None),
                 }
                 for r in rows
             ]
@@ -10967,6 +11155,7 @@ def get_product(product_id: int, db: Session = Depends(get_db)):
         except Exception:
             existing = set()
         cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
+        if 'image_source_url' in existing: cols.append('image_source_url')
         if 'code' in existing: cols.append('code')
         if 'brand' in existing: cols.append('brand')
         if 'price_retail' in existing: cols.append('price_retail')
@@ -11004,19 +11193,29 @@ async def update_product(product_id: int, payload: schemas.ProductUpdate, reques
         try:
             prod = crud.update_product(db, product_id, payload, actor=actor, action='update')
             sync_result = None
+            embedding_result = None
             try:
                 sync_result = _auto_sync_catalog_categories(
                     db,
                     product_ids=[int(product_id)],
                     business_scope=business_scope,
                 )
+                embedding_result = _refresh_product_embeddings(db, [int(product_id)])
             except Exception:
                 logger.exception('PUT /products/%s auto-categorize failed', product_id)
             if isinstance(prod, dict):
+                try:
+                    prod['embeddings_updated'] = int((embedding_result or {}).get('updated') or 0)
+                    prod['embeddings_failed'] = int((embedding_result or {}).get('failed') or 0)
+                except Exception:
+                    pass
                 return prod, sync_result
             # Convert ORM instance to plain dict before session closes
             try:
-                return ({k: getattr(prod, k) for k in ('id','code','name','brand','price','price_retail','cost','description','category','image_url','active','stock','min_stock','stock_kg','kg_per_unit','discount','sale_unit','created_at','updated_at') if hasattr(prod, k)}, sync_result)
+                out = {k: getattr(prod, k) for k in ('id','code','name','brand','price','price_retail','cost','description','category','image_url','image_source_url','active','stock','min_stock','stock_kg','kg_per_unit','discount','sale_unit','created_at','updated_at') if hasattr(prod, k)}
+                out['embeddings_updated'] = int((embedding_result or {}).get('updated') or 0)
+                out['embeddings_failed'] = int((embedding_result or {}).get('failed') or 0)
+                return (out, sync_result)
             except Exception:
                 try:
                     return (jsonable_encoder(prod), sync_result)
@@ -11102,7 +11301,7 @@ def debug_products_info(db: Session = Depends(get_db)):
             # fallback: try ORM
             orm_rows = db.query(models.Product).order_by(models.Product.created_at.desc()).limit(10).all()
             for r in orm_rows:
-                d = {c: getattr(r, c, None) for c in ('id','code','name','price','price_retail','description','category','image_url','created_at','updated_at','active','stock','stock_kg','kg_per_unit','discount','sale_unit')}
+                d = {c: getattr(r, c, None) for c in ('id','code','name','price','price_retail','description','category','image_url','image_source_url','created_at','updated_at','active','stock','stock_kg','kg_per_unit','discount','sale_unit')}
                 sample.append(d)
         except Exception:
             pass
@@ -11180,6 +11379,7 @@ def write_catalog_snapshot():
             "description": p.description,
             "category": p.category,
             "image_url": p.image_url,
+            "image_source_url": getattr(p, 'image_source_url', None),
             "active": p.active,
             "stock": adjusted_stock,
             "stock_kg": adjusted_stock_kg,
@@ -11377,6 +11577,9 @@ def export(format: str = "json", db: Session = Depends(get_db)):
         'stock_kg',
         'min_stock',
         'image_url',
+        'image_source_url',
+        'embedding_model',
+        'embedding_vector',
         'active',
         'created_at',
         'updated_at',
@@ -11390,8 +11593,49 @@ def export(format: str = "json", db: Session = Depends(get_db)):
         rows.append(cleaned)
         all_keys.update(cleaned.keys())
 
-    # Ensure stable column order for CSV output.
-    fieldnames = [k for k in field_order if k in all_keys] + [k for k in sorted(all_keys) if k not in field_order]
+    # Enrich CSV/JSON export with per-product embedding info in dedicated columns.
+    try:
+        product_ids = []
+        for row in rows:
+            try:
+                pid = int(row.get('id'))
+                if pid > 0:
+                    product_ids.append(pid)
+            except Exception:
+                continue
+        embedding_map: Dict[int, Any] = {}
+        if product_ids:
+            _ensure_product_embeddings_table()
+            emb_rows = (
+                db.query(models.ProductEmbedding)
+                .filter(models.ProductEmbedding.product_id.in_(list(set(product_ids))))
+                .all()
+            )
+            for emb in (emb_rows or []):
+                try:
+                    embedding_map[int(getattr(emb, 'product_id'))] = emb
+                except Exception:
+                    continue
+        for row in rows:
+            try:
+                pid = int(row.get('id'))
+            except Exception:
+                pid = 0
+            emb = embedding_map.get(pid)
+            if emb is None:
+                row.setdefault('embedding_model', None)
+                row.setdefault('embedding_vector', None)
+                continue
+            row['embedding_model'] = str(getattr(emb, 'model', '') or PRODUCT_EMBEDDING_MODEL)
+            row['embedding_vector'] = _embedding_vector_to_cell(getattr(emb, 'vector', None))
+    except Exception:
+        logger.exception('Could not enrich export with product embeddings')
+
+    # Ensure stable column order for CSV output (always include expected columns).
+    fieldnames = list(field_order)
+    for key in sorted(all_keys):
+        if key not in fieldnames:
+            fieldnames.append(key)
 
     if format == "csv":
         si = StringIO()

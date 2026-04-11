@@ -468,6 +468,8 @@ def get_products(db: Session, skip: int = 0, limit: int = 100, q: Optional[str]=
         except Exception:
             existing = set()
         cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
+        if 'image_source_url' in existing:
+            cols.append('image_source_url')
         if 'code' in existing:
             cols.append('code')
         if 'brand' in existing:
@@ -662,6 +664,7 @@ def _ensure_product_columns(db: Session, existing_cols: Optional[set] = None) ->
     col_defs = {
         'code': 'VARCHAR(100)',
         'brand': 'VARCHAR(200)',
+        'image_source_url': 'VARCHAR(1000)',
         'stock': 'INTEGER DEFAULT 0',
         'min_stock': 'INTEGER DEFAULT 0',
         'stock_kg': 'REAL DEFAULT 0',
@@ -708,6 +711,7 @@ _PRODUCT_SNAPSHOT_FIELDS = (
     'description',
     'category',
     'image_url',
+    'image_source_url',
     'active',
     'stock',
     'min_stock',
@@ -826,7 +830,7 @@ def create_product(db: Session, payload: schemas.ProductCreate, actor: Optional[
         insp = inspect(bind)
         existing_cols = {c['name'] for c in insp.get_columns('products')}
     except Exception:
-        existing_cols = {'id', 'code', 'name', 'brand', 'price', 'price_retail', 'cost', 'description', 'category', 'image_url', 'active', 'created_at', 'updated_at', 'stock', 'min_stock', 'stock_kg', 'kg_per_unit', 'discount', 'sale_unit'}
+        existing_cols = {'id', 'code', 'name', 'brand', 'price', 'price_retail', 'cost', 'description', 'category', 'image_url', 'image_source_url', 'active', 'created_at', 'updated_at', 'stock', 'min_stock', 'stock_kg', 'kg_per_unit', 'discount', 'sale_unit'}
     
     existing_cols = _ensure_product_columns(db, existing_cols)
     logger.info('Existing columns: %s', existing_cols)
@@ -880,6 +884,7 @@ def create_product(db: Session, payload: schemas.ProductCreate, actor: Optional[
         'description': payload.description or '',
         'category': payload.category or '',
         'image_url': payload.image_url or '',
+        'image_source_url': (str(getattr(payload, 'image_source_url', '') or '').strip() or None),
         'active': payload.active,
         'stock': stock_int,
         'min_stock': min_stock,
@@ -941,6 +946,8 @@ def create_product(db: Session, payload: schemas.ProductCreate, actor: Optional[
             existing = set()
         # Build an explicit column list that includes optional fields only when present.
         cols = ['id', 'name', 'price', 'description', 'category', 'image_url', 'active', 'created_at', 'updated_at']
+        if 'image_source_url' in existing:
+            cols.append('image_source_url')
         if 'code' in existing:
             cols.append('code')
         if 'brand' in existing:
@@ -1050,6 +1057,7 @@ def create_product(db: Session, payload: schemas.ProductCreate, actor: Optional[
         'description': payload.description,
         'category': payload.category,
         'image_url': payload.image_url,
+        'image_source_url': (str(getattr(payload, 'image_source_url', '') or '').strip() or None),
         'active': bool(getattr(payload, 'active', True)),
         'sale_unit': getattr(payload, 'sale_unit', None) or 'unit'
     }
@@ -1066,6 +1074,8 @@ def get_product(db: Session, product_id: int) -> Optional[models.Product]:
         except Exception:
             existing = set()
         cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
+        if 'image_source_url' in existing:
+            cols.append('image_source_url')
         if 'code' in existing:
             cols.append('code')
         if 'brand' in existing:
@@ -1179,6 +1189,13 @@ def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate,
                 updates['brand'] = None
         except Exception:
             updates.pop('brand', None)
+    if 'image_source_url' in updates:
+        try:
+            updates['image_source_url'] = str(updates['image_source_url']).strip() if updates['image_source_url'] is not None else None
+            if updates['image_source_url'] == '':
+                updates['image_source_url'] = None
+        except Exception:
+            updates.pop('image_source_url', None)
     if 'min_stock' in updates:
         try:
             updates['min_stock'] = int(updates['min_stock'] or 0)
@@ -1223,6 +1240,8 @@ def update_product(db: Session, product_id: int, payload: schemas.ProductUpdate,
 
     # Fetch updated row safely (only request existing columns)
     cols = ['id','name','price','description','category','image_url','created_at','updated_at','active']
+    if 'image_source_url' in existing:
+        cols.append('image_source_url')
     if 'code' in existing:
         cols.append('code')
     if 'brand' in existing:

@@ -223,6 +223,7 @@ def _migrate_products_optional_columns() -> None:
     needed = [
         ('price_retail', 'REAL'),
         ('code', 'VARCHAR(100)'),
+        ('image_source_url', 'VARCHAR(1000)'),
     ]
 
     with engine.begin() as conn:
