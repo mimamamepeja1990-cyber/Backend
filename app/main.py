@@ -258,7 +258,7 @@ def _send_fcm_notification_to_tokens(tokens: List[str], title: str, body: str, d
             notification=firebase_messaging.WebpushNotification(
                 title=str(title or '').strip(),
                 body=str(body or '').strip(),
-                icon='/admin/icon-192.png',
+                icon='/admin/icon-192-v2.png',
                 data=payload,
             ),
             fcm_options=firebase_messaging.WebpushFCMOptions(link=str(link or '/admin/index.html').strip() or '/admin/index.html'),
@@ -17363,8 +17363,15 @@ if os.path.exists(FRONTEND_DIR):
             content = re.sub(r'app\.js(?:\?[^"]*)?"', f'app.js?v={ver}"', content)
             content = re.sub(r'styles\.css(?:\?[^"]*)?"', f'styles.css?v={ver}"', content)
             content = re.sub(r'service-worker\.js(?:\?[^"]*)?"', f'service-worker.js?v={ver}"', content)
+            content = re.sub(r'manifest\.webmanifest(?:\?[^"]*)?"', f'manifest.webmanifest?v={ver}"', content)
         except Exception:
-            content = content.replace('app.js"', f'app.js?v={ver}"').replace('styles.css"', f'styles.css?v={ver}"')
+            content = (
+                content
+                .replace('app.js"', f'app.js?v={ver}"')
+                .replace('styles.css"', f'styles.css?v={ver}"')
+                .replace('service-worker.js"', f'service-worker.js?v={ver}"')
+                .replace('manifest.webmanifest"', f'manifest.webmanifest?v={ver}"')
+            )
         return Response(
             content=content,
             media_type='text/html',
@@ -17430,6 +17437,27 @@ if os.path.exists(FRONTEND_DIR):
         return Response(
             content=content,
             media_type='application/javascript',
+            headers={
+                'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
+                'Pragma': 'no-cache',
+                'Expires': '0',
+            },
+        )
+
+    @app.get("/admin/manifest.webmanifest")
+    async def admin_manifest():
+        path = os.path.join(FRONTEND_DIR, 'manifest.webmanifest')
+        if not os.path.exists(path):
+            raise HTTPException(status_code=404, detail='Manifest not found')
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except Exception as e:
+            logger.exception('Failed reading admin manifest.webmanifest: %s', e)
+            raise HTTPException(status_code=500, detail='Failed to read manifest')
+        return Response(
+            content=content,
+            media_type='application/manifest+json',
             headers={
                 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
                 'Pragma': 'no-cache',

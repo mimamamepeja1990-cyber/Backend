@@ -708,13 +708,7 @@ function advanceDriverRoute(id){
 }
 
 function getGoogleRoadmapTypeId(){
-  try{
-    return (window.google && window.google.maps && window.google.maps.MapTypeId && window.google.maps.MapTypeId.ROADMAP)
-      ? window.google.maps.MapTypeId.ROADMAP
-      : 'roadmap';
-  }catch(_){
-    return 'roadmap';
-  }
+  return 'roadmap';
 }
 
 function getGoogleDrivingTravelMode(){
@@ -728,21 +722,49 @@ function getGoogleDrivingTravelMode(){
 }
 
 async function loadGoogleMapsApi(){
-  if (window.google && window.google.maps) return true;
+  const isReady = () => {
+    try{
+      return !!(window.google && window.google.maps && typeof window.google.maps.Map === 'function');
+    }catch(_){
+      return false;
+    }
+  };
+  if (isReady()) return true;
   const key = (window.GOOGLE_MAPS_API_KEY || '').trim();
   if (!key) return false;
   if (window.__googleMapsLoading) return window.__googleMapsLoading;
   window.__googleMapsLoading = new Promise((resolve, reject) => {
+    const callbackName = `__distriarGoogleMapsReady_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    let settled = false;
+    let timeoutId = 0;
+    const cleanup = () => {
+      try{ clearTimeout(timeoutId); }catch(_){ }
+      try{ delete window[callbackName]; }catch(_){ try{ window[callbackName] = undefined; }catch(__){ } }
+    };
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (ok) resolve(true);
+      else reject(new Error('maps-load-failed'));
+    };
+    try{
+      window[callbackName] = () => finish(true);
+    }catch(_){ }
     const script = document.createElement('script');
-    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&loading=async`;
+    script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&loading=async&callback=${encodeURIComponent(callbackName)}&v=weekly`;
     script.async = true;
     script.defer = true;
-    script.onload = () => resolve(true);
     script.onerror = () => {
       try{ window.__googleMapsLoading = null; }catch(_){ }
-      reject(new Error('maps-load-failed'));
+      finish(false);
     };
+    timeoutId = setTimeout(() => {
+      finish(isReady());
+    }, 12000);
     document.head.appendChild(script);
+    // If API is already available from another script, resolve immediately.
+    if (isReady()) finish(true);
   });
   try{
     await window.__googleMapsLoading;

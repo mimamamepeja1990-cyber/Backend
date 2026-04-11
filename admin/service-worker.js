@@ -29,10 +29,12 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
 
-function toCacheKey(request) {
+function toCacheKey(request, stripSearch = false) {
   try {
-    const url = new URL(request.url);
-    return new Request(url.pathname, { method: 'GET' });
+    const rawUrl = request && request.url ? request.url : String(request || '');
+    const url = new URL(rawUrl, self.location.origin);
+    const path = stripSearch ? url.pathname : `${url.pathname}${url.search}`;
+    return new Request(path, { method: 'GET' });
   } catch (_) {
     return request;
   }
@@ -81,9 +83,12 @@ function offlineHtmlResponse() {
   </body>
 </html>`;
   return new Response(html, {
-    status: 503,
-    statusText: 'Offline',
-    headers: { 'Content-Type': 'text/html; charset=utf-8' },
+    status: 200,
+    statusText: 'OK',
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8',
+      'X-DistriAr-Offline': '1',
+    },
   });
 }
 
@@ -140,7 +145,7 @@ async function networkFirstDynamic(request) {
     await putIfValid(DYNAMIC_CACHE, key, networkResp);
     return networkResp;
   } catch (_) {
-    const cached = await caches.match(key, { ignoreSearch: true });
+    const cached = await caches.match(key);
     if (cached) return cached;
     // Avoid synthetic 503s that break UX/noise console in flaky mobile networks.
     return new Response(JSON.stringify({ offline: true, source: 'sw-fallback' }), {
@@ -152,15 +157,15 @@ async function networkFirstDynamic(request) {
 
 async function cacheFirstStatic(request) {
   const key = toCacheKey(request);
-  const cached = await caches.match(key, { ignoreSearch: true });
+  const cached = await caches.match(key);
   if (cached) return cached;
   try {
     const networkResp = await fetch(request);
     await putIfValid(STATIC_CACHE, key, networkResp);
     return networkResp;
   } catch (_) {
-    // Return an empty 204 instead of 503 to prevent noisy resource errors.
-    return new Response('', { status: 204, statusText: 'No Content' });
+    // A 204 response cannot include a body; keep it null to avoid runtime errors.
+    return new Response(null, { status: 204, statusText: 'No Content' });
   }
 }
 
