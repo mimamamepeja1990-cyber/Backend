@@ -11,8 +11,8 @@ pytest-asyncio
 aiofiles
 anyio
 psycopg2-binary
+psycopg[binary]
 boto3
 PyJWT
 openpyxl
 firebase-admin
-psycopg[binary]

@@ -45,6 +45,13 @@ from types import SimpleNamespace
 
 from app import models, schemas, crud, utils
 from app.database import engine, Base, get_db, SessionLocal
+from app.observability import (
+    begin_request_metrics,
+    configure_sqlalchemy_instrumentation,
+    current_request_metrics,
+    new_request_id,
+    reset_request_metrics,
+)
 from sqlalchemy.exc import IntegrityError, OperationalError, DBAPIError
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from typing import Tuple
@@ -76,6 +83,7 @@ async def push_snapshot_to_gist(content: str) -> bool:
     payload = {"files": {"products.json": {"content": content}}}
     try:
         resp = httpx.patch(url, json=payload, headers=headers, timeout=15)
+        _log_external_response('github_gist', resp)
         resp.raise_for_status()
         return True
     except Exception as e:
@@ -88,6 +96,7 @@ def fetch_snapshot_from_gist() -> Optional[str]:
         url = f"https://api.github.com/gists/{GIST_ID}"
         try:
             resp = httpx.get(url, timeout=15)
+            _log_external_response('github_gist', resp)
             resp.raise_for_status()
             data = resp.json()
             files = data.get('files') or {}
@@ -100,6 +109,7 @@ def fetch_snapshot_from_gist() -> Optional[str]:
     if BACKUP_URL:
         try:
             resp = httpx.get(BACKUP_URL, timeout=15)
+            _log_external_response('catalog_backup_url', resp)
             resp.raise_for_status()
             return resp.text
         except Exception as e:
@@ -113,6 +123,7 @@ def fetch_promotions_from_gist() -> Optional[str]:
         url = f"https://api.github.com/gists/{GIST_ID}"
         try:
             resp = httpx.get(url, timeout=15)
+            _log_external_response('github_gist', resp)
             resp.raise_for_status()
             data = resp.json()
             files = data.get('files') or {}
@@ -125,6 +136,7 @@ def fetch_promotions_from_gist() -> Optional[str]:
     if BACKUP_URL:
         try:
             resp = httpx.get(BACKUP_URL, timeout=15)
+            _log_external_response('catalog_backup_url', resp)
             resp.raise_for_status()
             return resp.text
         except Exception as e:
@@ -139,6 +151,67 @@ handler = logging.StreamHandler()
 handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
 logger.addHandler(handler)
 logger.setLevel(logging.INFO)
+
+PROCESS_STARTED_AT = datetime.datetime.now(datetime.timezone.utc)
+PROCESS_START_MONOTONIC = time.perf_counter()
+try:
+    HTTP_SLOW_THRESHOLD_MS = max(0.0, float(os.environ.get('SLOW_HTTP_MS', '1000')))
+except (TypeError, ValueError):
+    HTTP_SLOW_THRESHOLD_MS = 1000.0
+logger.info(
+    "[STARTUP] process_start timestamp=%s",
+    PROCESS_STARTED_AT.isoformat(),
+)
+configure_sqlalchemy_instrumentation(engine)
+
+
+def _startup_timestamp() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _startup_stage_start(name: str) -> float:
+    started = time.perf_counter()
+    logger.info(
+        "[STARTUP] stage=%s event=start timestamp=%s elapsed_since_process_ms=%.1f",
+        name,
+        _startup_timestamp(),
+        (started - PROCESS_START_MONOTONIC) * 1000.0,
+    )
+    return started
+
+
+def _startup_stage_end(name: str, started: float, status: str = "ok") -> None:
+    logger.info(
+        "[STARTUP] stage=%s event=end status=%s timestamp=%s duration=%.1fms",
+        name,
+        status,
+        _startup_timestamp(),
+        (time.perf_counter() - started) * 1000.0,
+    )
+
+
+def _startup_timed_call(name: str, callback, *args, **kwargs):
+    started = _startup_stage_start(name)
+    try:
+        result = callback(*args, **kwargs)
+    except Exception:
+        _startup_stage_end(name, started, "error")
+        raise
+    _startup_stage_end(name, started)
+    return result
+
+
+def _log_external_response(provider: str, response) -> None:
+    """Record provider-side 429s without logging URLs, headers or response bodies."""
+    try:
+        status = int(response.status_code)
+    except Exception:
+        return
+    if status == 429:
+        logger.warning(
+            "[429] source=external provider=%s status=429",
+            provider,
+        )
 
 _FIREBASE_INIT_LOCK = threading.Lock()
 _FIREBASE_APP = None
@@ -556,6 +629,7 @@ def _enqueue_n8n_event(
             try:
                 with httpx.Client(timeout=timeout) as client:
                     resp = client.post(webhook_url, json=body)
+                _log_external_response('n8n', resp)
                 if 200 <= int(resp.status_code) < 300:
                     logger.info('n8n webhook sent event=%s status=%s attempt=%s', event_key, resp.status_code, attempt)
                     return
@@ -841,10 +915,13 @@ def _ensure_promo_image_columns() -> None:
 
 def _startup_bootstrap_sync() -> None:
     """Run blocking startup tasks in a background thread when desired."""
+    bootstrap_started = _startup_stage_start("bootstrap")
+
     # Startup
-    Base.metadata.create_all(bind=engine)
+    _startup_timed_call("create_all", Base.metadata.create_all, bind=engine)
 
     # Ensure admin owner user exists (so panel users persist in DB).
+    admin_stage = _startup_stage_start("admin_and_supporting_tables")
     try:
         _ensure_admin_user_columns()
         _ensure_promo_image_columns()
@@ -852,11 +929,15 @@ def _startup_bootstrap_sync() -> None:
         _ensure_default_admin_owner()
     except Exception:
         logger.exception('ensure_default_admin_owner failed')
+        _startup_stage_end("admin_and_supporting_tables", admin_stage, "error")
+    else:
+        _startup_stage_end("admin_and_supporting_tables", admin_stage)
 
     # Ensure legacy DBs get required columns on the `orders` table.
     # Use SQLAlchemy inspector (cross-dialect) to detect missing columns and
     # issue ALTER TABLE ADD COLUMN statements for any that are absent. This
     # avoids relying on information_schema schema assumptions.
+    orders_schema_stage = _startup_stage_start("orders_schema_and_indexes")
     try:
         with engine.begin() as conn:
             needed = {
@@ -952,9 +1033,13 @@ def _startup_bootstrap_sync() -> None:
                 pass
     except Exception:
         logger.exception('ensure orders columns step failed')
+        _startup_stage_end("orders_schema_and_indexes", orders_schema_stage, "error")
+    else:
+        _startup_stage_end("orders_schema_and_indexes", orders_schema_stage)
 
     # Run a second, explicit migration pass for legacy deployments where
     # the orders table schema may drift between releases.
+    secondary_orders_stage = _startup_stage_start("secondary_orders_migration")
     try:
         mig = _run_add_user_columns()
         if isinstance(mig, dict):
@@ -966,8 +1051,12 @@ def _startup_bootstrap_sync() -> None:
                 logger.warning('orders migration pass failed for: %s', failed)
     except Exception:
         logger.exception('secondary orders migration pass failed')
+        _startup_stage_end("secondary_orders_migration", secondary_orders_stage, "error")
+    else:
+        _startup_stage_end("secondary_orders_migration", secondary_orders_stage)
 
     # Ensure legacy DBs get `stock` and `discount` columns on the `products` table.
+    products_schema_stage = _startup_stage_start("products_schema_and_indexes")
     try:
         with engine.begin() as conn:
             dialect = getattr(engine, 'dialect', None)
@@ -1045,8 +1134,12 @@ def _startup_bootstrap_sync() -> None:
                 pass
     except Exception:
         logger.exception('ensure products columns step failed')
+        _startup_stage_end("products_schema_and_indexes", products_schema_stage, "error")
+    else:
+        _startup_stage_end("products_schema_and_indexes", products_schema_stage)
 
     # Log which database we are using (mask credentials) and test connection
+    connection_stage = _startup_stage_start("database_connection_check")
     try:
         db_env = os.environ.get('DATABASE_URL')
         masked = 'sqlite (local file)'
@@ -1114,9 +1207,13 @@ def _startup_bootstrap_sync() -> None:
                 engine_url,
             )
     except RuntimeError:
+        _startup_stage_end("database_connection_check", connection_stage, "error")
         raise
     except Exception:
         logger.exception('Database startup check failed')
+        _startup_stage_end("database_connection_check", connection_stage, "error")
+    else:
+        _startup_stage_end("database_connection_check", connection_stage)
 
     # Log current email delivery configuration once at startup.
     try:
@@ -1124,6 +1221,7 @@ def _startup_bootstrap_sync() -> None:
     except Exception:
         logger.exception('Could not log Resend config snapshot')
 
+    seed_restore_stage = _startup_stage_start("seeds_and_restorations")
     db = SessionLocal()
     try:
         try:
@@ -1201,6 +1299,9 @@ def _startup_bootstrap_sync() -> None:
             logger.exception('promotions restore step failed')
     finally:
         db.close()
+        stage_status = "error" if sys.exc_info()[0] is not None else "ok"
+        _startup_stage_end("seeds_and_restorations", seed_restore_stage, stage_status)
+        _startup_stage_end("bootstrap", bootstrap_started, stage_status)
 
 
 # -------------------------------------------------------------------
@@ -1226,6 +1327,11 @@ async def lifespan(app: FastAPI):
         pass
     if startup_skip:
         logger.warning('Skipping startup bootstrap (SKIP_STARTUP_BOOTSTRAP enabled).')
+        logger.info(
+            '[STARTUP] accepting_traffic timestamp=%s elapsed_since_process_ms=%.1f mode=skipped',
+            _startup_timestamp(),
+            (time.perf_counter() - PROCESS_START_MONOTONIC) * 1000.0,
+        )
         yield
         APP_EVENT_LOOP = None
         return
@@ -1243,11 +1349,21 @@ async def lifespan(app: FastAPI):
             app.state.startup_task = asyncio.create_task(_run_background())
         except Exception:
             asyncio.create_task(_run_background())
+        logger.info(
+            '[STARTUP] accepting_traffic timestamp=%s elapsed_since_process_ms=%.1f mode=background',
+            _startup_timestamp(),
+            (time.perf_counter() - PROCESS_START_MONOTONIC) * 1000.0,
+        )
         yield
         APP_EVENT_LOOP = None
         return
 
     await asyncio.to_thread(_startup_bootstrap_sync)
+    logger.info(
+        '[STARTUP] accepting_traffic timestamp=%s elapsed_since_process_ms=%.1f mode=synchronous',
+        _startup_timestamp(),
+        (time.perf_counter() - PROCESS_START_MONOTONIC) * 1000.0,
+    )
     yield
     APP_EVENT_LOOP = None
     # Shutdown (nada)
@@ -2869,6 +2985,7 @@ def _geocode_fetch_nominatim(query: str) -> Tuple[Optional[float], Optional[floa
     headers = {'User-Agent': GEOCODE_USER_AGENT}
     try:
         resp = httpx.get(GEOCODE_NOMINATIM_URL, params=params, headers=headers, timeout=GEOCODE_TIMEOUT_SEC)
+        _log_external_response('nominatim', resp)
         resp.raise_for_status()
         data = resp.json()
         if isinstance(data, list) and data:
@@ -2895,6 +3012,7 @@ def _geocode_fetch_google(query: str) -> Tuple[Optional[float], Optional[float],
         pass
     try:
         resp = httpx.get('https://maps.googleapis.com/maps/api/geocode/json', params=params, timeout=GEOCODE_TIMEOUT_SEC)
+        _log_external_response('google_geocoding', resp)
         resp.raise_for_status()
         data = resp.json()
         if not isinstance(data, dict):
@@ -3899,6 +4017,7 @@ async def _send_order_confirmation_email(
                 },
                 json=send_payload,
             )
+        _log_external_response('resend', response)
     except Exception as e:
         logger.warning('Resend request failed for order id=%s: %s', order_payload.get('id'), e)
         return False
@@ -4004,6 +4123,7 @@ async def _send_order_seen_notification_email(order_data: Optional[Dict[str, Any
                 },
                 json=send_payload,
             )
+        _log_external_response('resend', response)
     except Exception as e:
         logger.warning('Resend request failed for seen-notification order id=%s: %s', order_payload.get('id'), e)
         return False
@@ -4109,6 +4229,7 @@ async def _send_order_prepared_notification_email(order_data: Optional[Dict[str,
                 },
                 json=send_payload,
             )
+        _log_external_response('resend', response)
     except Exception as e:
         logger.warning('Resend request failed for prepared-notification order id=%s: %s', order_payload.get('id'), e)
         return False
@@ -4325,6 +4446,7 @@ async def _send_order_closed_cancellation_email(order_data: Optional[Dict[str, A
                 },
                 json=send_payload,
             )
+        _log_external_response('resend', response)
     except Exception as e:
         logger.warning('Resend request failed for closed-cancel order id=%s: %s', order_payload.get('id'), e)
         return False
@@ -4490,6 +4612,7 @@ async def _send_order_customer_cancellation_email(order_data: Optional[Dict[str,
                 },
                 json=send_payload,
             )
+        _log_external_response('resend', response)
     except Exception as e:
         logger.warning('Resend request failed for customer-cancel order id=%s: %s', order_payload.get('id'), e)
         return False
@@ -6330,8 +6453,71 @@ async def debug_test_email(request: Request):
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    logger.info(f"{request.method} {request.url}")
-    return await call_next(request)
+    request_id = new_request_id(request.headers.get("x-request-id"))
+    request.state.request_id = request_id
+    metrics_token = begin_request_metrics(request_id, request.method, request.url.path)
+    started = time.perf_counter()
+    response = None
+    exception_name = None
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+    except Exception as exc:
+        exception_name = type(exc).__name__
+        raise
+    finally:
+        duration_ms = (time.perf_counter() - started) * 1000.0
+        metrics = current_request_metrics()
+        status = response.status_code if response is not None else 500
+        if exception_name:
+            logger.error(
+                "[HTTP][%s] %s %s status=%s duration=%.1fms exception=%s",
+                request_id,
+                request.method,
+                request.url.path,
+                status,
+                duration_ms,
+                exception_name,
+            )
+        else:
+            logger.info(
+                "[HTTP][%s] %s %s status=%s duration=%.1fms",
+                request_id,
+                request.method,
+                request.url.path,
+                status,
+                duration_ms,
+            )
+        if duration_ms >= HTTP_SLOW_THRESHOLD_MS:
+            logger.warning(
+                "[SLOW HTTP][%s] %s %s duration=%.1fms status=%s",
+                request_id,
+                request.method,
+                request.url.path,
+                duration_ms,
+                status,
+            )
+        if status == 429:
+            # A response logged here was generated by this ASGI application.
+            # A 429 with no matching [HTTP] line came from an upstream layer
+            # (Render/proxy/CDN) and never reached this middleware.
+            logger.warning(
+                "[429][%s] source=application method=%s path=%s",
+                request_id,
+                request.method,
+                request.url.path,
+            )
+        if metrics is not None:
+            logger.info(
+                "[SQL][%s] %s %s queries=%s sql_time=%.1fms",
+                request_id,
+                request.method,
+                request.url.path,
+                metrics.query_count,
+                metrics.sql_time_ms,
+            )
+        reset_request_metrics(metrics_token)
 
 
 @app.middleware("http")
@@ -7103,16 +7289,44 @@ def _push_event_threadsafe(data: Dict[str, Any]) -> None:
 
 @app.websocket("/ws/products")
 async def ws_products(ws: WebSocket):
-    await ws.accept()
-    connections.append(ws)
+    request_id = new_request_id(ws.headers.get("x-request-id"))
+    metrics_token = begin_request_metrics(request_id, "WS", "/ws/products")
+    started = time.perf_counter()
+    accepted_at = None
+    accepted = False
     try:
+        await ws.accept()
+        accepted = True
+        accepted_at = time.perf_counter()
+        connections.append(ws)
+        logger.info(
+            "[WS][%s] /ws/products accepted handshake=%.1fms sockets=%s",
+            request_id,
+            (accepted_at - started) * 1000.0,
+            len(connections),
+        )
         while True:
             await asyncio.sleep(1)
     except WebSocketDisconnect:
-        pass
+        logger.info("[WS][%s] /ws/products disconnect=client", request_id)
+    except Exception as exc:
+        logger.error(
+            "[WS][%s] /ws/products exception=%s",
+            request_id,
+            type(exc).__name__,
+        )
+        raise
     finally:
         if ws in connections:
             connections.remove(ws)
+        logger.info(
+            "[WS][%s] /ws/products closed accepted=%s lifetime=%.1fms sockets=%s",
+            request_id,
+            accepted,
+            (time.perf_counter() - started) * 1000.0,
+            len(connections),
+        )
+        reset_request_metrics(metrics_token)
 
 
 @app.get("/events/products")
@@ -10021,6 +10235,7 @@ def _fetch_pexels_photo(query: str) -> Optional[Dict[str, Any]]:
             headers={'Authorization': api_key},
             timeout=10,
         )
+        _log_external_response('pexels', resp)
         if resp.status_code >= 400:
             logger.warning('Pexels search failed: %s %s', resp.status_code, resp.text[:200])
             return None
@@ -10037,6 +10252,7 @@ def _fetch_pexels_photo(query: str) -> Optional[Dict[str, Any]]:
 def _download_image_bytes(url: str, max_bytes: int) -> Optional[Tuple[bytes, str, str]]:
     try:
         with httpx.stream('GET', url, timeout=15, follow_redirects=True) as resp:
+            _log_external_response('image_source', resp)
             if resp.status_code >= 400:
                 return None
             content_type = str(resp.headers.get('content-type') or 'image/jpeg')
@@ -11405,7 +11621,8 @@ def write_catalog_snapshot():
         # try to push (synchronously here but guarded)
         if GIST_TOKEN and GIST_ID:
             try:
-                httpx.patch(f"https://api.github.com/gists/{GIST_ID}", json={"files": {"products.json": {"content": content}}}, headers={"Authorization": f"token {GIST_TOKEN}"}, timeout=15)
+                resp = httpx.patch(f"https://api.github.com/gists/{GIST_ID}", json={"files": {"products.json": {"content": content}}}, headers={"Authorization": f"token {GIST_TOKEN}"}, timeout=15)
+                _log_external_response('github_gist', resp)
             except Exception:
                 logger.warning('Remote gist backup failed (write_catalog_snapshot)')
     except Exception:
@@ -11516,6 +11733,7 @@ def write_promotions_snapshot(promos, business_scope: str = 'mayorista'):
                 payload = {"files": {"promotions.json": {"content": json.dumps(normalized_promos, ensure_ascii=False, indent=2)}}}
                 try:
                     resp = httpx.patch(url, json=payload, headers={"Authorization": f"token {GIST_TOKEN}", "Accept": "application/vnd.github.v3+json"}, timeout=15)
+                    _log_external_response('github_gist', resp)
                     if resp.status_code >= 200 and resp.status_code < 300:
                         logger.info('promotions pushed to gist successfully')
                 except Exception as e:
@@ -13177,6 +13395,7 @@ async def _resolve_mercadopago_payment_for_order(order_data: Optional[Dict[str, 
                     f'https://api.mercadopago.com/v1/payments/{reference}',
                     headers=headers,
                 )
+                _log_external_response('mercadopago', resp)
                 if resp.status_code < 400:
                     try:
                         return _build_result(resp.json() or {})
@@ -13294,6 +13513,7 @@ async def _refund_mercadopago_payment_for_order(order_data: Optional[Dict[str, A
                 headers=headers,
                 json={},
             )
+        _log_external_response('mercadopago', response)
     except Exception as e:
         logger.warning('Mercado Pago refund request failed for payment_id=%s: %s', payment_id, e)
         return {
@@ -13393,6 +13613,7 @@ async def _sync_mercadopago_payment(
                     f"https://api.mercadopago.com/v1/payments/{payment_id}",
                     headers={'Authorization': f'Bearer {access_token}'},
                 )
+            _log_external_response('mercadopago', resp)
             if resp.status_code < 400:
                 mp_payload = resp.json()
                 resolved_status = str(mp_payload.get('status') or resolved_status or '').strip().lower()
@@ -13430,6 +13651,7 @@ async def _sync_mercadopago_payment(
                         'limit': 5,
                     },
                 )
+            _log_external_response('mercadopago', resp)
             if resp.status_code < 400:
                 search_payload = resp.json() or {}
                 results = search_payload.get('results') if isinstance(search_payload, dict) else []
@@ -13814,6 +14036,7 @@ async def create_mercadopago_preference(request: Request, payload: schemas.Merca
                     json=mp_payload,
                     headers=headers,
                 )
+            _log_external_response('mercadopago', resp)
         except Exception as e:
             logger.exception('Mercado Pago request failed: %s', e)
             raise HTTPException(status_code=502, detail='No se pudo contactar a Mercado Pago')
@@ -15778,6 +16001,7 @@ def _fetch_osrm_route_path(nodes: List[Tuple[float, float]]) -> List[Dict[str, f
                     f"{OSRM_ROUTE_BASE}/route/v1/driving/{coords}",
                     params={'overview': 'full', 'geometries': 'geojson', 'steps': 'false'},
                 )
+                _log_external_response('osrm', resp)
                 resp.raise_for_status()
                 payload = resp.json() if resp.content else {}
                 if str(payload.get('code') or '') != 'Ok':
@@ -16359,6 +16583,7 @@ def _estimate_route_drive_minutes(nodes: List[Tuple[float, float]]) -> Optional[
                     f"{OSRM_ROUTE_BASE}/route/v1/driving/{coords}",
                     params={'overview': 'false', 'steps': 'false'},
                 )
+                _log_external_response('osrm', resp)
                 resp.raise_for_status()
                 payload = resp.json() if resp.content else {}
                 if str(payload.get('code') or '') != 'Ok':
@@ -17316,6 +17541,7 @@ def admin_arcgis_geocode(request: Request, q: str = '', current_admin=Depends(ge
             params=params,
             timeout=GEOCODE_TIMEOUT_SEC,
         )
+        _log_external_response('arcgis_geocoding', resp)
         resp.raise_for_status()
         data = resp.json()
         return JSONResponse(status_code=200, content=data or {}, headers=headers)
