@@ -41,6 +41,8 @@ from sqlalchemy import text
 from sqlalchemy import func
 from sqlalchemy import inspect
 from sqlalchemy import or_
+from sqlalchemy import String as SQLString
+from sqlalchemy import cast, select
 from types import SimpleNamespace
 
 from app import models, schemas, crud, utils
@@ -1398,6 +1400,7 @@ PRODUCTS_COUNT_CACHE_TTL = _env_float('PRODUCTS_COUNT_CACHE_TTL', 15.0)
 PROMOTIONS_CACHE: Dict[str, Dict[str, Any]] = {}
 PROMOTIONS_CACHE_TTL = _env_float('PROMOTIONS_CACHE_TTL', 15.0)
 CONSUMOS_CACHE: Dict[str, Dict[str, Any]] = {}
+CONSUMOS_CACHE_LOCK = threading.Lock()
 CONSUMOS_CACHE_TTL = _env_float('CONSUMOS_CACHE_TTL', 10.0)
 ADMIN_INSIGHTS_CACHE: Dict[Any, Dict[str, Any]] = {}
 ADMIN_INSIGHTS_CACHE_TTL = _env_float('ADMIN_INSIGHTS_CACHE_TTL', 3.0)
@@ -1819,23 +1822,30 @@ def _load_consumos_snapshot(db: Session, business_scope: str = 'mayorista') -> L
         cached = CONSUMOS_CACHE.get(scope)
         if isinstance(cached, dict) and cached.get('mtime') == mtime and (time.time() - float(cached.get('ts') or 0)) < CONSUMOS_CACHE_TTL:
             return list(cached.get('value') or [])
-        items = []
-        try:
-            dbv = crud.get_setting(db, _scoped_setting_key('consumos', scope))
-            if isinstance(dbv, list):
-                items = dbv
-        except Exception:
+        # A cold cache can be reached concurrently by several /init requests.
+        # Serialize only the short snapshot read and re-check after acquiring
+        # the lock so PostgreSQL/settings are not queried repeatedly.
+        with CONSUMOS_CACHE_LOCK:
+            cached = CONSUMOS_CACHE.get(scope)
+            if isinstance(cached, dict) and cached.get('mtime') == mtime and (time.time() - float(cached.get('ts') or 0)) < CONSUMOS_CACHE_TTL:
+                return list(cached.get('value') or [])
             items = []
-        if not items:
-            if os.path.exists(consumos_path):
-                try:
-                    with open(consumos_path, 'r', encoding='utf-8') as f:
-                        items = json.load(f) or []
-                except Exception:
-                    items = []
-        result = items if isinstance(items, list) else []
-        CONSUMOS_CACHE[scope] = {'value': list(result), 'mtime': mtime, 'ts': time.time()}
-        return result
+            try:
+                dbv = crud.get_setting(db, _scoped_setting_key('consumos', scope))
+                if isinstance(dbv, list):
+                    items = dbv
+            except Exception:
+                items = []
+            if not items:
+                if os.path.exists(consumos_path):
+                    try:
+                        with open(consumos_path, 'r', encoding='utf-8') as f:
+                            items = json.load(f) or []
+                    except Exception:
+                        items = []
+            result = items if isinstance(items, list) else []
+            CONSUMOS_CACHE[scope] = {'value': list(result), 'mtime': mtime, 'ts': time.time()}
+            return result
     except Exception as e:
         logger.exception('load_consumos_snapshot failed: %s', e)
         return []
@@ -1848,7 +1858,8 @@ def _invalidate_products_cache() -> None:
 
 
 def _invalidate_read_caches() -> None:
-    CONSUMOS_CACHE.clear()
+    with CONSUMOS_CACHE_LOCK:
+        CONSUMOS_CACHE.clear()
     ADMIN_INSIGHTS_CACHE.clear()
 
 
@@ -7702,7 +7713,9 @@ def get_image(image_id: int, db: Session = Depends(get_db)):
     response_ms = 0.0
     image_bytes = None
     image_mime = None
-    query = db.query(models.Image).filter(models.Image.id == image_id).limit(1)
+    # The response only needs the binary payload and MIME type. Avoid selecting
+    # filename/created_at or materializing a full ORM Image row.
+    query = db.query(models.Image.data, models.Image.mime).filter(models.Image.id == image_id).limit(1)
     try:
         # Force checkout before starting the SQL timer so pool wait is not folded
         # into PostgreSQL execution time.
@@ -7713,11 +7726,10 @@ def get_image(image_id: int, db: Session = Depends(get_db)):
         fetch_started = time.perf_counter()
         row = result.first()
         fetch_ms = (time.perf_counter() - fetch_started) * 1000.0
-        img = row[0] if row else None
-        if not img:
+        if not row or row[0] is None:
             raise HTTPException(404, 'Image not found')
-        image_bytes = bytes(img.data)
-        image_mime = img.mime
+        image_bytes = bytes(row[0])
+        image_mime = row[1]
     finally:
         # The response contains an in-memory copy; release PostgreSQL before
         # response construction and transfer.
@@ -12404,7 +12416,38 @@ def admin_sales_stats(
     if role not in ('owner', 'admin'):
         raise HTTPException(status_code=403, detail='No autorizado')
     scope_filter = _resolve_admin_customer_type_filter(current_admin, customer_type)
-    return sales_stats(days=days, source=source, customer_type=scope_filter, limit=limit, db=db)
+    # Keep the public sales endpoint uncached, but share the short-lived,
+    # scope-qualified result across the admin views. This avoids reloading and
+    # reparsing the same order sample while preserving tenant isolation.
+    try:
+        cache_days = max(1, min(365, int(days or 30)))
+    except Exception:
+        cache_days = 30
+    try:
+        cache_limit = max(50, min(20000, int(limit or 5000)))
+    except Exception:
+        cache_limit = 5000
+    cache_key = (
+        'sales_stats',
+        scope_filter or 'all',
+        str(source or '').strip().lower() or None,
+        cache_days,
+        cache_limit,
+    )
+    cached = _cache_get(ADMIN_INSIGHTS_CACHE, cache_key, ADMIN_INSIGHTS_CACHE_TTL)
+    if cached is not None:
+        return cached
+    payload = jsonable_encoder(
+        sales_stats(
+            days=days,
+            source=source,
+            customer_type=scope_filter,
+            limit=limit,
+            db=db,
+        )
+    )
+    _cache_set(ADMIN_INSIGHTS_CACHE, cache_key, payload, 32)
+    return payload
 
 
 def _ops_safe_float(value: Any, default: float = 0.0) -> float:
@@ -14926,17 +14969,13 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
             logger.exception('Could not enqueue n8n event for new order id=%s', payload.get('id') if isinstance(payload, dict) else None)
         # If order creation decremented stock, update snapshot and notify product watchers.
         try:
+            catalog_snapshot_needed = False
+            catalog_cache_invalidation_needed = False
             # Product stock updates
             updated = getattr(order, '_updated_product_ids', None)
             if updated:
-                try:
-                    await anyio.to_thread.run_sync(write_catalog_snapshot)
-                except Exception:
-                    logger.exception('write_catalog_snapshot after order failed')
-                try:
-                    _invalidate_products_cache()
-                except Exception:
-                    logger.exception('catalog snapshot invalidation after order failed')
+                catalog_snapshot_needed = True
+                catalog_cache_invalidation_needed = True
                 try:
                     for pid in updated:
                         await push_event({"action": "updated", "product": {"id": pid}})
@@ -15049,16 +15088,23 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
                             return None
                     new_consumos = await anyio.to_thread.run_sync(lambda: _apply_consumos(consumed))
                     if new_consumos is not None:
+                        catalog_snapshot_needed = True
                         try:
                             await push_event({"action": "consumos-updated", "consumos": new_consumos})
                         except Exception:
                             logger.exception('push_event consumos-updated after order failed')
-                        try:
-                            await anyio.to_thread.run_sync(write_catalog_snapshot)
-                        except Exception:
-                            logger.exception('write_catalog_snapshot after consumos update failed')
                 except Exception:
                     logger.exception('apply consumos after order failed')
+            if catalog_snapshot_needed:
+                try:
+                    await anyio.to_thread.run_sync(write_catalog_snapshot)
+                except Exception:
+                    logger.exception('write_catalog_snapshot after order failed')
+            if catalog_cache_invalidation_needed:
+                try:
+                    _invalidate_products_cache()
+                except Exception:
+                    logger.exception('catalog snapshot invalidation after order failed')
         except Exception:
             logger.exception('post-order product update notifications failed')
         # Send order confirmation email in background so checkout response is not blocked.
@@ -16590,7 +16636,11 @@ def _get_driver_live_location_payload(
 
 
 def _load_driver_live_location_rows(drivers: List[Any], db: Session) -> Dict[Tuple[str, str], Any]:
-    """Load the latest persisted location for all dashboard drivers in one query."""
+    """Load the latest persisted location for all dashboard drivers in one query.
+
+    The window function keeps the query set-based without materializing the
+    complete location history for every driver in Python.
+    """
     driver_ids: List[int] = []
     usernames: List[str] = []
     for driver in (drivers or []):
@@ -16612,15 +16662,47 @@ def _load_driver_live_location_rows(drivers: List[Any], db: Session) -> Dict[Tup
         filters.append(models.AdminDriverLocation.admin_user_id.in_(driver_ids))
     if usernames:
         filters.append(models.AdminDriverLocation.username.in_(usernames))
+    rows = []
     try:
-        rows = (
-            db.query(models.AdminDriverLocation)
-            .filter(or_(*filters))
-            .order_by(models.AdminDriverLocation.recorded_at.desc())
-            .all()
+        location_model = models.AdminDriverLocation
+        location_fields = (
+            'id', 'admin_user_id', 'username', 'full_name', 'lat', 'lon',
+            'accuracy', 'speed', 'heading', 'battery', 'recorded_at',
         )
+        location_columns = [getattr(location_model, field) for field in location_fields]
+        identity = func.coalesce(
+            cast(location_model.admin_user_id, SQLString),
+            location_model.username,
+        )
+        row_number = func.row_number().over(
+            partition_by=identity,
+            order_by=(location_model.recorded_at.desc(), location_model.id.desc()),
+        ).label('_catalog_location_row_number')
+        ranked = select(*location_columns, row_number).where(or_(*filters)).subquery()
+        latest_stmt = select(
+            *(getattr(ranked.c, field) for field in location_fields)
+        ).where(ranked.c._catalog_location_row_number == 1)
+        result_rows = db.execute(latest_stmt).all()
+        for result_row in result_rows:
+            values = dict(result_row._mapping)
+            rows.append(SimpleNamespace(**values))
     except Exception:
-        return {}
+        # Preserve compatibility with legacy databases/dialects that cannot
+        # execute window functions; this remains one query, but may return
+        # more rows and is only a fallback path.
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
+            rows = (
+                db.query(models.AdminDriverLocation)
+                .filter(or_(*filters))
+                .order_by(models.AdminDriverLocation.recorded_at.desc())
+                .all()
+            )
+        except Exception:
+            return {}
     by_id: Dict[str, Any] = {}
     by_username: Dict[str, Any] = {}
     for row in (rows or []):
