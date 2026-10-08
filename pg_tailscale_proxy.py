@@ -1,7 +1,5 @@
-python
 import asyncio
 import ipaddress
-
 
 LISTEN_HOST = "127.0.0.1"
 LISTEN_PORT = 6432
@@ -12,13 +10,11 @@ SOCKS_PORT = 1055
 TARGET_HOST = "100.127.197.79"
 TARGET_PORT = 5432
 
-
 async def read_exactly(
     reader: asyncio.StreamReader,
     size: int,
 ) -> bytes:
     return await reader.readexactly(size)
-
 
 async def socks5_connect():
     """
