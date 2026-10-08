@@ -1,4 +1,4 @@
-```python
+python
 import asyncio
 import ipaddress
 
@@ -231,4 +231,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-```
