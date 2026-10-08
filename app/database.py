@@ -4,6 +4,8 @@ import os
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import declarative_base, sessionmaker
 
+from app.observability import InstrumentedQueuePool
+
 # app/
 BASE_DIR = Path(__file__).resolve().parent
 ROOT_DIR = BASE_DIR.parent
@@ -114,6 +116,7 @@ else:
     pool_recycle = _env_int('DB_POOL_RECYCLE', 1800)
     engine = create_engine(
         SQLALCHEMY_DATABASE_URL,
+        poolclass=InstrumentedQueuePool,
         pool_size=pool_size,
         max_overflow=max_overflow,
         pool_timeout=pool_timeout,

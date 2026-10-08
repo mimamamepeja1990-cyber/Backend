@@ -1977,7 +1977,8 @@ def _load_order_token_previews_batch(order_ids: List[Any]) -> Dict[str, Dict[str
         rows = _safe_engine_fetchall(
             'SELECT order_id, token_preview, token_received, created_at '
             f"FROM order_token_previews WHERE order_id IN ({', '.join(placeholders)}) "
-            'ORDER BY created_at DESC'
+            'ORDER BY created_at DESC',
+            params,
         ) or []
     except Exception:
         return {}
@@ -6777,13 +6778,25 @@ async def log_requests(request: Request, call_next):
                 request.url.path,
             )
         if metrics is not None:
+            try:
+                pool_active = max(0, int(engine.pool.checkedout()))
+                pool_overflow = max(0, int(engine.pool.overflow()))
+            except Exception:
+                pool_active = metrics.pool_active
+                pool_overflow = metrics.pool_overflow
             logger.info(
-                "[SQL][%s] %s %s queries=%s sql_time=%.1fms",
+                "[SQL][%s] %s %s queries=%s sql_time=%.1fms pool_wait=%.1fms pool_connect=%.1fms pool_checkouts=%s pool_checkins=%s pool_active=%s pool_overflow=%s",
                 request_id,
                 request.method,
                 request.url.path,
                 metrics.query_count,
                 metrics.sql_time_ms,
+                metrics.pool_wait_ms,
+                metrics.pool_connect_ms,
+                metrics.pool_checkout_count,
+                metrics.pool_checkin_count,
+                pool_active,
+                pool_overflow,
             )
         reset_request_metrics(metrics_token)
 
@@ -7679,10 +7692,66 @@ async def upload_image_url(payload: Dict[str, Any] = Body(default=None)):
 
 @app.get('/images/{image_id}')
 def get_image(image_id: int, db: Session = Depends(get_db)):
-    img = db.query(models.Image).filter(models.Image.id == image_id).first()
-    if not img:
-        raise HTTPException(404, 'Image not found')
-    return Response(img.data, media_type=img.mime)
+    started = time.perf_counter()
+    metrics = current_request_metrics()
+    checkout_count_before = int(getattr(metrics, 'pool_checkout_count', 0) or 0) if metrics else 0
+    pool_wait_before = float(getattr(metrics, 'pool_wait_ms', 0.0) or 0.0) if metrics else 0.0
+    execute_ms = 0.0
+    fetch_ms = 0.0
+    processing_ms = 0.0
+    response_ms = 0.0
+    image_bytes = None
+    image_mime = None
+    query = db.query(models.Image).filter(models.Image.id == image_id).limit(1)
+    try:
+        # Force checkout before starting the SQL timer so pool wait is not folded
+        # into PostgreSQL execution time.
+        db.connection()
+        execute_started = time.perf_counter()
+        result = db.execute(query.statement)
+        execute_ms = (time.perf_counter() - execute_started) * 1000.0
+        fetch_started = time.perf_counter()
+        row = result.first()
+        fetch_ms = (time.perf_counter() - fetch_started) * 1000.0
+        img = row[0] if row else None
+        if not img:
+            raise HTTPException(404, 'Image not found')
+        image_bytes = bytes(img.data)
+        image_mime = img.mime
+    finally:
+        # The response contains an in-memory copy; release PostgreSQL before
+        # response construction and transfer.
+        try:
+            db.close()
+        except Exception:
+            pass
+    processing_started = time.perf_counter()
+    response = Response(image_bytes, media_type=image_mime)
+    processing_ms = (time.perf_counter() - processing_started) * 1000.0
+    response_ms = processing_ms
+    metrics = current_request_metrics()
+    pool_wait_ms = max(
+        0.0,
+        (float(getattr(metrics, 'pool_wait_ms', 0.0) or 0.0) if metrics else 0.0) - pool_wait_before,
+    )
+    checkout_count = max(
+        0,
+        (int(getattr(metrics, 'pool_checkout_count', 0) or 0) if metrics else 0) - checkout_count_before,
+    )
+    logger.info(
+        "[IMAGE][%s] id=%s bytes=%s pool_wait_ms=%.1f checkout_count=%s db_execute_ms=%.1f fetch_ms=%.1f processing_ms=%.1f response_ms=%.1f total_ms=%.1f",
+        getattr(metrics, 'request_id', '-') if metrics else '-',
+        image_id,
+        len(image_bytes or b''),
+        pool_wait_ms,
+        checkout_count,
+        execute_ms,
+        fetch_ms,
+        processing_ms,
+        response_ms,
+        (time.perf_counter() - started) * 1000.0,
+    )
+    return response
 
 
 # --- Auth endpoints ---
@@ -12656,6 +12725,7 @@ def _build_admin_operations_overview(
             continue
         active_orders_by_driver[key] = int(active_orders_by_driver.get(key, 0)) + 1
 
+    persisted_location_rows = _load_driver_live_location_rows(drivers, db)
     online_threshold_sec = 12 * 60
     online_drivers = 0
     with_active_orders = 0
@@ -12670,7 +12740,13 @@ def _build_admin_operations_overview(
         max_active_orders = max(max_active_orders, active_count)
         if active_count > 0:
             with_active_orders += 1
-        live_payload = _get_driver_live_location_payload(driver_id, driver_username, db)
+        location_key = (str(driver_id or '').strip(), str(driver_username or '').strip())
+        live_payload = _get_driver_live_location_payload(
+            driver_id,
+            driver_username,
+            db,
+            db_row=persisted_location_rows.get(location_key),
+        )
         last_seen_dt = _parse_datetime_utc(live_payload.get('recorded_at')) if isinstance(live_payload, dict) else None
         is_online = False
         if last_seen_dt is not None:
@@ -16428,6 +16504,7 @@ def _get_driver_live_location_payload(
     driver_id: Optional[int],
     driver_username: Optional[str],
     db: Session,
+    db_row: Optional[Any] = None,
 ) -> Optional[Dict[str, Any]]:
     best_payload: Optional[Dict[str, Any]] = None
     best_ts: Optional[datetime.datetime] = None
@@ -16476,12 +16553,14 @@ def _get_driver_live_location_payload(
         pass
 
     try:
-        q = db.query(models.AdminDriverLocation)
-        if driver_id is not None:
-            q = q.filter(models.AdminDriverLocation.admin_user_id == int(driver_id))
-        elif driver_username:
-            q = q.filter(models.AdminDriverLocation.username == str(driver_username).strip())
-        row = q.order_by(models.AdminDriverLocation.recorded_at.desc()).first()
+        row = db_row
+        if row is None:
+            q = db.query(models.AdminDriverLocation)
+            if driver_id is not None:
+                q = q.filter(models.AdminDriverLocation.admin_user_id == int(driver_id))
+            elif driver_username:
+                q = q.filter(models.AdminDriverLocation.username == str(driver_username).strip())
+            row = q.order_by(models.AdminDriverLocation.recorded_at.desc()).first()
         if row is not None:
             rec = row.recorded_at
             rec_utc = _parse_datetime_utc(rec)
@@ -16508,6 +16587,57 @@ def _get_driver_live_location_payload(
         pass
 
     return best_payload
+
+
+def _load_driver_live_location_rows(drivers: List[Any], db: Session) -> Dict[Tuple[str, str], Any]:
+    """Load the latest persisted location for all dashboard drivers in one query."""
+    driver_ids: List[int] = []
+    usernames: List[str] = []
+    for driver in (drivers or []):
+        raw_id = getattr(driver, 'id', None)
+        try:
+            if raw_id is not None:
+                driver_ids.append(int(raw_id))
+        except Exception:
+            pass
+        username = str(getattr(driver, 'username', '') or '').strip()
+        if username:
+            usernames.append(username)
+    driver_ids = sorted(set(driver_ids))
+    usernames = sorted(set(usernames))
+    if not driver_ids and not usernames:
+        return {}
+    filters = []
+    if driver_ids:
+        filters.append(models.AdminDriverLocation.admin_user_id.in_(driver_ids))
+    if usernames:
+        filters.append(models.AdminDriverLocation.username.in_(usernames))
+    try:
+        rows = (
+            db.query(models.AdminDriverLocation)
+            .filter(or_(*filters))
+            .order_by(models.AdminDriverLocation.recorded_at.desc())
+            .all()
+        )
+    except Exception:
+        return {}
+    by_id: Dict[str, Any] = {}
+    by_username: Dict[str, Any] = {}
+    for row in (rows or []):
+        row_id = str(getattr(row, 'admin_user_id', '') or '').strip()
+        row_username = str(getattr(row, 'username', '') or '').strip()
+        if row_id and row_id not in by_id:
+            by_id[row_id] = row
+        if row_username and row_username not in by_username:
+            by_username[row_username] = row
+    result: Dict[Tuple[str, str], Any] = {}
+    for driver in (drivers or []):
+        driver_id = str(getattr(driver, 'id', '') or '').strip()
+        username = str(getattr(driver, 'username', '') or '').strip()
+        row = by_id.get(driver_id) or by_username.get(username)
+        if row is not None:
+            result[(driver_id, username)] = row
+    return result
 
 
 def _get_driver_location_points(
