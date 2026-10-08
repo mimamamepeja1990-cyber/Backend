@@ -36,10 +36,46 @@ let polyline = null;
 let currentUser = null;
 let routeOrders = [];
 let currentIndex = 0;
-let refreshTimer = null;
 let locationWatchId = null;
 let lastLocationSentAt = 0;
 const LOCATION_SEND_INTERVAL_MS = 8000;
+let routeRealtimeSocket = null;
+let routeRealtimeRetryTimer = null;
+let routeRealtimeRetries = 0;
+
+function stopRouteRealtime(){
+  if (routeRealtimeRetryTimer){ clearTimeout(routeRealtimeRetryTimer); routeRealtimeRetryTimer = null; }
+  if (routeRealtimeSocket){ try{ routeRealtimeSocket.close(); }catch(_){ } routeRealtimeSocket = null; }
+}
+
+function startRouteRealtime(){
+  if (typeof WebSocket === 'undefined' || routeRealtimeSocket) return;
+  let apiUrl;
+  try{ apiUrl = new URL(API_BASE, location.origin); }catch(_){ return; }
+  const protocol = apiUrl.protocol === 'https:' ? 'wss:' : 'ws:';
+  try{ routeRealtimeSocket = new WebSocket(`${protocol}//${apiUrl.host}/ws/products?scope=${encodeURIComponent(currentUser?.business_scope || 'all')}`); }catch(_){ routeRealtimeSocket = null; return; }
+  const socket = routeRealtimeSocket;
+  socket.onopen = () => {
+    routeRealtimeRetries = 0;
+    try{ socket.send(JSON.stringify({ topics: ['order', 'driver'], scope: currentUser?.business_scope || 'all' })); }catch(_){ }
+  };
+  socket.onmessage = (event) => {
+    try{
+      const data = JSON.parse(event.data);
+      const action = String(data.action || '').toLowerCase();
+      const type = String(data.type || '').toLowerCase();
+      if (action.indexOf('order') === 0 || type.indexOf('order.') === 0) refreshRoute(false);
+    }catch(_){ }
+  };
+  socket.onerror = () => { try{ socket.close(); }catch(_){ } };
+  socket.onclose = () => {
+    if (routeRealtimeSocket === socket) routeRealtimeSocket = null;
+    if (routeRealtimeRetryTimer) return;
+    routeRealtimeRetries += 1;
+    const delay = Math.min(60000, Math.max(1000, 1000 * Math.pow(1.6, Math.min(routeRealtimeRetries, 8))));
+    routeRealtimeRetryTimer = setTimeout(() => { routeRealtimeRetryTimer = null; startRouteRealtime(); }, delay);
+  };
+}
 
 function syncDriverAppInstall(){
   const loggedIn = !!(currentUser && currentUser.role === 'repartidor');
@@ -496,8 +532,7 @@ async function bootstrap(){
         initMap();
         startLocationTracking();
         await refreshRoute(true);
-        if (refreshTimer) clearInterval(refreshTimer);
-        refreshTimer = setInterval(() => refreshRoute(false), 60000);
+        startRouteRealtime();
       }catch(e){
         console.error('login failed', e);
         setAuthError('No se pudo iniciar sesión.');
@@ -521,8 +556,7 @@ async function bootstrap(){
         initMap();
         startLocationTracking();
         await refreshRoute(true);
-        if (refreshTimer) clearInterval(refreshTimer);
-        refreshTimer = setInterval(() => refreshRoute(false), 60000);
+        startRouteRealtime();
       } else {
         clearToken();
         setAuthLocked(true);
@@ -546,6 +580,7 @@ if (logoutBtn){
     currentUser = null;
     syncDriverAppInstall();
     stopLocationTracking();
+    stopRouteRealtime();
     setAuthLocked(true);
     location.reload();
   });

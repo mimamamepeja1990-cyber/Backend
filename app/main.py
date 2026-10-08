@@ -52,6 +52,7 @@ from app.observability import (
     new_request_id,
     reset_request_metrics,
 )
+from app.realtime import RealtimeManager
 from sqlalchemy.exc import IntegrityError, OperationalError, DBAPIError
 from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
 from typing import Tuple
@@ -705,6 +706,7 @@ DRIVER_LOCATIONS_LOCK = threading.Lock()
 DRIVER_LIFECYCLE_STATE: Dict[str, Dict[str, Any]] = {}
 DRIVER_LIFECYCLE_LOCK = threading.Lock()
 APP_EVENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
+REALTIME_MANAGER = RealtimeManager(logger)
 ADMIN_STRESS_TEST_LOCK = threading.Lock()
 ADMIN_STRESS_TEST_STATE: Dict[str, Any] = {
     'session_id': None,
@@ -1395,6 +1397,10 @@ PRODUCTS_COUNT_CACHE: Dict[Any, Dict[str, Any]] = {}
 PRODUCTS_COUNT_CACHE_TTL = _env_float('PRODUCTS_COUNT_CACHE_TTL', 15.0)
 PROMOTIONS_CACHE: Dict[str, Dict[str, Any]] = {}
 PROMOTIONS_CACHE_TTL = _env_float('PROMOTIONS_CACHE_TTL', 15.0)
+CONSUMOS_CACHE: Dict[str, Dict[str, Any]] = {}
+CONSUMOS_CACHE_TTL = _env_float('CONSUMOS_CACHE_TTL', 10.0)
+ADMIN_INSIGHTS_CACHE: Dict[Any, Dict[str, Any]] = {}
+ADMIN_INSIGHTS_CACHE_TTL = _env_float('ADMIN_INSIGHTS_CACHE_TTL', 3.0)
 
 # Critical catalog snapshot. PostgreSQL remains the source of truth; this
 # snapshot is only a read optimization for catalog responses in this worker.
@@ -1805,6 +1811,14 @@ def _load_products_serialized(
 def _load_consumos_snapshot(db: Session, business_scope: str = 'mayorista') -> List[Dict[str, Any]]:
     scope = _normalize_catalog_business_scope(business_scope)
     try:
+        consumos_path = os.path.join(CATALOG_DIR, _scoped_snapshot_filename('consumos.json', scope))
+        try:
+            mtime = os.path.getmtime(consumos_path) if os.path.exists(consumos_path) else None
+        except Exception:
+            mtime = None
+        cached = CONSUMOS_CACHE.get(scope)
+        if isinstance(cached, dict) and cached.get('mtime') == mtime and (time.time() - float(cached.get('ts') or 0)) < CONSUMOS_CACHE_TTL:
+            return list(cached.get('value') or [])
         items = []
         try:
             dbv = crud.get_setting(db, _scoped_setting_key('consumos', scope))
@@ -1813,14 +1827,15 @@ def _load_consumos_snapshot(db: Session, business_scope: str = 'mayorista') -> L
         except Exception:
             items = []
         if not items:
-            consumos_path = os.path.join(CATALOG_DIR, _scoped_snapshot_filename('consumos.json', scope))
             if os.path.exists(consumos_path):
                 try:
                     with open(consumos_path, 'r', encoding='utf-8') as f:
                         items = json.load(f) or []
                 except Exception:
                     items = []
-        return items if isinstance(items, list) else []
+        result = items if isinstance(items, list) else []
+        CONSUMOS_CACHE[scope] = {'value': list(result), 'mtime': mtime, 'ts': time.time()}
+        return result
     except Exception as e:
         logger.exception('load_consumos_snapshot failed: %s', e)
         return []
@@ -1830,6 +1845,11 @@ def _invalidate_products_cache() -> None:
     PRODUCTS_CACHE.clear()
     PRODUCTS_COUNT_CACHE.clear()
     _schedule_catalog_snapshot_rebuild('products_changed')
+
+
+def _invalidate_read_caches() -> None:
+    CONSUMOS_CACHE.clear()
+    ADMIN_INSIGHTS_CACHE.clear()
 
 
 def _get_promotions_cache_bucket(business_scope: str = 'mayorista') -> Dict[str, Any]:
@@ -6325,7 +6345,7 @@ async def set_filters(request: Request, db: Session = Depends(get_db)):
         headers = _cors_headers_for_request(request)
         # notify websocket listeners that filters changed
         try:
-            await push_event({'type':'filters-updated','count': len(body)})
+            await push_event({'type':'filters-updated','scope': scope, 'count': len(body)})
         except Exception:
             pass
         logger.info('Saved filters.json with %s entries', len(body))
@@ -6390,7 +6410,7 @@ async def set_product_categories(request: Request, db: Session = Depends(get_db)
             logger.exception('set_product_categories: failed to write snapshot file')
         headers = _cors_headers_for_request(request)
         try:
-            await push_event({'type':'product-categories-updated','count': len(body)})
+            await push_event({'type':'product-categories-updated','scope': scope, 'count': len(body)})
         except Exception:
             pass
         logger.info('Saved product_categories.json with %s keys', len(body))
@@ -7427,7 +7447,7 @@ async def save_consumos(request: Request, db: Session = Depends(get_db)):
             except Exception:
                 logger.exception('write_catalog_snapshot after save_consumos failed')
             try:
-                await push_event({"action": "consumos-updated", "consumos": data})
+                await push_event({"action": "consumos-updated", "consumos": data, "scope": scope})
             except Exception:
                 logger.exception('push_event consumos-updated failed')
             headers = _cors_headers_for_request(request)
@@ -7468,6 +7488,10 @@ def delete_consumo(product_id: str, request: Request, db: Session = Depends(get_
                     crud.set_setting(db, _scoped_setting_key('consumos', scope), new_items)
                 except Exception:
                     logger.exception('delete_consumo failed updating scoped setting')
+                try:
+                    _push_event_threadsafe({"action": "consumos-updated", "consumos": new_items, "scope": scope})
+                except Exception:
+                    pass
                 headers = _cors_headers_for_request(request)
                 return JSONResponse(status_code=200, content={'detail': 'deleted'}, headers=headers)
             except Exception as write_err:
@@ -7482,27 +7506,17 @@ def delete_consumo(product_id: str, request: Request, db: Session = Depends(get_
 # -------------------------------------------------------------------
 # WEBSOCKETS
 # -------------------------------------------------------------------
-connections: List[WebSocket] = []
 realtime_event_queues: Dict[str, asyncio.Queue] = {}
 REALTIME_QUEUE_MAX = 128
 
 async def push_event(data: dict):
-    """Broadcast JSON `data` to all connected WebSocket clients and log diagnostics."""
-    encoded = jsonable_encoder(data or {})
-    serialized = json.dumps(encoded, ensure_ascii=False, separators=(',', ':')).replace('\n', '\\n')
+    """Publish a compatibility event after its database transaction commits."""
     try:
-        logger.info('push_event sending to %s connections: %s', len(connections), data)
+        _invalidate_read_caches()
     except Exception:
         pass
-    tasks = []
-    for ws in list(connections):
-        try:
-            tasks.append(ws.send_json(data))
-        except Exception:
-            try:
-                connections.remove(ws)
-            except Exception:
-                pass
+    event = await REALTIME_MANAGER.publish(data or {})
+    serialized = json.dumps(event, ensure_ascii=False, separators=(',', ':')).replace('\n', '\\n')
     # Fan-out to SSE clients (fallback transport when WS is blocked by proxy/CDN).
     for cid, queue in list(realtime_event_queues.items()):
         try:
@@ -7518,12 +7532,8 @@ async def push_event(data: dict):
                 realtime_event_queues.pop(cid, None)
             except Exception:
                 pass
-    if tasks:
-        await asyncio.gather(*tasks, return_exceptions=True)
-    try:
-        logger.info('push_event completed')
-    except Exception:
-        pass
+    logger.info('[WS] event_sent type=%s seq=%s', event.get('type'), event.get('seq'))
+    return event
 
 
 def _push_event_threadsafe(data: Dict[str, Any]) -> None:
@@ -7540,21 +7550,15 @@ async def ws_products(ws: WebSocket):
     request_id = new_request_id(ws.headers.get("x-request-id"))
     metrics_token = begin_request_metrics(request_id, "WS", "/ws/products")
     started = time.perf_counter()
-    accepted_at = None
-    accepted = False
+    client = None
     try:
-        await ws.accept()
-        accepted = True
-        accepted_at = time.perf_counter()
-        connections.append(ws)
-        logger.info(
-            "[WS][%s] /ws/products accepted handshake=%.1fms sockets=%s",
-            request_id,
-            (accepted_at - started) * 1000.0,
-            len(connections),
-        )
+        client = await REALTIME_MANAGER.connect(ws, scope=ws.query_params.get('scope'))
+        logger.info("[WS][%s] /ws/products accepted handshake=%.1fms client=%s", request_id, (time.perf_counter() - started) * 1000.0, client.client_id[:8])
         while True:
-            await asyncio.sleep(1)
+            message = await ws.receive_json()
+            replay = await REALTIME_MANAGER.configure(client, message)
+            if replay:
+                await REALTIME_MANAGER.send_replay(client, replay)
     except WebSocketDisconnect:
         logger.info("[WS][%s] /ws/products disconnect=client", request_id)
     except Exception as exc:
@@ -7565,15 +7569,8 @@ async def ws_products(ws: WebSocket):
         )
         raise
     finally:
-        if ws in connections:
-            connections.remove(ws)
-        logger.info(
-            "[WS][%s] /ws/products closed accepted=%s lifetime=%.1fms sockets=%s",
-            request_id,
-            accepted,
-            (time.perf_counter() - started) * 1000.0,
-            len(connections),
-        )
+        await REALTIME_MANAGER.disconnect(client, reason='closed')
+        logger.info("[WS][%s] /ws/products closed lifetime=%.1fms active=%s", request_id, (time.perf_counter() - started) * 1000.0, REALTIME_MANAGER.active_count)
         reset_request_metrics(metrics_token)
 
 
@@ -7582,6 +7579,7 @@ async def events_products(request: Request):
     client_id = uuid.uuid4().hex
     queue: asyncio.Queue = asyncio.Queue(maxsize=REALTIME_QUEUE_MAX)
     realtime_event_queues[client_id] = queue
+    requested_scope = str(request.query_params.get('scope') or '').strip().lower()
 
     async def stream():
         # Initial heartbeat so the browser marks the stream as open quickly.
@@ -7592,6 +7590,14 @@ async def events_products(request: Request):
                     break
                 try:
                     payload = await asyncio.wait_for(queue.get(), timeout=20.0)
+                    if requested_scope in {'mayorista', 'minorista'}:
+                        try:
+                            parsed = json.loads(payload)
+                            event_scope = str(parsed.get('scope') or 'all').strip().lower()
+                            if event_scope not in {'all', requested_scope}:
+                                continue
+                        except Exception:
+                            pass
                     yield f"data: {payload}\n\n"
                 except asyncio.TimeoutError:
                     yield "event: ping\ndata: {}\n\n"
@@ -10248,7 +10254,7 @@ async def create_product(payload: schemas.ProductCreate, request: Request, backg
             except Exception:
                 result = dict(result.__dict__) if hasattr(result, '__dict__') else dict(result)
         try:
-            await push_event({"action": "created", "product": {"id": result.get('id')}})
+            await push_event({"action": "created", "product": result, "scope": business_scope})
         except:
             pass
         await _push_catalog_category_events(sync_result)
@@ -10314,6 +10320,7 @@ def list_products(
 
 @app.get("/init")
 def catalog_init(
+    request: Request,
     skip: int = 0,
     limit: int = 100,
     q: Optional[str] = None,
@@ -10322,6 +10329,7 @@ def catalog_init(
     sort: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
+    scope = _resolve_request_business_scope(request)
     return {
         'products': _load_products_serialized(
             db,
@@ -10333,8 +10341,8 @@ def catalog_init(
             sort=sort,
             endpoint='/init',
         ),
-        'promotions': _get_promotions_cached(),
-        'consumos': _load_consumos_snapshot(db),
+        'promotions': _get_promotions_cached(scope),
+        'consumos': _load_consumos_snapshot(db, business_scope=scope),
     }
 
 @app.get("/products/paged", response_model=schemas.PagedProductsResponse)
@@ -10432,6 +10440,7 @@ def _queue_auto_image_progress(total: int, source: Optional[str] = None) -> None
             'source': source,
             'last_error': None,
         })
+    _push_event_threadsafe({'action': 'auto_image_progress', 'progress': _get_auto_image_progress_snapshot()})
 
 
 def _start_auto_image_progress(total: int, source: Optional[str] = None) -> None:
@@ -10448,6 +10457,7 @@ def _start_auto_image_progress(total: int, source: Optional[str] = None) -> None
             'source': source,
             'last_error': None,
         })
+    _push_event_threadsafe({'action': 'auto_image_progress', 'progress': _get_auto_image_progress_snapshot()})
 
 
 def _advance_auto_image_progress(processed_inc: int = 0, attached_inc: int = 0) -> None:
@@ -10456,6 +10466,7 @@ def _advance_auto_image_progress(processed_inc: int = 0, attached_inc: int = 0) 
         AUTO_IMAGE_PROGRESS['processed'] = int(AUTO_IMAGE_PROGRESS.get('processed') or 0) + int(processed_inc or 0)
         AUTO_IMAGE_PROGRESS['attached'] = int(AUTO_IMAGE_PROGRESS.get('attached') or 0) + int(attached_inc or 0)
         AUTO_IMAGE_PROGRESS['last_update'] = now
+    _push_event_threadsafe({'action': 'auto_image_progress', 'progress': _get_auto_image_progress_snapshot()})
 
 
 def _finish_auto_image_progress(status: str = 'done', error: Optional[str] = None) -> None:
@@ -10466,6 +10477,7 @@ def _finish_auto_image_progress(status: str = 'done', error: Optional[str] = Non
         AUTO_IMAGE_PROGRESS['last_update'] = now
         if error:
             AUTO_IMAGE_PROGRESS['last_error'] = error
+    _push_event_threadsafe({'action': 'auto_image_progress', 'progress': _get_auto_image_progress_snapshot()})
 
 
 def _get_auto_image_progress_snapshot() -> Dict[str, Any]:
@@ -11710,7 +11722,8 @@ async def update_product(product_id: int, payload: schemas.ProductUpdate, reques
     # Normalize prod to obtain id whether it's a dict or object
     prod_id = prod.get('id') if isinstance(prod, dict) else getattr(prod, 'id', None)
     try:
-        await push_event({"action": "updated", "product": {"id": prod_id}})
+        product_payload = prod if isinstance(prod, dict) else jsonable_encoder(prod)
+        await push_event({"action": "updated", "product": product_payload, "scope": business_scope})
     except Exception:
         pass
     await _push_catalog_category_events(sync_result)
@@ -11737,7 +11750,7 @@ async def delete_product(product_id: int, request: Request):
             db.close()
 
     await anyio.to_thread.run_sync(task)
-    await push_event({"action": "deleted", "product": {"id": product_id}})
+    await push_event({"action": "deleted", "product": {"id": product_id}, "scope": _resolve_request_business_scope(request)})
     await anyio.to_thread.run_sync(write_catalog_snapshot)
     _invalidate_products_cache()
     return {"detail": "deleted"}
@@ -12018,6 +12031,7 @@ def save_promotions(promos: List[Dict[str, Any]], request: Request):
         if not ok:
             raise HTTPException(status_code=500, detail='failed to write promotions')
         _invalidate_promotions_cache(scope)
+        _push_event_threadsafe({'action': 'promotions-updated', 'scope': scope, 'count': len(normalized_promos)})
         return { 'detail': 'ok', 'count': len(normalized_promos) }
     except HTTPException:
         raise
@@ -12436,6 +12450,7 @@ def _build_admin_operations_overview(
     customer_type_filter: Optional[str] = None,
     days: int = 30,
     limit: int = 5000,
+    orders_override: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     tzinfo, tz_name = _resolve_dashboard_tzinfo()
     now_utc = datetime.datetime.now(datetime.timezone.utc)
@@ -12443,7 +12458,7 @@ def _build_admin_operations_overview(
     days_window = max(7, min(120, _ops_safe_int(days, 30)))
     sample_limit = max(500, min(20000, _ops_safe_int(limit, 5000)))
 
-    orders_raw = list_orders(skip=0, limit=sample_limit, source=None, q=None, date=None, db=db)
+    orders_raw = orders_override if orders_override is not None else list_orders(skip=0, limit=sample_limit, source=None, q=None, date=None, db=db)
     orders: List[Dict[str, Any]] = []
     for row in (orders_raw or []):
         if not isinstance(row, dict):
@@ -12939,14 +12954,21 @@ def admin_operations_overview(
     if role not in ('owner', 'admin'):
         raise HTTPException(status_code=403, detail='No autorizado')
     scope_filter = _resolve_admin_customer_type_filter(current_admin, customer_type)
+    cache_key = ('operations', scope_filter or 'all', int(days or 30), int(limit or 5000))
+    cached = _cache_get(ADMIN_INSIGHTS_CACHE, cache_key, ADMIN_INSIGHTS_CACHE_TTL)
+    if cached is not None:
+        headers = _cors_headers_for_request(request)
+        return JSONResponse(status_code=200, content=cached, headers=headers)
     payload = _build_admin_operations_overview(
         db=db,
         customer_type_filter=scope_filter,
         days=days,
         limit=limit,
     )
+    payload = jsonable_encoder(payload)
+    _cache_set(ADMIN_INSIGHTS_CACHE, cache_key, payload, 32)
     headers = _cors_headers_for_request(request)
-    return JSONResponse(status_code=200, content=jsonable_encoder(payload), headers=headers)
+    return JSONResponse(status_code=200, content=payload, headers=headers)
 
 
 def _build_admin_resumen_ejecutivo(
@@ -12955,11 +12977,17 @@ def _build_admin_resumen_ejecutivo(
     days: int = 30,
     limit: int = 3000,
 ) -> Dict[str, Any]:
+    # Load the order sample once and reuse it for both KPI aggregation and the
+    # recent activity feed. The previous path issued a second nearly identical
+    # request for the latest 60 orders.
+    sample_limit = max(60, min(20000, _ops_safe_int(limit, 3000)))
+    orders_raw = list_orders(skip=0, limit=sample_limit, source=None, q=None, date=None, db=db) or []
     base = _build_admin_operations_overview(
         db=db,
         customer_type_filter=customer_type_filter,
         days=days,
         limit=limit,
+        orders_override=orders_raw,
     ) or {}
     kpis = base.get('kpis') if isinstance(base, dict) else {}
     orders_kpi = kpis.get('orders') if isinstance(kpis, dict) else {}
@@ -12968,7 +12996,7 @@ def _build_admin_resumen_ejecutivo(
     drivers_kpi = kpis.get('drivers') if isinstance(kpis, dict) else {}
 
     # Recent activity feed (latest orders + status changes).
-    recent_raw = list_orders(skip=0, limit=60, source=None, q=None, date=None, db=db) or []
+    recent_raw = orders_raw[:60]
     recent_items: List[Dict[str, Any]] = []
     delayed_orders: List[Dict[str, Any]] = []
     route_issues: List[Dict[str, Any]] = []
@@ -13338,13 +13366,20 @@ def admin_resumen_ejecutivo(
     if role not in ('owner', 'admin'):
         raise HTTPException(status_code=403, detail='No autorizado')
     scope_filter = _resolve_admin_customer_type_filter(current_admin, customer_type)
+    cache_key = ('executive', scope_filter or 'all', int(days or 30))
+    cached = _cache_get(ADMIN_INSIGHTS_CACHE, cache_key, ADMIN_INSIGHTS_CACHE_TTL)
+    if cached is not None:
+        headers = _cors_headers_for_request(request)
+        return JSONResponse(status_code=200, content=cached, headers=headers)
     payload = _build_admin_resumen_ejecutivo(
         db=db,
         customer_type_filter=scope_filter,
         days=days,
     )
+    payload = jsonable_encoder(payload)
+    _cache_set(ADMIN_INSIGHTS_CACHE, cache_key, payload, 32)
     headers = _cors_headers_for_request(request)
-    return JSONResponse(status_code=200, content=jsonable_encoder(payload), headers=headers)
+    return JSONResponse(status_code=200, content=payload, headers=headers)
 
 
 @app.get('/admin/resumen-semanal-pwa')

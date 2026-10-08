@@ -950,11 +950,9 @@ async function refreshDriverLocations(force){
 }
 
 function startDriverMapPolling(){
-  if (driverMapPoll) return;
-  driverMapPoll = setInterval(() => {
-    if (currentSectionId !== 'dashboard') return;
-    refreshDriverLocations(false);
-  }, 10000);
+  // Driver locations arrive through the shared WebSocket. Keep this function
+  // as a compatibility hook for section activation, but do not poll.
+  stopDriverMapPolling();
 }
 
 function stopDriverMapPolling(){
@@ -3005,7 +3003,6 @@ const WS_OPERATIONS_REFRESH_DEBOUNCE_MS = 900;
 const ORDERS_POLL_INTERVAL_MS = 30000;
 const EXECUTIVE_POLL_INTERVAL_MS = 25000;
 const EXECUTIVE_WS_REFRESH_DEBOUNCE_MS = 1200;
-const AUTO_IMAGE_POLL_INTERVAL_MS = 15000;
 const TOKEN_PREVIEW_CACHE_MS = 30000;
 const FCM_SDK_VERSION = '10.13.2';
 const PUSH_TOKEN_STORAGE_KEY = 'admin:push:fcm_token:v1';
@@ -3726,11 +3723,7 @@ async function refreshExecutivePanel(options = {}){
 }
 
 function startExecutivePolling(){
-  if (executivePollTimer) return;
-  executivePollTimer = setInterval(() => {
-    if (currentSectionId !== 'executive') return;
-    refreshExecutivePanel({ quiet: true }).catch(() => null);
-  }, EXECUTIVE_POLL_INTERVAL_MS);
+  stopExecutivePolling();
 }
 
 function stopExecutivePolling(){
@@ -4078,7 +4071,6 @@ let currentEditId = null;
 let imageUrl = null;
 let imageSourceUrl = null;
 let selectedFile = null;
-let autoImagePollTimer = null;
 let retailProductsCache = [];
 let productLookupById = new Map();
 const PROMO_KEY = 'admin_promotions_v1';
@@ -6297,8 +6289,8 @@ async function fetchAutoImageProgress(){
 }
 
 function startAutoImageProgressPolling(){
-  if (!autoImageProgress || autoImagePollTimer) return;
-  autoImagePollTimer = setInterval(()=>{ fetchAutoImageProgress(); }, AUTO_IMAGE_POLL_INTERVAL_MS);
+  if (!autoImageProgress) return;
+  // Job progress is pushed over the shared WebSocket; read once for an already-running job.
   fetchAutoImageProgress();
 }
 
@@ -10751,13 +10743,8 @@ if (deliveriesRefreshBtn){
   deliveriesRefreshBtn.addEventListener('click', () => refreshDeliveries(true));
 }
 
-try{
-  setInterval(() => {
-    if (currentSectionId === 'deliveries') {
-      refreshDeliveries(false);
-    }
-  }, 20000);
-}catch(_){ }
+// Delivery changes are pushed over the shared WebSocket; the button remains
+// available for an explicit user refresh.
 
 function orderRowFor(o){
   const itemsArr = safeParseItems(o.items || []);
@@ -11814,27 +11801,13 @@ function regroupOrdersForTable(source){
   }catch(e){ console.warn('regroupOrdersForTable failed', e); }
 }
 
-// Add periodic polling as a fallback so the orders table refreshes even if WS fails
-try{
-  setInterval(()=>{
-    if (!currentAdminUser || !hasApiConnection()) return;
-    const section = String(currentSectionId || '');
-    if (['dashboard', 'orders', 'preparations'].includes(section)){
-      refreshOrders('web');
-    }
-    if (section === 'preparations'){
-      refreshPreparations(true);
-    } else if (section === 'routes'){
-      refreshRoutes(false);
-    } else if (section === 'deliveries'){
-      refreshDeliveries(false);
-    } else if (section === 'executive'){
-      refreshExecutivePanel({ quiet: true });
-    }
-  }, ORDERS_POLL_INTERVAL_MS);
-}catch(e){ console.warn('orders polling setup failed', e); }
+// Orders, preparations, routes, deliveries and dashboard metrics are updated
+// by realtime events. HTTP refreshes are kept for initial load and user action.
 
 let realtimeEventSource = null;
+let realtimeSocket = null;
+let realtimeReconnectTimer = null;
+let realtimeLastEventSeq = 0;
 let realtimeMode = 'idle';
 let realtimeWsFailures = 0;
 let realtimeSseFailures = 0;
@@ -11858,6 +11831,25 @@ function setRealtimeStatus(mode){
 }
 
 async function handleRealtimeData(data){
+  if (data && Number(data.seq) > realtimeLastEventSeq) realtimeLastEventSeq = Number(data.seq);
+  const realtimeType = String(data && data.type || '').toLowerCase();
+  const realtimeAction = String(data && data.action || '').toLowerCase();
+  if (realtimeAction === 'auto_image_progress' || realtimeType === 'auto_image.progress'){
+    try{ renderAutoImageProgress(data.progress || (data.data && data.data.progress) || data); }catch(_){ }
+    return;
+  }
+  if (realtimeType === 'promotions.updated' || realtimeAction === 'promotions-updated'){
+    try{ await fetchAndSyncPromotionsFromServer(); }catch(_){ }
+    return;
+  }
+  if (realtimeType === 'filters.updated' || realtimeAction === 'filters-updated'){
+    try{ await fetchAndSyncFiltersFromServer(); renderFilters(); }catch(_){ }
+    return;
+  }
+  if (realtimeType === 'product_categories.updated' || realtimeAction === 'product-categories-updated'){
+    try{ await fetchAndSyncProductCategories(); }catch(_){ }
+    return;
+  }
   if (data && data.action === 'driver_location_offline'){
     const driver = data.driver || data;
     const id = getDriverId(driver);
@@ -12002,6 +11994,7 @@ function setupSocket(attempt = 0){
   if(!apiUrl || !apiUrl.protocol || !/^https?:$/i.test(apiUrl.protocol)) return;
   const proto = (apiUrl.protocol === 'https:') ? 'wss://' : 'ws://';
   const wsUrl = `${proto}${apiUrl.host}/ws/products`;
+  if (realtimeSocket && [WebSocket.OPEN, WebSocket.CONNECTING].includes(realtimeSocket.readyState)) return;
   let socket;
   try{ socket = new WebSocket(wsUrl); }catch(_){ socket = null; }
   if(!socket){
@@ -12009,16 +12002,20 @@ function setupSocket(attempt = 0){
     setTimeout(()=> setupSocket(attempt + 1), delay);
     return;
   }
+  realtimeSocket = socket;
   let opened = false;
   socket.onopen = () => {
     opened = true;
     realtimeWsFailures = 0;
     realtimeMode = 'ws';
+    realtimeSocket = socket;
     closeRealtimeEventSource();
     setRealtimeStatus('ws');
     console.info('Admin WS connected');
+    try{ socket.send(JSON.stringify({ scope: getScopedOrderCustomerType(), topics: ['product', 'order', 'driver', 'promotions', 'filters', 'product_categories'], since: realtimeLastEventSeq })); }catch(_){ }
   };
   socket.onclose = () => {
+    if (realtimeSocket === socket) realtimeSocket = null;
     setRealtimeStatus('disconnected');
     if (!opened){
       realtimeWsFailures += 1;
@@ -12029,7 +12026,7 @@ function setupSocket(attempt = 0){
       }
     }
     const delay = Math.min(30000, Math.pow(2, attempt) * 1000 + Math.random()*1000);
-    setTimeout(()=> setupSocket(attempt + 1), delay);
+    if (!realtimeReconnectTimer) realtimeReconnectTimer = setTimeout(()=>{ realtimeReconnectTimer = null; setupSocket(attempt + 1); }, delay);
   };
   socket.onerror = () => {
     // Keep logs concise to avoid noisy "critical" console spam.
