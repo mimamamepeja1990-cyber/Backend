@@ -1396,6 +1396,22 @@ PRODUCTS_COUNT_CACHE_TTL = _env_float('PRODUCTS_COUNT_CACHE_TTL', 15.0)
 PROMOTIONS_CACHE: Dict[str, Dict[str, Any]] = {}
 PROMOTIONS_CACHE_TTL = _env_float('PROMOTIONS_CACHE_TTL', 15.0)
 
+# Critical catalog snapshot. PostgreSQL remains the source of truth; this
+# snapshot is only a read optimization for catalog responses in this worker.
+CATALOG_SNAPSHOT_FIELDS = (
+    'id', 'code', 'name', 'price', 'price_retail', 'cost', 'description',
+    'category', 'brand', 'image_url', 'image_source_url', 'active', 'stock',
+    'min_stock', 'stock_kg', 'kg_per_unit', 'discount', 'sale_unit',
+    'created_at', 'updated_at',
+)
+CATALOG_SNAPSHOT_CONDITION = threading.Condition()
+CATALOG_SNAPSHOT: Optional[Tuple[Dict[str, Any], ...]] = None
+CATALOG_SNAPSHOT_STATUS = 'loading'
+CATALOG_SNAPSHOT_BUILDING = False
+CATALOG_SNAPSHOT_STALE = False
+CATALOG_SNAPSHOT_GENERATION = 0
+CATALOG_SNAPSHOT_WAIT_SECONDS = max(1.0, _env_float('CATALOG_SNAPSHOT_WAIT_SECONDS', 30.0))
+
 # Auto-image progress tracking (in-memory, last job wins).
 AUTO_IMAGE_PROGRESS_LOCK = threading.Lock()
 AUTO_IMAGE_PROGRESS: Dict[str, Any] = {
@@ -1473,6 +1489,225 @@ def _serialize_products(items: Any) -> List[Dict[str, Any]]:
         return out
 
 
+def _catalog_snapshot_limit() -> int:
+    try:
+        return max(1, int(os.environ.get('PRODUCTS_LIST_LIMIT_MAX') or 5000))
+    except Exception:
+        return 5000
+
+
+def _catalog_snapshot_rows(items: Any) -> Tuple[Dict[str, Any], ...]:
+    serialized = _serialize_products(items)
+    rows: List[Dict[str, Any]] = []
+    for item in serialized:
+        if not isinstance(item, dict):
+            continue
+        # Keep the same fields accepted by ProductResponse. Fields absent in
+        # legacy schemas remain absent so Pydantic applies the existing defaults.
+        rows.append({field: item[field] for field in CATALOG_SNAPSHOT_FIELDS if field in item})
+    return tuple(rows)
+
+
+def _catalog_snapshot_log_size(snapshot: Tuple[Dict[str, Any], ...]) -> int:
+    try:
+        return len(json.dumps(snapshot, ensure_ascii=False, separators=(',', ':')))
+    except Exception:
+        return 0
+
+
+def _build_catalog_snapshot(db: Optional[Session] = None, reason: str = 'request') -> Optional[Tuple[Dict[str, Any], ...]]:
+    """Build one complete catalog snapshot, outside the served reference."""
+    global CATALOG_SNAPSHOT
+    global CATALOG_SNAPSHOT_STATUS
+    global CATALOG_SNAPSHOT_BUILDING
+    global CATALOG_SNAPSHOT_STALE
+
+    owns_db = db is None
+    local_db = db
+    try:
+        if owns_db:
+            local_db = SessionLocal()
+
+        while True:
+            with CATALOG_SNAPSHOT_CONDITION:
+                generation = CATALOG_SNAPSHOT_GENERATION
+            started = time.perf_counter()
+            logger.info(
+                '[CATALOG SNAPSHOT] build_start reason=%s generation=%s',
+                reason,
+                generation,
+            )
+            products = crud.get_products(
+                local_db,
+                skip=0,
+                limit=_catalog_snapshot_limit(),
+                q=None,
+                category=None,
+                active=None,
+                sort=None,
+            )
+            new_snapshot = _catalog_snapshot_rows(products)
+
+            with CATALOG_SNAPSHOT_CONDITION:
+                # A product write may have happened while the query was in
+                # flight. Do not publish a snapshot from the older generation.
+                if generation != CATALOG_SNAPSHOT_GENERATION:
+                    logger.info(
+                        '[CATALOG SNAPSHOT] build_superseded generation=%s current_generation=%s',
+                        generation,
+                        CATALOG_SNAPSHOT_GENERATION,
+                    )
+                    continue
+                CATALOG_SNAPSHOT = new_snapshot
+                CATALOG_SNAPSHOT_STATUS = 'ready'
+                CATALOG_SNAPSHOT_STALE = False
+                CATALOG_SNAPSHOT_BUILDING = False
+                CATALOG_SNAPSHOT_CONDITION.notify_all()
+
+            logger.info(
+                '[CATALOG SNAPSHOT] build_end status=ready size=%s bytes=%s duration=%.1fms',
+                len(new_snapshot),
+                _catalog_snapshot_log_size(new_snapshot),
+                (time.perf_counter() - started) * 1000.0,
+            )
+            return new_snapshot
+    except Exception:
+        logger.exception('[CATALOG SNAPSHOT] build_end status=failed reason=%s', reason)
+        with CATALOG_SNAPSHOT_CONDITION:
+            # Drop an old snapshot after a failed rebuild so a successful
+            # write cannot leave stale data being served indefinitely.
+            CATALOG_SNAPSHOT = None
+            CATALOG_SNAPSHOT_STATUS = 'failed'
+            CATALOG_SNAPSHOT_STALE = False
+            CATALOG_SNAPSHOT_BUILDING = False
+            CATALOG_SNAPSHOT_CONDITION.notify_all()
+        return None
+    finally:
+        if owns_db and local_db is not None:
+            try:
+                local_db.close()
+            except Exception:
+                pass
+
+
+def _catalog_snapshot_rebuild_worker(reason: str) -> None:
+    _build_catalog_snapshot(db=None, reason=reason)
+
+
+def _schedule_catalog_snapshot_rebuild(reason: str) -> None:
+    global CATALOG_SNAPSHOT_STATUS
+    global CATALOG_SNAPSHOT_BUILDING
+    global CATALOG_SNAPSHOT_STALE
+    global CATALOG_SNAPSHOT_GENERATION
+
+    with CATALOG_SNAPSHOT_CONDITION:
+        CATALOG_SNAPSHOT_GENERATION += 1
+        CATALOG_SNAPSHOT_STALE = True
+        logger.info(
+            '[CATALOG SNAPSHOT] invalidation reason=%s generation=%s',
+            reason,
+            CATALOG_SNAPSHOT_GENERATION,
+        )
+        if CATALOG_SNAPSHOT_BUILDING:
+            return
+        CATALOG_SNAPSHOT_BUILDING = True
+        CATALOG_SNAPSHOT_STATUS = 'loading'
+
+    try:
+        thread = threading.Thread(
+            target=_catalog_snapshot_rebuild_worker,
+            args=(reason,),
+            name='catalog-snapshot-rebuild',
+            daemon=True,
+        )
+        thread.start()
+    except Exception:
+        logger.exception('[CATALOG SNAPSHOT] failed to start rebuild reason=%s', reason)
+        with CATALOG_SNAPSHOT_CONDITION:
+            CATALOG_SNAPSHOT_BUILDING = False
+            CATALOG_SNAPSHOT_STATUS = 'failed'
+            CATALOG_SNAPSHOT_CONDITION.notify_all()
+
+
+def _get_catalog_snapshot(db: Session) -> Optional[Tuple[Dict[str, Any], ...]]:
+    global CATALOG_SNAPSHOT_STATUS
+    global CATALOG_SNAPSHOT_BUILDING
+    global CATALOG_SNAPSHOT_STALE
+
+    with CATALOG_SNAPSHOT_CONDITION:
+        if CATALOG_SNAPSHOT is not None and CATALOG_SNAPSHOT_STATUS == 'ready' and not CATALOG_SNAPSHOT_STALE:
+            return CATALOG_SNAPSHOT
+
+        if CATALOG_SNAPSHOT_BUILDING:
+            if CATALOG_SNAPSHOT is not None:
+                logger.info('[CATALOG SNAPSHOT] stale_hit while rebuild is in progress size=%s', len(CATALOG_SNAPSHOT))
+                return CATALOG_SNAPSHOT
+            logger.info('[CATALOG SNAPSHOT] cache_miss wait_for_build status=%s', CATALOG_SNAPSHOT_STATUS)
+            CATALOG_SNAPSHOT_CONDITION.wait_for(
+                lambda: not CATALOG_SNAPSHOT_BUILDING,
+                timeout=CATALOG_SNAPSHOT_WAIT_SECONDS,
+            )
+            if CATALOG_SNAPSHOT is not None and CATALOG_SNAPSHOT_STATUS == 'ready' and not CATALOG_SNAPSHOT_STALE:
+                return CATALOG_SNAPSHOT
+            if CATALOG_SNAPSHOT_BUILDING:
+                logger.warning('[CATALOG SNAPSHOT] wait_timeout status=%s', CATALOG_SNAPSHOT_STATUS)
+                return None
+
+        CATALOG_SNAPSHOT_BUILDING = True
+        CATALOG_SNAPSHOT_STATUS = 'loading'
+        logger.info('[CATALOG SNAPSHOT] cache_miss start_build status=loading')
+
+    return _build_catalog_snapshot(db=db, reason='request')
+
+
+def _catalog_snapshot_filtered(
+    snapshot: Tuple[Dict[str, Any], ...],
+    skip: int,
+    limit: int,
+    q: Optional[str],
+    category: Optional[str],
+    active: Optional[bool],
+    sort: Optional[str],
+) -> List[Dict[str, Any]]:
+    rows = list(snapshot)
+    needle = str(q or '').strip().lower()
+    if needle:
+        rows = [
+            row for row in rows
+            if any(
+                needle in str(row.get(field) or '').lower()
+                for field in ('name', 'description', 'code')
+            )
+        ]
+    if category:
+        rows = [row for row in rows if row.get('category') == category]
+    if active is not None:
+        rows = [row for row in rows if row.get('active', True) == active]
+
+    def value(row: Dict[str, Any], field: str):
+        return row.get(field)
+
+    if sort == 'price_asc':
+        rows.sort(key=lambda row: (value(row, 'price') is None, value(row, 'price') or 0))
+    elif sort == 'price_desc':
+        rows.sort(key=lambda row: (value(row, 'price') is None, value(row, 'price') or 0), reverse=True)
+    elif sort in ('price_retail_asc', 'price_retail_desc'):
+        non_null = [row for row in rows if value(row, 'price_retail') is not None]
+        nulls = [row for row in rows if value(row, 'price_retail') is None]
+        non_null.sort(
+            key=lambda row: value(row, 'price_retail'),
+            reverse=(sort == 'price_retail_desc'),
+        )
+        rows = non_null + nulls
+    elif sort == 'name_asc':
+        rows.sort(key=lambda row: str(value(row, 'name') or ''))
+    elif sort == 'name_desc':
+        rows.sort(key=lambda row: str(value(row, 'name') or ''), reverse=True)
+
+    selected = rows[max(0, int(skip or 0)):max(0, int(skip or 0)) + max(1, int(limit or 1))]
+    return [dict(row) for row in selected]
+
+
 def _load_products_serialized(
     db: Session,
     skip: int = 0,
@@ -1481,10 +1716,24 @@ def _load_products_serialized(
     category: Optional[str] = None,
     active: Optional[bool] = None,
     sort: Optional[str] = None,
+    endpoint: str = 'products',
 ) -> List[Dict[str, Any]]:
     limit_max = int(os.environ.get('PRODUCTS_LIST_LIMIT_MAX') or 5000)
     limit = max(1, min(int(limit or 100), limit_max))
     skip = max(0, int(skip or 0))
+
+    snapshot = _get_catalog_snapshot(db)
+    if snapshot is not None:
+        logger.info(
+            '[CATALOG SNAPSHOT] cache_hit endpoint=%s size=%s skip=%s limit=%s',
+            endpoint,
+            len(snapshot),
+            skip,
+            limit,
+        )
+        return _catalog_snapshot_filtered(snapshot, skip, limit, q, category, active, sort)
+
+    logger.warning('[CATALOG SNAPSHOT] cache_miss endpoint=%s fallback=postgresql status=%s', endpoint, CATALOG_SNAPSHOT_STATUS)
     cache_key = _products_cache_key(skip, limit, q, category, active, sort)
     cached = _cache_get(PRODUCTS_CACHE, cache_key, PRODUCTS_CACHE_TTL)
     if cached is not None:
@@ -1580,6 +1829,7 @@ def _load_consumos_snapshot(db: Session, business_scope: str = 'mayorista') -> L
 def _invalidate_products_cache() -> None:
     PRODUCTS_CACHE.clear()
     PRODUCTS_COUNT_CACHE.clear()
+    _schedule_catalog_snapshot_rebuild('products_changed')
 
 
 def _get_promotions_cache_bucket(business_scope: str = 'mayorista') -> Dict[str, Any]:
@@ -4804,6 +5054,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
                                     except Exception:
                                         pass
                                     headers = _cors_headers_for_request(request)
+                                    _invalidate_products_cache()
                                     return JSONResponse(status_code=200, content=res, headers=headers)
                             finally:
                                 try:
@@ -4896,6 +5147,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
                                         except Exception:
                                             pass
                                         headers = _cors_headers_for_request(request)
+                                        _invalidate_products_cache()
                                         return JSONResponse(status_code=200, content=res, headers=headers)
                                 finally:
                                     try:
@@ -5036,11 +5288,7 @@ async def debug_clear(request: Request):
         if target == 'catalog':
             result['deleted']['products'] = _delete_all('products')
             result['deleted']['product_changes'] = _delete_all('product_changes')
-            try:
-                PRODUCTS_CACHE.clear()
-                PRODUCTS_COUNT_CACHE.clear()
-            except Exception:
-                pass
+            _invalidate_products_cache()
 
         elif target == 'filters':
             db = SessionLocal()
@@ -10060,6 +10308,7 @@ def list_products(
         category=category,
         active=active,
         sort=sort,
+        endpoint='/products',
     )
 
 
@@ -10082,6 +10331,7 @@ def catalog_init(
             category=category,
             active=active,
             sort=sort,
+            endpoint='/init',
         ),
         'promotions': _get_promotions_cached(),
         'consumos': _load_consumos_snapshot(db),
@@ -14572,6 +14822,10 @@ async def create_order(request: Request, payload: schemas.OrderCreate):
                     await anyio.to_thread.run_sync(write_catalog_snapshot)
                 except Exception:
                     logger.exception('write_catalog_snapshot after order failed')
+                try:
+                    _invalidate_products_cache()
+                except Exception:
+                    logger.exception('catalog snapshot invalidation after order failed')
                 try:
                     for pid in updated:
                         await push_event({"action": "updated", "product": {"id": pid}})
