@@ -1,4 +1,7 @@
-export const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL || '').replace(/\/$/, '')
+// Leave this empty in the one-service deployment so browser requests stay on
+// the FastAPI origin. An absolute URL remains supported for local split-server
+// development and for deployments that intentionally use a separate API.
+export const API_BASE_URL = (process.env.NEXT_PUBLIC_API_BASE_URL || '').replace(/\/+$/, '')
 
 const TOKEN_KEY = 'distriar_admin_token'
 
@@ -14,7 +17,8 @@ export function setAdminToken(token: string | null) {
 }
 
 export function apiUrl(path: string) {
-  return `${API_BASE_URL}${path.startsWith('/') ? path : `/${path}`}`
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`
+  return API_BASE_URL ? `${API_BASE_URL}${normalizedPath}` : normalizedPath
 }
 
 export class ApiError extends Error {
@@ -86,8 +90,9 @@ export async function adminLogin(username: string, password: string, businessSco
 
 export function websocketUrl(path = '/ws/products') {
   if (typeof window === 'undefined') return ''
-  const configured = apiUrl(path)
-  const url = new URL(configured, window.location.origin)
+  // With an empty API base this resolves against the current browser origin,
+  // which keeps WebSocket traffic on the same Render service as FastAPI.
+  const url = new URL(apiUrl(path), window.location.origin)
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
   return url.toString()
 }

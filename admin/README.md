@@ -1,5 +1,15 @@
 # Panel admin de DistriAr
 
+## Render: un solo Web Service
+
+Usar `backend/Backend-master` como Root Directory. Build Command:
+
+```bash
+python -m pip install -r requirements.txt && corepack enable && corepack prepare pnpm@12.3.4 --activate && cd admin && pnpm install --frozen-lockfile && pnpm run build
+```
+
+El build genera `admin/out/`. El Start Command sigue siendo `./start.sh` y solo inicia FastAPI; no se ejecuta `next start`.
+
 Este directorio contiene la interfaz administrativa React/Next integrada con el backend FastAPI existente. No reemplaza el panel legado de `../admin`; ambos pueden convivir durante la migración.
 
 ## Desarrollo local

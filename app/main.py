@@ -6846,6 +6846,10 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 UPLOAD_DIR = os.environ.get('UPLOAD_DIR') or os.path.join(ROOT_DIR, "uploads")
 PROMO_DIR = os.path.join(UPLOAD_DIR, 'promos')
 FRONTEND_DIR = os.path.join(ROOT_DIR, "admin")
+ADMIN_BUILD_DIR = os.path.join(FRONTEND_DIR, "out")
+# The new Next.js export owns /admin. Keep the legacy driver/PWA files in a
+# separate directory so the replacement cannot overwrite or remove them.
+LEGACY_ADMIN_DIR = os.environ.get('LEGACY_ADMIN_DIR') or os.path.join(ROOT_DIR, "admin-legacy")
 CATALOG_DIR = os.environ.get('CATALOG_DIR') or os.path.join(ROOT_DIR, "catalogo")
 
 # ensure catalog dir exists when possible (if mounted as persistent volume this will create it)
@@ -18291,7 +18295,7 @@ def _inject_admin_config(content: str) -> str:
 # -------------------------------------------------------------------
 # STATIC FILES (mounted last so API routes take precedence)
 # -------------------------------------------------------------------
-if os.path.exists(FRONTEND_DIR):
+if os.path.isdir(ADMIN_BUILD_DIR):
     @app.get("/")
     def root():
         # Keep HTTP 200 for platform probes while still sending users to admin UI.
@@ -18317,34 +18321,11 @@ if os.path.exists(FRONTEND_DIR):
     # Serve a versioned `index.html` to help cache-bust client assets after deploys.
     @app.get("/admin/index.html")
     async def admin_index():
-        path = os.path.join(FRONTEND_DIR, 'index.html')
-        if not os.path.exists(path):
+        path = os.path.join(ADMIN_BUILD_DIR, 'index.html')
+        if not os.path.isfile(path):
             raise HTTPException(status_code=404, detail='Admin UI not found')
-        try:
-            with open(path, 'r', encoding='utf-8') as f:
-                content = f.read()
-        except Exception as e:
-            logger.exception('Failed reading admin index.html: %s', e)
-            raise HTTPException(status_code=500, detail='Failed to read admin UI')
-        # Determine a short version token: prefer DEPLOY_COMMIT if present, otherwise use file mtime
-        ver = os.environ.get('DEPLOY_COMMIT') or os.environ.get('RENDER_GIT_COMMIT') or os.environ.get('HEROKU_SLUG_COMMIT') or str(int(os.path.getmtime(path)))
-        # Inject config + cache-busting query param for the main JS and CSS references
-        content = _inject_admin_config(content)
-        try:
-            content = re.sub(r'app\.js(?:\?[^"]*)?"', f'app.js?v={ver}"', content)
-            content = re.sub(r'styles\.css(?:\?[^"]*)?"', f'styles.css?v={ver}"', content)
-            content = re.sub(r'service-worker\.js(?:\?[^"]*)?"', f'service-worker.js?v={ver}"', content)
-            content = re.sub(r'manifest\.webmanifest(?:\?[^"]*)?"', f'manifest.webmanifest?v={ver}"', content)
-        except Exception:
-            content = (
-                content
-                .replace('app.js"', f'app.js?v={ver}"')
-                .replace('styles.css"', f'styles.css?v={ver}"')
-                .replace('service-worker.js"', f'service-worker.js?v={ver}"')
-                .replace('manifest.webmanifest"', f'manifest.webmanifest?v={ver}"')
-            )
-        return Response(
-            content=content,
+        return FileResponse(
+            path,
             media_type='text/html',
             headers={
                 'Cache-Control': 'no-store, no-cache, must-revalidate, max-age=0',
@@ -18355,6 +18336,8 @@ if os.path.exists(FRONTEND_DIR):
 
     @app.head("/admin/index.html")
     async def admin_index_head():
+        if not os.path.isfile(os.path.join(ADMIN_BUILD_DIR, 'index.html')):
+            raise HTTPException(status_code=404, detail='Admin UI not found')
         return Response(status_code=200)
 
     @app.get("/admin")
@@ -18367,8 +18350,8 @@ if os.path.exists(FRONTEND_DIR):
 
     @app.get("/admin/repartidor.html")
     async def admin_repartidor():
-        path = os.path.join(FRONTEND_DIR, 'repartidor.html')
-        if not os.path.exists(path):
+        path = os.path.join(LEGACY_ADMIN_DIR, 'repartidor.html')
+        if not os.path.isfile(path):
             raise HTTPException(status_code=404, detail='Repartidor UI not found')
         try:
             with open(path, 'r', encoding='utf-8') as f:
@@ -18395,8 +18378,8 @@ if os.path.exists(FRONTEND_DIR):
 
     @app.get("/admin/service-worker.js")
     async def admin_service_worker():
-        path = os.path.join(FRONTEND_DIR, 'service-worker.js')
-        if not os.path.exists(path):
+        path = os.path.join(LEGACY_ADMIN_DIR, 'service-worker.js')
+        if not os.path.isfile(path):
             raise HTTPException(status_code=404, detail='Service worker not found')
         try:
             with open(path, 'r', encoding='utf-8') as f:
@@ -18417,8 +18400,8 @@ if os.path.exists(FRONTEND_DIR):
 
     @app.get("/admin/manifest.webmanifest")
     async def admin_manifest():
-        path = os.path.join(FRONTEND_DIR, 'manifest.webmanifest')
-        if not os.path.exists(path):
+        path = os.path.join(LEGACY_ADMIN_DIR, 'manifest.webmanifest')
+        if not os.path.isfile(path):
             raise HTTPException(status_code=404, detail='Manifest not found')
         try:
             with open(path, 'r', encoding='utf-8') as f:
@@ -18439,7 +18422,7 @@ if os.path.exists(FRONTEND_DIR):
     @app.get("/admin/repartidor-app.apk")
     async def admin_repartidor_apk():
         apk_candidates = [
-            os.path.join(FRONTEND_DIR, 'repartidor-app.apk'),
+            os.path.join(LEGACY_ADMIN_DIR, 'repartidor-app.apk'),
             os.path.abspath(
                 os.path.join(
                     os.path.dirname(__file__),
@@ -18469,7 +18452,47 @@ if os.path.exists(FRONTEND_DIR):
             },
         )
 
-    app.mount("/admin", StaticFiles(directory=FRONTEND_DIR), name="admin")
+    # These explicit legacy asset routes must be registered before the Next
+    # mount because repartidor.html uses paths relative to /admin/.
+    @app.get("/admin/repartidor.js")
+    async def admin_repartidor_script():
+        path = os.path.join(LEGACY_ADMIN_DIR, 'repartidor.js')
+        if not os.path.isfile(path):
+            raise HTTPException(status_code=404, detail='Repartidor script not found')
+        return FileResponse(path, media_type='application/javascript')
+
+    @app.get("/admin/styles.css")
+    async def admin_legacy_styles():
+        path = os.path.join(LEGACY_ADMIN_DIR, 'styles.css')
+        if not os.path.isfile(path):
+            raise HTTPException(status_code=404, detail='Legacy styles not found')
+        return FileResponse(path, media_type='text/css')
+
+    @app.get("/admin/app.js")
+    async def admin_legacy_script():
+        path = os.path.join(LEGACY_ADMIN_DIR, 'app.js')
+        if not os.path.isfile(path):
+            raise HTTPException(status_code=404, detail='Legacy admin script not found')
+        return FileResponse(path, media_type='application/javascript')
+
+    for legacy_icon in (
+        'icon.png',
+        'icon-192.png',
+        'icon-192-v2.png',
+        'icon-512.png',
+        'icon-512-v2.png',
+    ):
+        @app.get(f"/admin/{legacy_icon}")
+        async def admin_legacy_icon(filename=legacy_icon):
+            path = os.path.join(LEGACY_ADMIN_DIR, filename)
+            if not os.path.isfile(path):
+                raise HTTPException(status_code=404, detail='Legacy icon not found')
+            return FileResponse(path, media_type='image/png')
+
+    if os.path.isdir(LEGACY_ADMIN_DIR):
+        app.mount("/admin-legacy", StaticFiles(directory=LEGACY_ADMIN_DIR, html=True), name="admin_legacy")
+
+    app.mount("/admin", StaticFiles(directory=ADMIN_BUILD_DIR, html=True), name="admin")
 else:
     @app.get("/")
     def root_fallback():
