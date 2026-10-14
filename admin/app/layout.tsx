@@ -8,11 +8,11 @@ export const metadata: Metadata = {
   icons: {
     icon: [
       {
-        url: '/admin/icon.svg',
-        type: 'image/svg+xml',
+        url: '/admin/icon.png',
+        type: 'image/png',
       },
     ],
-    apple: '/admin/apple-icon.png',
+    apple: '/admin/icon.png',
   },
 }
 

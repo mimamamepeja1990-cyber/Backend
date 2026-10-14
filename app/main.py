@@ -18484,8 +18484,12 @@ if os.path.isdir(ADMIN_BUILD_DIR):
     ):
         @app.get(f"/admin/{legacy_icon}")
         async def admin_legacy_icon(filename=legacy_icon):
-            path = os.path.join(LEGACY_ADMIN_DIR, filename)
-            if not os.path.isfile(path):
+            candidates = []
+            if filename == 'icon.png':
+                candidates.append(os.path.join(ADMIN_BUILD_DIR, filename))
+            candidates.append(os.path.join(LEGACY_ADMIN_DIR, filename))
+            path = next((candidate for candidate in candidates if os.path.isfile(candidate)), None)
+            if not path:
                 raise HTTPException(status_code=404, detail='Legacy icon not found')
             return FileResponse(path, media_type='image/png')
 
