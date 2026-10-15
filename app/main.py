@@ -1363,6 +1363,14 @@ async def lifespan(app: FastAPI):
     if startup_background:
         logger.info('Running startup bootstrap in background thread.')
 
+        # Admin authentication must not race the optional-column migration.
+        # The full bootstrap remains backgrounded, but this small schema check
+        # completes before the first login request can be served.
+        try:
+            await asyncio.to_thread(_ensure_admin_user_columns)
+        except Exception:
+            logger.exception('Synchronous admin schema check failed')
+
         async def _run_background() -> None:
             try:
                 await asyncio.to_thread(_startup_bootstrap_sync)

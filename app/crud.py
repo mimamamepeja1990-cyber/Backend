@@ -3094,14 +3094,40 @@ def get_admin_user_by_username(db: Session, username: str) -> Optional[models.Ad
     try:
         return db.query(models.AdminUser).filter(func.lower(models.AdminUser.username) == uname.lower()).first()
     except Exception:
-        return None
+        # Keep authentication available while a rolling deploy adds a new
+        # optional admin_users column. The normal ORM query selects every
+        # mapped column, so an old schema could otherwise turn every login
+        # into a false 401 until the background bootstrap finishes.
+        try:
+            row = db.execute(
+                text(
+                    "SELECT id, username, full_name, role, business_scope, zone, "
+                    "hashed_password, is_active, created_by, created_at "
+                    "FROM admin_users WHERE LOWER(username) = LOWER(:username) LIMIT 1"
+                ),
+                {'username': uname},
+            ).mappings().first()
+            return SimpleNamespace(**dict(row)) if row else None
+        except Exception:
+            return None
 
 
 def get_admin_user_by_id(db: Session, user_id: int) -> Optional[models.AdminUser]:
     try:
         return db.query(models.AdminUser).filter(models.AdminUser.id == int(user_id)).first()
     except Exception:
-        return None
+        try:
+            row = db.execute(
+                text(
+                    "SELECT id, username, full_name, role, business_scope, zone, "
+                    "hashed_password, is_active, created_by, created_at "
+                    "FROM admin_users WHERE id = :user_id LIMIT 1"
+                ),
+                {'user_id': int(user_id)},
+            ).mappings().first()
+            return SimpleNamespace(**dict(row)) if row else None
+        except Exception:
+            return None
 
 
 def list_admin_users(db: Session) -> List[models.AdminUser]:
