@@ -3158,7 +3158,32 @@ def list_admin_users(db: Session) -> List[models.AdminUser]:
             models.AdminUser.username.asc(),
         ).all()
     except Exception:
-        return []
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
+            available = _get_table_columns(db, 'admin_users')
+            selected = [
+                'id', 'username', 'full_name', 'role', 'hashed_password',
+                'is_active', 'created_by', 'created_at',
+            ]
+            for optional in ('business_scope', 'zone'):
+                if optional in available:
+                    selected.insert(4, optional)
+            rows = db.execute(
+                text(f"SELECT {', '.join(selected)} FROM admin_users ORDER BY role ASC, username ASC")
+            ).mappings().all()
+            result = []
+            for row in rows:
+                data = dict(row)
+                data.setdefault('business_scope', None)
+                data.setdefault('zone', None)
+                data.setdefault('permissions', None)
+                result.append(SimpleNamespace(**data))
+            return result
+        except Exception:
+            return []
 
 
 def create_admin_user(
@@ -3196,6 +3221,49 @@ def create_admin_user(
         db.commit()
     except IntegrityError:
         db.rollback()
+        raise
+    except Exception as error:
+        db.rollback()
+        error_text = str(error).lower()
+        if (
+            'permission' not in error_text
+            and 'no such column' not in error_text
+            and 'no column' not in error_text
+            and 'does not exist' not in error_text
+        ):
+            raise
+        try:
+            available = _get_table_columns(db, 'admin_users')
+            values = {
+                'username': username,
+                'full_name': obj.full_name,
+                'role': role,
+                'hashed_password': hashed_password,
+                'is_active': True,
+                'created_by': obj.created_by,
+            }
+            for optional, value in (
+                ('business_scope', business_scope),
+                ('zone', obj.zone),
+            ):
+                if optional in available:
+                    values[optional] = value
+            columns = list(values)
+            params = {f'v_{key}': value for key, value in values.items()}
+            placeholders = ', '.join(f':v_{key}' for key in columns)
+            db.execute(
+                text(f"INSERT INTO admin_users ({', '.join(columns)}) VALUES ({placeholders})"),
+                params,
+            )
+            db.commit()
+            created = get_admin_user_by_username(db, username)
+            if created:
+                return created
+        except IntegrityError:
+            db.rollback()
+            raise
+        except Exception:
+            db.rollback()
         raise
     db.refresh(obj)
     return obj
