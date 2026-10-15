@@ -875,6 +875,7 @@ def _ensure_admin_user_columns() -> None:
             for col_name, col_sql in (
                 ('zone', 'VARCHAR(120)'),
                 ('business_scope', "VARCHAR(20) DEFAULT 'mayorista'"),
+                ('permissions', 'JSON'),
             ):
                 if col_name in existing:
                     continue
@@ -7997,6 +7998,29 @@ def _normalize_admin_role(value: Optional[str]) -> str:
     return role
 
 
+ADMIN_PERMISSION_KEYS = frozenset({
+    'dashboard', 'operations', 'orders', 'catalog', 'inventory', 'sales',
+    'customers', 'drivers', 'assignments', 'deliveries', 'promotions', 'settings',
+})
+
+
+def _normalize_admin_permissions(value: Any, role: Optional[str] = None) -> Optional[List[str]]:
+    if _normalize_admin_role(role) == 'owner':
+        return None
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    result = []
+    for item in value:
+        key = str(item or '').strip().lower()
+        if key in ADMIN_PERMISSION_KEYS and key not in result:
+            result.append(key)
+    return result
+
+
 def _normalize_admin_business_scope(value: Optional[str], allow_all: bool = False) -> Optional[str]:
     try:
         scope = str(value or '').strip().lower()
@@ -9980,6 +10004,7 @@ def admin_create_user(payload: schemas.AdminUserCreate, request: Request, curren
         pass
     payload.business_scope = business_scope
     payload.zone = zone
+    payload.permissions = _normalize_admin_permissions(getattr(payload, 'permissions', None), role=role)
     hashed = utils.hash_password(payload.password)
     try:
         new_user = crud.create_admin_user(db, payload, hashed_password=hashed, created_by=current_owner.username)
@@ -10053,6 +10078,7 @@ def admin_update_user(
     if target_role != 'owner' and target_scope != active_scope:
         raise HTTPException(status_code=403, detail='No autorizado para ese rubro')
     requested_scope = getattr(payload, 'business_scope', None)
+    requested_permissions = getattr(payload, 'permissions', None)
     normalized_scope = None
     if requested_scope is not None:
         if role != 'owner':
@@ -10060,15 +10086,17 @@ def admin_update_user(
         normalized_scope = _normalize_admin_business_scope(requested_scope)
         if normalized_scope not in ('mayorista', 'minorista'):
             raise HTTPException(status_code=400, detail='Rubro invalido')
+    normalized_permissions = _normalize_admin_permissions(requested_permissions, role=target_role)
     if target_role != 'repartidor':
-        if normalized_scope is None:
-            raise HTTPException(status_code=403, detail='Solo se puede asignar zona a repartidores')
+        if normalized_scope is None and requested_permissions is None:
+            raise HTTPException(status_code=403, detail='No hay cambios para este usuario')
         try:
             updated = crud.update_admin_user_scope_and_zone(
                 db,
                 int(getattr(user, 'id')),
                 business_scope=normalized_scope,
                 zone=None,
+                permissions=normalized_permissions if requested_permissions is not None else None,
             )
             if not updated:
                 raise HTTPException(status_code=404, detail='Usuario no encontrado')
@@ -10094,6 +10122,7 @@ def admin_update_user(
             int(getattr(user, 'id')),
             business_scope=normalized_scope,
             zone=zone,
+            permissions=normalized_permissions if requested_permissions is not None else None,
         )
         if not updated:
             raise HTTPException(status_code=404, detail='Usuario no encontrado')

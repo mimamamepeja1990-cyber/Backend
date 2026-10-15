@@ -56,6 +56,7 @@ class AdminUser(Base):
     role = Column(String(50), nullable=False, default='admin')
     business_scope = Column(String(20), nullable=True, default='mayorista')
     zone = Column(String(120), nullable=True)
+    permissions = Column(_JSON, nullable=True)
     hashed_password = Column(String(200), nullable=False)
     is_active = Column(Boolean, default=True)
     created_by = Column(String(80), nullable=True)

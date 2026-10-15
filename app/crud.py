@@ -3140,6 +3140,7 @@ def create_admin_user(
         role=role,
         business_scope=business_scope,
         zone=_normalize_admin_zone(getattr(payload, 'zone', None)),
+        permissions=getattr(payload, 'permissions', None),
         hashed_password=hashed_password,
         is_active=True,
         created_by=str(created_by).strip() if created_by else None,
@@ -3206,6 +3207,7 @@ def update_admin_user_scope_and_zone(
     user_id: int,
     business_scope: Optional[str] = None,
     zone: Optional[str] = None,
+    permissions: Optional[list] = None,
 ) -> Optional[models.AdminUser]:
     user = get_admin_user_by_id(db, user_id)
     if not user:
@@ -3219,6 +3221,8 @@ def update_admin_user_scope_and_zone(
             user.business_scope = normalized_scope
     if zone is not None:
         user.zone = _normalize_admin_zone(zone)
+    if permissions is not None:
+        user.permissions = permissions
     db.add(user)
     try:
         db.commit()

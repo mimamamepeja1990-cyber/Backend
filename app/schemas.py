@@ -110,6 +110,7 @@ class AdminUserCreate(BaseModel):
     full_name: Optional[str] = None
     business_scope: Optional[str] = None
     zone: Optional[str] = None
+    permissions: Optional[List[str]] = None
 
 
 class AdminUserResponse(BaseModel):
@@ -120,6 +121,7 @@ class AdminUserResponse(BaseModel):
     business_scope: Optional[str] = None
     active_business_scope: Optional[str] = None
     zone: Optional[str] = None
+    permissions: Optional[List[str]] = None
     is_active: bool
     created_by: Optional[str] = None
     created_at: Optional[datetime] = None
@@ -130,6 +132,7 @@ class AdminUserResponse(BaseModel):
 class AdminUserUpdate(BaseModel):
     zone: Optional[str] = None
     business_scope: Optional[str] = None
+    permissions: Optional[List[str]] = None
 
 
 class AdminBranchBase(BaseModel):
