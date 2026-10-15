@@ -3099,15 +3099,25 @@ def get_admin_user_by_username(db: Session, username: str) -> Optional[models.Ad
         # mapped column, so an old schema could otherwise turn every login
         # into a false 401 until the background bootstrap finishes.
         try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
             row = db.execute(
                 text(
-                    "SELECT id, username, full_name, role, business_scope, zone, "
+                    "SELECT id, username, full_name, role, "
                     "hashed_password, is_active, created_by, created_at "
                     "FROM admin_users WHERE LOWER(username) = LOWER(:username) LIMIT 1"
                 ),
                 {'username': uname},
             ).mappings().first()
-            return SimpleNamespace(**dict(row)) if row else None
+            if not row:
+                return None
+            data = dict(row)
+            data.setdefault('business_scope', None)
+            data.setdefault('zone', None)
+            data.setdefault('permissions', None)
+            return SimpleNamespace(**data)
         except Exception:
             return None
 
@@ -3117,15 +3127,25 @@ def get_admin_user_by_id(db: Session, user_id: int) -> Optional[models.AdminUser
         return db.query(models.AdminUser).filter(models.AdminUser.id == int(user_id)).first()
     except Exception:
         try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
             row = db.execute(
                 text(
-                    "SELECT id, username, full_name, role, business_scope, zone, "
+                    "SELECT id, username, full_name, role, "
                     "hashed_password, is_active, created_by, created_at "
                     "FROM admin_users WHERE id = :user_id LIMIT 1"
                 ),
                 {'user_id': int(user_id)},
             ).mappings().first()
-            return SimpleNamespace(**dict(row)) if row else None
+            if not row:
+                return None
+            data = dict(row)
+            data.setdefault('business_scope', None)
+            data.setdefault('zone', None)
+            data.setdefault('permissions', None)
+            return SimpleNamespace(**data)
         except Exception:
             return None
 
@@ -3184,9 +3204,11 @@ def create_admin_user(
 def authenticate_admin_user(db: Session, username: str, plain_password: str):
     user = get_admin_user_by_username(db, username)
     if not user or not getattr(user, 'is_active', True):
+        logger.warning('admin authentication rejected: user_not_found_or_inactive username=%s', _normalize_admin_username(username))
         return None
     from app.utils import verify_password
     if not verify_password(plain_password, user.hashed_password):
+        logger.warning('admin authentication rejected: password_mismatch username=%s hash_prefix=%s', _normalize_admin_username(username), str(getattr(user, 'hashed_password', '') or '')[:24])
         return None
     return user
 
