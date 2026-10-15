@@ -118,6 +118,8 @@ function DriverMap({ locations, orders = [] }: { locations: AnyRecord[]; orders?
   const [mapError, setMapError] = useState('')
   const [mapReady, setMapReady] = useState(false)
   const [selectedDriverKey, setSelectedDriverKey] = useState('')
+  const [plannedRoutePath, setPlannedRoutePath] = useState<AnyRecord[]>([])
+  const plannedRouteRequest = useRef(0)
   const driverKey = (location: AnyRecord) => String(location.driver_id ?? location.driver_username ?? '')
   const selectedLocation = locations.find(location => driverKey(location) === selectedDriverKey)
   const routeOrders = useMemo(() => {
@@ -152,6 +154,7 @@ function DriverMap({ locations, orders = [] }: { locations: AnyRecord[]; orders?
     return () => {
       cancelled = true
       routeRequest.current += 1
+      plannedRouteRequest.current += 1
       animationFrames.current.forEach(frame => window.cancelAnimationFrame(frame))
       markers.current.forEach(marker => marker.setMap(null))
       stopMarkers.current.forEach(marker => marker.setMap(null))
@@ -200,7 +203,20 @@ function DriverMap({ locations, orders = [] }: { locations: AnyRecord[]; orders?
           icon: { path: maps.SymbolPath.CIRCLE, scale: 8, fillColor: '#10b981', fillOpacity: 0.98, strokeColor: '#064e3b', strokeOpacity: 0.95, strokeWeight: 2 },
           label: { text: String(location.driver_name || location.driver_username || 'R').slice(0, 1).toUpperCase(), color: '#ffffff', fontSize: '10px', fontWeight: '700' },
         })
-        marker.addListener('click', () => { setSelectedDriverKey(key); map.current?.panTo({ lat, lng: lon }) })
+        marker.addListener('click', () => {
+          setSelectedDriverKey(key)
+          setPlannedRoutePath([])
+          map.current?.panTo({ lat, lng: lon })
+          const driverId = location.driver_id
+          if (driverId == null) return
+          const requestId = ++plannedRouteRequest.current
+          void apiFetch<AnyRecord>(`/admin/driver-insights?driver_id=${encodeURIComponent(driverId)}`)
+            .then(insight => {
+              if (requestId !== plannedRouteRequest.current) return
+              setPlannedRoutePath(asArray(insight?.planned_route_path).filter(point => Number.isFinite(Number(point?.lat)) && Number.isFinite(Number(point?.lon))))
+            })
+            .catch(() => { /* Directions fallback remains visible if the preview is unavailable. */ })
+        })
         markers.current.set(key, marker)
       }
       const recordedAt = Date.parse(String(location.recorded_at || ''))
@@ -254,6 +270,14 @@ function DriverMap({ locations, orders = [] }: { locations: AnyRecord[]; orders?
       icon: { path: maps.SymbolPath.CIRCLE, scale: 10, fillColor: '#2563eb', fillOpacity: 0.98, strokeColor: '#1e3a8a', strokeWeight: 2 },
     }))
 
+    const plannedPath = plannedRoutePath
+      .map(point => ({ lat: Number(point.lat), lng: Number(point.lon) }))
+      .filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lng))
+    if (plannedPath.length >= 2) {
+      routeLine.current = new maps.Polyline({ map: map.current, path: plannedPath, geodesic: true, strokeColor: '#059669', strokeOpacity: 0.94, strokeWeight: 5 })
+      return
+    }
+
     if (routeOrders.length > 24 || !maps.DirectionsService || !maps.DirectionsRenderer) {
       drawFallback()
       return
@@ -282,7 +306,7 @@ function DriverMap({ locations, orders = [] }: { locations: AnyRecord[]; orders?
         drawFallback()
       }
     })
-  }, [mapReady, selectedDriverKey, routeSignature])
+  }, [mapReady, selectedDriverKey, routeSignature, plannedRoutePath])
 
   return <div className="relative min-h-[420px] overflow-hidden rounded-xl bg-slate-100">
     <div ref={container} className="absolute inset-0" />
