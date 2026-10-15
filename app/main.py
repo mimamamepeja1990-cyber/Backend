@@ -5254,8 +5254,21 @@ async def debug_echo(request: Request):
     return JSONResponse(status_code=200, content={"echo": data, "headers": dict(request.headers)}, headers=headers)
 
 
+def _owner_auth_dependency(token: str = Depends(admin_oauth2_scheme)):
+    # This dependency is declared before the debug route, while resolving the
+    # actual admin user remains delegated to the canonical auth function below.
+    return get_current_admin_user(token)
+
+
+def require_admin_owner(current_admin=Depends(_owner_auth_dependency)):
+    if not current_admin or getattr(current_admin, 'role', None) != 'owner':
+        raise HTTPException(status_code=403, detail='Owner access required')
+    return current_admin
+
+
 @app.post('/debug/clear')
-async def debug_clear(request: Request):
+async def debug_clear(request: Request, current_owner=Depends(require_admin_owner)):
+    """Owner-only cleanup for explicitly selected administrative test data."""
     headers = _cors_headers_for_request(request)
     try:
         try:
@@ -8484,12 +8497,6 @@ def get_current_admin_user(token: str = Depends(admin_oauth2_scheme)):
         db.close()
 
 
-def require_admin_owner(current_admin=Depends(get_current_admin_user)):
-    if not current_admin or getattr(current_admin, 'role', None) != 'owner':
-        raise HTTPException(status_code=403, detail='Owner access required')
-    return current_admin
-
-
 @app.post('/admin/auth/token', response_model=schemas.Token)
 async def admin_login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
     requested_scope = None
@@ -9314,7 +9321,7 @@ def _admin_stress_mark_order_delivered(
                 'id': order_id,
             }
             where_order = 'id = :id' if str(order_id).isdigit() else 'CAST(id AS TEXT) = :id'
-            conn.execute(
+            delivered_result = conn.execute(
                 text(
                     "UPDATE orders SET status = 'entregado', delivered_at = :delivered_at, "
                     "delivered_by_id = :driver_id, delivered_by_username = :driver_username "
@@ -9322,6 +9329,13 @@ def _admin_stress_mark_order_delivered(
                 ),
                 params,
             )
+            if int(getattr(delivered_result, 'rowcount', 0) or 0) != 1:
+                logger.warning(
+                    'admin stress delivered update matched no order id=%s payment_reference=%s',
+                    order_id,
+                    payment_reference,
+                )
+                return False
             if route_order_int is not None:
                 shift_params = {
                     'payment_reference': str(payment_reference or '').strip(),
@@ -9493,7 +9507,11 @@ def _run_admin_stress_driver_simulation(
                 except Exception:
                     point = None
             if not point:
-                continue
+                _admin_stress_append_event(
+                    f"{getattr(driver, 'username', 'driver')}: pedido #{order.get('id')} sin coordenadas; se usara la posicion actual.",
+                    'err',
+                )
+                point = {'lat': float(current_lat), 'lon': float(current_lon)}
 
             try:
                 leg_distance_km = max(0.0, float(_haversine_km(current_lat, current_lon, point['lat'], point['lon']) or 0.0))

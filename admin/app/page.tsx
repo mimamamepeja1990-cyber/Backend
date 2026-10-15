@@ -166,11 +166,64 @@ function EnhancedOrderTable({ orders, drivers, onStatus, onAssign }: { orders: O
   return <div className="overflow-x-auto"><table className="data-table"><thead><tr><th>Pedido</th><th>Cliente</th><th>Importe</th><th>Estado</th><th>Repartidor</th><th>Fecha</th><th>Acción</th></tr></thead><tbody>{orders.length ? orders.map(order => { const state = String(order.status || 'recibido'); const next = state === 'recibido' ? 'visto' : state === 'visto' ? 'preparado' : ''; return <tr key={String(order.id)}><td className="font-semibold text-slate-800">#{order.id}</td><td><p className="font-medium text-slate-700">{order.user_full_name || 'Cliente'}</p><p className="text-[11px] text-slate-400">{order.user_email || order.customer_type || '—'}</p></td><td className="font-semibold">{money(order.total)}</td><td><Pill tone={statusTone(state)}>{statusLabels[state] || state}</Pill></td><td>{onAssign && drivers?.length ? <select value={String(order.assigned_driver_id || '')} onChange={event => onAssign(order, event.target.value)} className="max-w-44 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-xs"><option value="">Sin asignar</option>{drivers.map(driver => <option key={driver.id} value={driver.id}>{driver.full_name || driver.username}</option>)}</select> : <span className="text-xs text-slate-500">{order.assigned_driver_name || order.assigned_driver_username || 'Sin asignar'}</span>}</td><td className="text-slate-500">{date(order.created_at)}</td><td>{onStatus && next ? <button disabled={pending !== null} onClick={() => void mark(order, next)} className="link-button whitespace-nowrap">{pending === `${order.id}:${next}` && <Loader2 className="size-3 animate-spin" />}{next === 'visto' ? 'Marcar visto' : 'Marcar preparado'}</button> : <span className="text-xs text-slate-400">—</span>}</td></tr> }) : <tr><td colSpan={7}><Empty message="No hay pedidos que coincidan." /></td></tr>}</tbody></table></div>
 }
 
+function InteractiveOwnerConsoleWithClear({ scope }: { scope: string }) {
+  type ConsoleLine = { text: string; tone?: string }
+  type ClearTarget = { key: string; label: string; description: string }
+  const targets: Record<string, ClearTarget> = {
+    '1': { key: 'catalog', label: 'Catálogo', description: 'todos los productos y cambios de producto' },
+    '2': { key: 'filters', label: 'Filtros', description: 'los filtros guardados y su snapshot' },
+    '3': { key: 'orders', label: 'Pedidos', description: 'todos los pedidos y previsualizaciones de tokens' },
+    '4': { key: 'customers', label: 'Clientes', description: 'usuarios, direcciones y datos de cliente de los pedidos' },
+    '5': { key: 'preparations', label: 'Preparaciones', description: 'pedidos en estado visto o preparado y sus previsualizaciones' },
+  }
+  const [lines, setLines] = useState<ConsoleLine[]>([])
+  const [input, setInput] = useState('')
+  const [prompt, setPrompt] = useState('')
+  const [status, setStatus] = useState<AnyRecord>({})
+  const [busy, setBusy] = useState(false)
+  const logRef = useRef<HTMLDivElement>(null)
+  const lastEventSeq = useRef(0)
+  const log = (text: string, tone = 'note') => setLines(current => [...current, { text, tone }])
+  const refreshStatus = useCallback(async (announce = false) => {
+    try {
+      const snapshot = await apiFetch<AnyRecord>('/admin/stress-test/status', { businessScope: scope })
+      setStatus(snapshot)
+      const events = asArray(snapshot.events)
+      events.filter(event => Number(event.seq || 0) > lastEventSeq.current).forEach(event => log(String(event.message || ''), String(event.tone || 'note')))
+      if (events.length) lastEventSeq.current = Math.max(lastEventSeq.current, ...events.map(event => Number(event.seq || 0)))
+      if (announce) log(`fase=${snapshot.phase || 'idle'} | creados=${snapshot.created_count || 0} | listos=${snapshot.ready_count || 0} | asignados=${snapshot.assigned_count || 0} | entregados=${snapshot.delivered_count || 0}`)
+    } catch (value) { log(errorMessage(value, 'No pude consultar el estado de la consola.'), 'err') }
+  }, [scope])
+  useEffect(() => { log('Consola lista. Usa /help para ver comandos.'); void refreshStatus(false) }, [refreshStatus])
+  useEffect(() => { logRef.current?.scrollTo({ top: logRef.current.scrollHeight }); const phase = String(status.phase || '').toLowerCase(); if (!['creating', 'running', 'awaiting_ready'].includes(phase)) return; const timer = window.setInterval(() => void refreshStatus(false), 2500); return () => window.clearInterval(timer) }, [status.phase, refreshStatus])
+  async function call(path: string, body?: AnyRecord) { setBusy(true); try { const response = await apiFetch<AnyRecord>(path, { method: 'POST', businessScope: scope, body: body ? JSON.stringify(body) : undefined }); setStatus(response); log(String(response.message || `${path} ejecutado.`), 'ok'); await refreshStatus(false) } catch (value) { log(errorMessage(value, 'La consola rechazó la operación.'), 'err') } finally { setBusy(false) } }
+  async function clearTarget(target: ClearTarget) { setBusy(true); try { const response = await apiFetch<AnyRecord>('/debug/clear', { method: 'POST', businessScope: scope, body: JSON.stringify({ target: target.key }) }); const details = [...Object.entries(response.deleted || {}), ...Object.entries(response.updated || {})].map(([key, value]) => `${key}:${value}`).join(', '); log(`OK ${target.label}.`, 'ok'); if (details) log(`Detalle: ${details}`, 'note'); window.dispatchEvent(new Event('distriar-admin-cleared')); await refreshStatus(false) } catch (value) { log(errorMessage(value, 'No se pudo ejecutar la limpieza.'), 'err') } finally { setBusy(false) } }
+  async function execute(rawValue: string) {
+    const raw = rawValue.trim(); if (!raw || busy) return
+    log(`> ${raw}`, 'cmd'); setInput('')
+    if (prompt === 'stress-count') { const count = Number.parseInt(raw, 10); if (!Number.isFinite(count) || count <= 0 || count > 2000) { log('Escribí un número entero entre 1 y 2000.', 'err'); return }; setPrompt(''); await call('/admin/stress-test/start', { count }); return }
+    const command = raw.toLowerCase()
+    if (command === '/help' || command === 'help' || command === '/?') {
+      log('Comandos disponibles:'); log('/stresstest — inicia una corrida QA y solicita la cantidad.'); log('.ready — inicia la simulación de repartidores sobre pedidos preparados.'); log('/cancel — cancela una corrida QA en curso.'); log('/stressstatus — muestra fase, conteos y eventos actuales.');
+      Object.entries(targets).forEach(([number, target]) => log(`/clear @${number} — ${target.label}: elimina ${target.description}.`))
+      log('Los comandos /clear son destructivos y requieren una sesión autenticada con rol owner.', 'note'); return
+    }
+    if (command === '/stresstest') { setPrompt('stress-count'); log('¿Cuántos pedidos QA querés simular?'); log('Respondé sólo con un número. Ej: 600. Usá /cancel para salir.'); return }
+    if (command === '.ready') { await call('/admin/stress-test/ready'); return }
+    if (command === '/cancel' || command === 'cancel') { setPrompt(''); await call('/admin/stress-test/cancel'); return }
+    if (command === '/stressstatus') { await refreshStatus(true); return }
+    const match = raw.match(/^\/clear\s+@?([1-5])\s*$/i)
+    if (match) { const target = targets[match[1]]; if (window.confirm(`¿Ejecutar ${raw}? Esto elimina ${target.description}.`)) await clearTarget(target); else log('Limpieza cancelada.', 'note'); return }
+    log('Comando no reconocido. Usa /help.', 'err')
+  }
+  return <div className="space-y-5"><PageTitle title="Consola del owner" description="Interfaz interactiva con stress test y herramientas de mantenimiento protegidas." action={<button onClick={() => void refreshStatus(true)} disabled={busy} className="secondary-button"><RefreshCw className="size-4" />Consultar estado</button>} /><Card className="p-5"><div ref={logRef} className="max-h-[430px] min-h-[220px] overflow-auto rounded-xl bg-slate-950 p-4 font-mono text-sm"><div className="space-y-1">{lines.map((line, index) => <div key={index} className={line.tone === 'err' ? 'text-red-300' : line.tone === 'ok' ? 'text-emerald-300' : line.tone === 'cmd' ? 'text-amber-300' : 'text-blue-300'}>{line.text}</div>)}</div></div><form onSubmit={event => { event.preventDefault(); void execute(input) }} className="mt-4 flex gap-2"><input autoFocus value={input} onChange={event => setInput(event.target.value)} disabled={busy} placeholder={prompt === 'stress-count' ? 'Cantidad de pedidos QA' : 'Ej: /help'} className="field flex-1 font-mono" /><button disabled={busy || !input.trim()} className="primary-button">{busy && <Loader2 className="size-4 animate-spin" />}Ejecutar</button></form><p className="mt-3 text-xs text-slate-500">Las limpiezas piden confirmación y sólo funcionan para owners autenticados.</p></Card><Card className="p-5"><h3 className="section-title">Estado real</h3><pre className="mt-4 max-h-56 overflow-auto rounded-xl bg-slate-950 p-4 text-xs text-emerald-200">{JSON.stringify(status, null, 2)}</pre></Card></div>
+}
+
 const LegacyOrderTable = OrderTable
 const LegacyOrders = Orders
 ;(OrderTable as any) = EnhancedOrderTable
 const LegacyOwnerConsole = OwnerConsole
-;(OwnerConsole as any) = InteractiveOwnerConsole
+;(OwnerConsole as any) = InteractiveOwnerConsoleWithClear
 function EnhancedOrders(props: { orders: Order[]; drivers: AdminUser[]; onReload: () => void; onStatus: (order: Order, status: string) => void; onAssign: (order: Order, driverId: string) => void }) {
   const [busy, setBusy] = useState(false)
   async function markAllSeen() { const pending = props.orders.filter(order => String(order.status || 'recibido') === 'recibido'); if (!pending.length) return; if (!window.confirm(`¿Marcar ${pending.length} pedido(s) como vistos?`)) return; setBusy(true); try { for (const order of pending) await props.onStatus(order, 'visto') } finally { setBusy(false); props.onReload() } }

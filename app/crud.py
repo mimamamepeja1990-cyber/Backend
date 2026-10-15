@@ -1803,6 +1803,7 @@ def create_order(db: Session, payload: schemas.OrderCreate, current_user: Option
         'user_id', 'user_full_name', 'user_email', 'user_barrio', 'user_calle', 'user_numeracion', 'user_postal_code', 'user_department',
         '_token_received', '_token_preview',
         'payment_method', 'payment_status', 'payment_reference',
+        'delivery_lat', 'delivery_lon',
         'scheduled_delivery_date', 'delivery_cutoff_applied', 'delivery_timezone', 'delivery_cutoff_hour',
         'contains_consumos',
     ]
