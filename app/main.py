@@ -677,7 +677,7 @@ ROUTE_START_LAT_RAW = os.environ.get('ROUTE_START_LAT') or '-32.819094'
 ROUTE_START_LON_RAW = os.environ.get('ROUTE_START_LON') or '-68.804286'
 ROUTE_START_ADDRESS = str(os.environ.get('ROUTE_START_ADDRESS') or '').strip()
 GOOGLE_MAPS_JS_API_KEY = str(os.environ.get('GOOGLE_MAPS_JS_API_KEY') or os.environ.get('GOOGLE_MAPS_API_KEY') or '').strip()
-DRIVER_LOCATION_MAX_AGE_SEC = _env_int('DRIVER_LOCATION_MAX_AGE_SEC', 60 * 60)
+DRIVER_LOCATION_MAX_AGE_SEC = _env_int('DRIVER_LOCATION_MAX_AGE_SEC', 90)
 DRIVER_LOCATION_STORE_HISTORY = _is_truthy(os.environ.get('DRIVER_LOCATION_STORE_HISTORY') or os.environ.get('DRIVER_LOCATION_HISTORY'))
 DRIVER_DEPOT_RADIUS_M = _env_float('DRIVER_DEPOT_RADIUS_M', 30)
 ORDER_AUTO_MILESTONES = _is_truthy(os.environ.get('ORDER_AUTO_MILESTONES') or os.environ.get('ORDER_AUTO_STATUS_BY_TIME') or '0')
@@ -7620,11 +7620,47 @@ async def ws_products(ws: WebSocket):
     try:
         client = await REALTIME_MANAGER.connect(ws, scope=ws.query_params.get('scope'))
         logger.info("[WS][%s] /ws/products accepted handshake=%.1fms client=%s", request_id, (time.perf_counter() - started) * 1000.0, client.client_id[:8])
+        # Clients must identify their public subscription or admin token before
+        # the connection can receive any event. Do not keep abandoned sockets
+        # waiting forever when an old frontend never sends the handshake.
+        first_message = await asyncio.wait_for(ws.receive_json(), timeout=10.0)
+        if not isinstance(first_message, dict):
+            await ws.close(code=1008, reason='authentication_required')
+            return
+        raw_token = first_message.get('token') or first_message.get('access_token')
+        authorization = str(first_message.get('authorization') or '').strip()
+        if not raw_token and authorization.lower().startswith('bearer '):
+            raw_token = authorization[7:].strip()
+        if raw_token:
+            try:
+                admin = await anyio.to_thread.run_sync(get_current_admin_user, str(raw_token).strip())
+            except Exception:
+                await ws.close(code=1008, reason='invalid_token')
+                return
+            if str(getattr(admin, 'role', '') or '').strip().lower() not in ('owner', 'admin', 'repartidor'):
+                await ws.close(code=1008, reason='forbidden')
+                return
+            REALTIME_MANAGER.authenticate(client, admin)
+            replay = await REALTIME_MANAGER.configure(client, first_message)
+        elif REALTIME_MANAGER.authenticate_public(client, first_message):
+            replay = []
+        else:
+            await ws.close(code=1008, reason='authentication_required')
+            return
+        if replay:
+            await REALTIME_MANAGER.send_replay(client, replay)
         while True:
             message = await ws.receive_json()
             replay = await REALTIME_MANAGER.configure(client, message)
             if replay:
                 await REALTIME_MANAGER.send_replay(client, replay)
+    except asyncio.TimeoutError:
+        if client is not None:
+            try:
+                await ws.close(code=1008, reason='authentication_timeout')
+            except Exception:
+                pass
+        logger.info("[WS][%s] /ws/products disconnect=authentication_timeout", request_id)
     except WebSocketDisconnect:
         logger.info("[WS][%s] /ws/products disconnect=client", request_id)
     except Exception as exc:
@@ -7642,6 +7678,18 @@ async def ws_products(ws: WebSocket):
 
 @app.get("/events/products")
 async def events_products(request: Request):
+    token = str(request.query_params.get('token') or request.query_params.get('access_token') or '').strip()
+    authorization = str(request.headers.get('authorization') or '').strip()
+    if not token and authorization.lower().startswith('bearer '):
+        token = authorization[7:].strip()
+    if not token:
+        raise HTTPException(status_code=401, detail='Authentication required')
+    try:
+        current_admin = await anyio.to_thread.run_sync(get_current_admin_user, token)
+    except Exception:
+        raise HTTPException(status_code=401, detail='Invalid token')
+    if str(getattr(current_admin, 'role', '') or '').strip().lower() not in ('owner', 'admin'):
+        raise HTTPException(status_code=403, detail='Forbidden')
     client_id = uuid.uuid4().hex
     queue: asyncio.Queue = asyncio.Queue(maxsize=REALTIME_QUEUE_MAX)
     realtime_event_queues[client_id] = queue
@@ -17985,13 +18033,7 @@ def admin_driver_location(
         'recorded_at': recorded_at,
     }
 
-    try:
-        key = str(driver_id if driver_id is not None else driver_username or 'unknown')
-        with DRIVER_LOCATIONS_LOCK:
-            DRIVER_LOCATIONS[key] = dict(payload_out, updated_at=time.time())
-    except Exception:
-        pass
-
+    persisted = False
     try:
         row = models.AdminDriverLocation(
             admin_user_id=int(driver_id) if driver_id is not None else None,
@@ -18019,16 +18061,27 @@ def admin_driver_location(
                 pass
             db.add(row)
         db.commit()
+        persisted = True
     except Exception:
         try:
             db.rollback()
         except Exception:
             pass
+        logger.exception('driver location persistence failed for user=%s', driver_username)
+        raise HTTPException(status_code=503, detail='No se pudo guardar la ubicación')
 
-    try:
-        asyncio.create_task(push_event({"action": "driver_location", "driver": payload_out}))
-    except Exception:
-        pass
+    if persisted:
+        try:
+            key = str(driver_id if driver_id is not None else driver_username or 'unknown')
+            with DRIVER_LOCATIONS_LOCK:
+                DRIVER_LOCATIONS[key] = dict(payload_out, updated_at=time.time())
+        except Exception:
+            pass
+
+        try:
+            asyncio.create_task(push_event({"action": "driver_location", "driver": payload_out}))
+        except Exception:
+            pass
 
     # If driver left depot radius, move prepared orders to enviado at real timestamp.
     try:
@@ -18135,7 +18188,11 @@ def admin_driver_locations(current_admin=Depends(get_current_admin_user), db: Se
 
 
 @app.post('/admin/driver-location/offline')
-def admin_driver_location_offline(request: Request, current_admin=Depends(get_current_admin_user)):
+def admin_driver_location_offline(
+    request: Request,
+    current_admin=Depends(get_current_admin_user),
+    db: Session = Depends(get_db),
+):
     role = str(getattr(current_admin, 'role', '') or '').strip().lower()
     if role not in ('owner', 'admin', 'repartidor'):
         raise HTTPException(status_code=403, detail='No autorizado')
@@ -18157,6 +18214,21 @@ def admin_driver_location_offline(request: Request, current_admin=Depends(get_cu
                         removed = True
     except Exception:
         pass
+
+    try:
+        query = db.query(models.AdminDriverLocation)
+        if driver_id is not None:
+            query = query.filter(models.AdminDriverLocation.admin_user_id == int(driver_id))
+        elif driver_username:
+            query = query.filter(models.AdminDriverLocation.username == str(driver_username).strip())
+        query.delete(synchronize_session=False)
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.exception('driver location offline persistence cleanup failed for user=%s', driver_username)
 
     try:
         asyncio.create_task(push_event({
@@ -18576,6 +18648,9 @@ if os.path.isdir(ADMIN_BUILD_DIR):
     @app.get("/admin/repartidor-app.apk")
     async def admin_repartidor_apk():
         apk_candidates = [
+            # The new exported admin panel carries the distributable APK in
+            # admin/public, so it is included in the same deployment artifact.
+            os.path.join(ADMIN_BUILD_DIR, 'repartidor-app.apk'),
             os.path.join(LEGACY_ADMIN_DIR, 'repartidor-app.apk'),
             os.path.abspath(
                 os.path.join(
