@@ -34,9 +34,18 @@ const nav: { id: SectionId; label: string; icon: LucideIcon; group: string; owne
 const permissionOptions = nav.filter(item => !item.ownerOnly)
 const allAdminPermissions = permissionOptions.map(item => item.id)
 
+function adminRole(user: AdminUser | AnyRecord) {
+  return String(user?.role || '').trim().toLowerCase()
+}
+
 function userPermissions(user: AdminUser) {
-  if (user.role === 'owner' || !Array.isArray(user.permissions)) return new Set<string>(allAdminPermissions)
-  return new Set<string>(user.permissions.map((item: unknown) => String(item)))
+  if (adminRole(user) === 'owner') return new Set<string>(allAdminPermissions)
+  let raw = user.permissions
+  if (typeof raw === 'string') {
+    try { raw = JSON.parse(raw) } catch { raw = null }
+  }
+  if (!Array.isArray(raw)) return new Set<string>(allAdminPermissions)
+  return new Set<string>(raw.map((item: unknown) => String(item)))
 }
 
 const statusLabels: Record<string, string> = { recibido: 'Recibido', visto: 'Visto', preparado: 'Preparado', enviado: 'Enviado', entregado: 'Entregado', cancelado: 'Cancelado' }
@@ -109,7 +118,7 @@ function SettingsView({ currentUser, scope, users, branches, zones, onReload }: 
 function OwnerTools({ scope }: { scope: string }) { const [data, setData] = useState<AnyRecord>({}); const [message, setMessage] = useState(''); async function read(path: string) { setMessage(''); try { setData({ endpoint: path, payload: await apiFetch<AnyRecord>(path, { businessScope: scope }) }) } catch (error) { setMessage(errorMessage(error, 'No se pudo consultar la herramienta.')) } } return <Card className="p-5"><div className="flex items-center gap-2"><Settings className="size-5 text-emerald-600" /><div><h3 className="section-title">Herramientas heredadas de consulta</h3><p className="muted">Lecturas reales del resumen PWA, push y entregas del backend.</p></div></div><div className="mt-4 flex flex-wrap gap-2"><button onClick={() => void read('/admin/resumen-semanal-pwa?days=7')} className="secondary-button">Resumen PWA</button><button onClick={() => void read('/admin/push/config')} className="secondary-button">Config. push</button><button onClick={() => void read('/admin/deliveries?limit=100')} className="secondary-button">Historial entregas</button></div>{message && <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{message}</p>}{data.endpoint && <pre className="mt-4 max-h-72 overflow-auto rounded-xl bg-slate-950 p-4 text-xs text-emerald-200">{JSON.stringify(data, null, 2)}</pre>}</Card> }
 
 function SettingsViewFunctional({ currentUser, scope, users, branches, zones, onReload }: { currentUser: AdminUser; scope: string; users: AdminUser[]; branches: AnyRecord[]; zones: string[]; onReload: () => void }) {
-  const isOwner = currentUser.role === 'owner'
+  const isOwner = adminRole(currentUser) === 'owner'
   const defaultForm = () => ({ username: '', password: '', full_name: '', role: 'admin', business_scope: scope, zone: '', permissions: [...allAdminPermissions] })
   const [form, setForm] = useState<AnyRecord>(defaultForm)
   const [branch, setBranch] = useState<AnyRecord>({ name: '', street: '', street_number: '', lat: '', lon: '' })
@@ -124,7 +133,7 @@ function SettingsViewFunctional({ currentUser, scope, users, branches, zones, on
   }
   async function updateUser(item: AdminUser) {
     const draft = draftFor(item); setSaving(true); setMessage('')
-    try { const payload = item.role === 'repartidor' ? { zone: draft.zone } : { business_scope: draft.business_scope, permissions: item.role === 'admin' ? draft.permissions : undefined }; await apiFetch(`/admin/users/${item.id}`, { method: 'PATCH', businessScope: scope, body: JSON.stringify(payload) }); setMessage('Cambios de usuario y permisos guardados.'); onReload() } catch (error) { setMessage(errorMessage(error, 'No se pudo actualizar el usuario.')) } finally { setSaving(false) }
+    try { const role = adminRole(item); const payload = role === 'repartidor' ? { zone: draft.zone } : { business_scope: draft.business_scope, permissions: role === 'admin' ? draft.permissions : undefined }; await apiFetch(`/admin/users/${item.id}`, { method: 'PATCH', businessScope: scope, body: JSON.stringify(payload) }); setMessage('Cambios de usuario y permisos guardados.'); onReload() } catch (error) { setMessage(errorMessage(error, 'No se pudo actualizar el usuario.')) } finally { setSaving(false) }
   }
   async function deleteUser(item: AdminUser) {
     if (!isOwner || !window.confirm(`¿Eliminar a ${item.username}?`)) return
