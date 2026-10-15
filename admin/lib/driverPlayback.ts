@@ -121,6 +121,8 @@ export class DriverPlayback {
   private readonly playbackDelayMs: number
   private readonly maxGapMs: number
   private readonly maxSpeedMps: number
+  private observedIntervalMs?: number
+  private observedIntervalCount = 0
   private diagnostics: PlaybackDiagnostics = { received: 0, accepted: 0, duplicates: 0, outOfOrder: 0, discontinuities: 0, interpolatedFrames: 0, heldFrames: 0 }
 
   constructor(options: { playbackDelayMs?: number; maxSamples?: number; maxGapMs?: number; maxSpeedMps?: number } = {}) {
@@ -154,6 +156,13 @@ export class DriverPlayback {
     const previous = insertionIndex < 0 ? this.samples[this.samples.length - 1] : insertionIndex > 0 ? this.samples[insertionIndex - 1] : undefined
     if (insertionIndex < 0) this.samples.push(sample)
     else this.samples.splice(insertionIndex, 0, sample)
+    if (insertionIndex < 0 && latest) {
+      const interval = timelineAt - latest.timelineAt
+      if (interval > 0 && interval <= this.maxGapMs) {
+        this.observedIntervalCount += 1
+        this.observedIntervalMs = this.observedIntervalMs === undefined ? interval : this.observedIntervalMs * 0.7 + interval * 0.3
+      }
+    }
     if (previous) {
       const dt = sample.timelineAt - previous.timelineAt
       const meters = distanceMeters(previous, sample)
@@ -190,9 +199,14 @@ export class DriverPlayback {
     })
   }
 
+  private effectiveDelayMs() {
+    if (this.observedIntervalCount < 2 || this.observedIntervalMs === undefined) return this.playbackDelayMs
+    return Math.min(8000, Math.max(this.playbackDelayMs, this.observedIntervalMs * 1.15))
+  }
+
   frame(now: number): PlaybackFrame | null {
     if (!this.samples.length) return null
-    const displayAt = now - this.playbackDelayMs
+    const displayAt = now - this.effectiveDelayMs()
     const first = this.samples[0]
     const last = this.samples[this.samples.length - 1]
     if (displayAt < first.timelineAt) {

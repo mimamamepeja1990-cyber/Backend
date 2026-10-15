@@ -52,8 +52,6 @@ function userPermissions(user: AdminUser) {
 const statusLabels: Record<string, string> = { recibido: 'Recibido', visto: 'Visto', preparado: 'Preparado', enviado: 'Enviado', entregado: 'Entregado', cancelado: 'Cancelado' }
 const mapsKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || ''
 const driverPlaybackDelayMs = Math.max(1000, Math.min(8000, Number(process.env.NEXT_PUBLIC_DRIVER_PLAYBACK_DELAY_MS) || 3500))
-const driverAnimationMinMs = 600
-const driverAnimationMaxMs = 8000
 
 function asArray(value: any): any[] { return Array.isArray(value) ? value : [] }
 function driverLocationKey(value: AnyRecord) { return String(value?.driver_id ?? value?.driver_username ?? '') }
@@ -147,9 +145,7 @@ function DriverMap({ locations, orders = [], branches = [] }: { locations: AnyRe
   const markers = useRef<Map<string, any>>(new Map())
   const branchMarkers = useRef<Map<string, any>>(new Map())
   const playbacks = useRef<Map<string, DriverPlayback>>(new Map())
-  const markerAnimations = useRef<Map<string, AnyRecord>>(new Map())
   const animationFrame = useRef<number | null>(null)
-  const startAnimationLoop = useRef<() => void>(() => {})
   const routeLine = useRef<any>(null)
   const routeRenderer = useRef<any>(null)
   const routeRequest = useRef(0)
@@ -201,10 +197,8 @@ function DriverMap({ locations, orders = [], branches = [] }: { locations: AnyRe
       markers.current.clear()
       branchMarkers.current.clear()
       playbacks.current.clear()
-      markerAnimations.current.clear()
       if (animationFrame.current !== null) window.cancelAnimationFrame(animationFrame.current)
       animationFrame.current = null
-      startAnimationLoop.current = () => {}
       stopMarkers.current = []
       routeLine.current = null
       routeRenderer.current = null
@@ -225,7 +219,6 @@ function DriverMap({ locations, orders = [], branches = [] }: { locations: AnyRe
       let playback = playbacks.current.get(key)
       if (!playback) { playback = new DriverPlayback({ playbackDelayMs: driverPlaybackDelayMs, maxGapMs: 15000 }); playbacks.current.set(key, playback) }
       playback.addLocation(location, now, Date.now())
-      const nowMono = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()
       if (!marker) {
         marker = new maps.Marker({
           map: map.current,
@@ -249,13 +242,7 @@ function DriverMap({ locations, orders = [], branches = [] }: { locations: AnyRe
             .catch(() => { /* The marker remains on the temporal GPS track if no road path is available. */ })
         })
         markers.current.set(key, marker)
-        markerAnimations.current.set(key, { lastUpdateAt: nowMono })
       } else {
-        const current = markerPosition(marker) || { lat, lng: lon }
-        const previous = markerAnimations.current.get(key)
-        const elapsed = previous?.lastUpdateAt != null ? Math.max(0, nowMono - previous.lastUpdateAt) : 1200
-        markerAnimations.current.set(key, { start: current, end: { lat, lng: lon }, startTime: nowMono, endTime: nowMono + Math.min(driverAnimationMaxMs, Math.max(driverAnimationMinMs, elapsed)), lastUpdateAt: nowMono })
-        startAnimationLoop.current()
         marker.setIcon(driverMarkerIcon(maps, key === selectedDriverKey))
         if (location.driver_name || location.driver_username) marker.setLabel({ text: String(location.driver_name || location.driver_username), fontSize: '12px', fontWeight: '600', color: '#1f2937' })
       }
@@ -265,7 +252,6 @@ function DriverMap({ locations, orders = [], branches = [] }: { locations: AnyRe
         marker.setMap(null)
         markers.current.delete(key)
         playbacks.current.delete(key)
-        markerAnimations.current.delete(key)
       }
     })
   }, [locations, mapReady])
@@ -333,36 +319,27 @@ function DriverMap({ locations, orders = [], branches = [] }: { locations: AnyRe
   useEffect(() => {
     if (!mapReady) return
     const visible = () => typeof document === 'undefined' || document.visibilityState === 'visible'
-    const stepAnimations = (timestamp: number) => {
+    const renderPlaybacks = (timestamp: number) => {
       if (!visible()) { animationFrame.current = null; return }
-      let active = false
-      markerAnimations.current.forEach((state, key) => {
+      playbacks.current.forEach((playback, key) => {
         const marker = markers.current.get(key)
-        if (!marker || !state?.start || !state?.end) { markerAnimations.current.delete(key); return }
-        const ratio = Math.max(0, Math.min(1, (timestamp - state.startTime) / Math.max(1, state.endTime - state.startTime)))
-        marker.setPosition({ lat: state.start.lat + (state.end.lat - state.start.lat) * ratio, lng: state.start.lng + (state.end.lng - state.start.lng) * ratio })
-        if (ratio < 1) active = true
-        else markerAnimations.current.delete(key)
+        const rendered = playback.frame(timestamp)
+        if (marker && rendered) marker.setPosition(rendered.position)
       })
-      animationFrame.current = active ? window.requestAnimationFrame(stepAnimations) : null
-    }
-    startAnimationLoop.current = () => {
-      if (!visible() || animationFrame.current !== null || !markerAnimations.current.size) return
-      animationFrame.current = window.requestAnimationFrame(stepAnimations)
+      animationFrame.current = window.requestAnimationFrame(renderPlaybacks)
     }
     const onVisibilityChange = () => {
-      if (visible()) startAnimationLoop.current()
-      else if (animationFrame.current !== null) {
+      if (visible() && animationFrame.current === null) animationFrame.current = window.requestAnimationFrame(renderPlaybacks)
+      else if (!visible() && animationFrame.current !== null) {
         window.cancelAnimationFrame(animationFrame.current)
         animationFrame.current = null
       }
     }
     document.addEventListener('visibilitychange', onVisibilityChange)
-    startAnimationLoop.current()
+    if (visible()) animationFrame.current = window.requestAnimationFrame(renderPlaybacks)
     return () => {
       if (animationFrame.current !== null) window.cancelAnimationFrame(animationFrame.current)
       animationFrame.current = null
-      startAnimationLoop.current = () => {}
       document.removeEventListener('visibilitychange', onVisibilityChange)
     }
   }, [mapReady])
@@ -385,10 +362,8 @@ function DriverMap({ locations, orders = [], branches = [] }: { locations: AnyRe
     stopMarkers.current = []
     if (!selectedLocation || !routeOrders.length) return
 
-    const markerPosition = markers.current.get(selectedDriverKey)?.getPosition?.()
-    const currentPoint = markerPosition
-      ? { lat: Number(markerPosition.lat()), lng: Number(markerPosition.lng()) }
-      : { lat: Number(selectedLocation.lat), lng: Number(selectedLocation.lon ?? selectedLocation.lng) }
+    const currentPoint = markerPosition(markers.current.get(selectedDriverKey))
+      || { lat: Number(selectedLocation.lat), lng: Number(selectedLocation.lon ?? selectedLocation.lng) }
     const path = [currentPoint, ...routeOrders.map(point => ({ lat: point.lat, lng: point.lon }))]
     const drawFallback = () => {
       if (requestId !== routeRequest.current) return
