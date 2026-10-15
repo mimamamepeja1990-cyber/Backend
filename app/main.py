@@ -9594,12 +9594,15 @@ def _run_admin_stress_driver_simulation(
                 leg_distance_km = max(0.0, float(_haversine_km(current_lat, current_lon, point['lat'], point['lon']) or 0.0))
             except Exception:
                 leg_distance_km = 0.0
-            travel_seconds = max(4.5, min(18.0, max(leg_distance_km, 0.35) * 4.0))
-            max_points = max(8, min(24, int(math.ceil(max(leg_distance_km, 0.6) * 4.0))))
+            # Keep the visual simulation close to a normal urban driving pace.
+            # The previous 4-18 second legs made markers jump across the map.
+            simulation_time_factor = max(1.0, min(8.0, _env_float('ADMIN_STRESS_ROUTE_TIME_FACTOR', 3.0)))
+            travel_seconds = max(10.0, min(60.0, max(leg_distance_km, 0.35) * 4.0 * simulation_time_factor))
+            max_points = max(12, min(48, int(math.ceil(max(leg_distance_km, 0.6) * 6.0))))
             segment_points = _admin_stress_build_segment_points(current_lat, current_lon, point['lat'], point['lon'], max_points=max_points)
             if not segment_points:
                 segment_points = [{'lat': float(point['lat']), 'lon': float(point['lon'])}]
-            step_delay = max(0.55, min(1.4, travel_seconds / max(1, len(segment_points))))
+            step_delay = max(0.75, min(2.5, travel_seconds / max(1, len(segment_points))))
             speed_hint = max(14.0, min(32.0, max(leg_distance_km, 0.5) * 7.0))
 
             for path_point in segment_points:
@@ -9668,7 +9671,7 @@ def _run_admin_stress_driver_simulation(
                         )
                     return
 
-        return_points = _admin_stress_build_segment_points(current_lat, current_lon, depot_lat, depot_lon, max_points=8)
+        return_points = _admin_stress_build_segment_points(current_lat, current_lon, depot_lat, depot_lon, max_points=16)
         for return_point in (return_points or []):
             if not _admin_stress_session_matches(session_id):
                 if _admin_stress_session_cancel_requested(session_id) and not cancel_logged:
@@ -9679,7 +9682,7 @@ def _run_admin_stress_driver_simulation(
                     )
                 return
             _admin_stress_set_driver_location(driver, return_point['lat'], return_point['lon'], speed=11.0)
-            if not _admin_stress_wait(session_id, 0.7):
+            if not _admin_stress_wait(session_id, 1.4):
                 if _admin_stress_session_cancel_requested(session_id) and not cancel_logged:
                     cancel_logged = True
                     _admin_stress_append_event(
