@@ -9042,23 +9042,71 @@ def _run_admin_stress_seed(
             _admin_stress_set_error(session_id, 'No se pudieron crear pedidos QA para el stress test.')
             return
 
-        with ADMIN_STRESS_TEST_LOCK:
-            if str(ADMIN_STRESS_TEST_STATE.get('session_id') or '').strip() != str(session_id):
-                return
-            ADMIN_STRESS_TEST_STATE['phase'] = 'awaiting_ready'
-            ADMIN_STRESS_TEST_STATE['message'] = 'Marca los pedidos como preparados y luego ejecuta .ready.'
-            _admin_stress_touch_locked()
-
         _admin_stress_append_event(
-            f"Listo: {created_count}/{requested_count} pedidos QA creados sin mail. Buscalos por {prefix}.",
+            f"Listo: {created_count}/{requested_count} pedidos QA creados sin mail. Iniciando flujo automatico.",
             'ok',
         )
         if failed_count > 0:
             _admin_stress_append_event(f'Hubo {failed_count} fallos durante la siembra.', 'err')
-        _admin_stress_append_event('Cuando termines de dejarlos preparados, ejecuta .ready.', 'note')
+
+        transitioned = _admin_stress_mark_orders_seen_and_prepared(payment_reference)
+        if transitioned.get('seen_count', 0) > 0:
+            _admin_stress_append_event(
+                f"Pedidos QA marcados como vistos: {transitioned['seen_count']}.",
+                'note',
+            )
+        if transitioned.get('prepared_count', 0) > 0:
+            _admin_stress_append_event(
+                f"Pedidos QA marcados como preparados: {transitioned['prepared_count']}.",
+                'ok',
+            )
+        if transitioned.get('seen_count', 0) or transitioned.get('prepared_count', 0):
+            _push_event_threadsafe({
+                'action': 'orders_changed',
+                'reason': 'stress_auto_prepare',
+            })
+        if not _admin_stress_session_matches(session_id):
+            return
+        _admin_stress_append_event(
+            'Autoasignando por zona y arrancando todas las rutas simultaneamente.',
+            'note',
+        )
+        _run_admin_stress_ready_simulation(session_id, payment_reference)
     except Exception as exc:
         logger.exception('admin stress seed failed')
         _admin_stress_set_error(session_id, f'No se pudo completar la siembra QA: {exc}')
+
+
+def _admin_stress_mark_orders_seen_and_prepared(payment_reference: str) -> Dict[str, int]:
+    """Advance every QA order through visto -> preparado without manual input."""
+    payment_ref = str(payment_reference or '').strip()
+    if not payment_ref:
+        return {'seen_count': 0, 'prepared_count': 0}
+    try:
+        with engine.begin() as conn:
+            seen_result = conn.execute(
+                text(
+                    "UPDATE orders SET status = 'visto' "
+                    "WHERE payment_reference = :payment_reference "
+                    "AND LOWER(COALESCE(status, 'recibido')) = 'recibido'"
+                ),
+                {'payment_reference': payment_ref},
+            )
+            prepared_result = conn.execute(
+                text(
+                    "UPDATE orders SET status = 'preparado' "
+                    "WHERE payment_reference = :payment_reference "
+                    "AND LOWER(COALESCE(status, 'recibido')) = 'visto'"
+                ),
+                {'payment_reference': payment_ref},
+            )
+        return {
+            'seen_count': int(getattr(seen_result, 'rowcount', 0) or 0),
+            'prepared_count': int(getattr(prepared_result, 'rowcount', 0) or 0),
+        }
+    except Exception:
+        logger.exception('admin stress automatic status transition failed')
+        raise
 
 
 def _admin_stress_list_drivers(db: Session, business_scope: Optional[str] = None) -> List[Any]:
@@ -9077,7 +9125,7 @@ def _admin_stress_list_drivers(db: Session, business_scope: Optional[str] = None
         )
     ]
     drivers.sort(key=lambda user: (str(getattr(user, 'zone', '') or ''), str(getattr(user, 'username', '') or '')))
-    return drivers[:8]
+    return drivers
 
 
 def _admin_stress_set_driver_location(
@@ -16070,7 +16118,7 @@ def _auto_assign_routes_for_driver(driver, orders: List[Dict[str, Any]], include
     driver_username = getattr(driver, 'username', None)
     driver_zone = str(getattr(driver, 'zone', '') or '').strip()
     driver_scope = _get_admin_assigned_business_scope(driver)
-    if not driver_id or not driver_zone:
+    if not driver_id:
         return {'driver_id': driver_id, 'assigned': 0, 'route_id': None, 'assigned_ids': []}
     zone_tokens = _parse_admin_zones(driver_zone)
     now = datetime.datetime.now(datetime.timezone.utc)
