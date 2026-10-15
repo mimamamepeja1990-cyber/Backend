@@ -9497,6 +9497,21 @@ def _admin_stress_build_segment_points(
     sampled_points = osrm_points or []
     if sampled_points:
         sampled_points = _sample_route_points(sampled_points, max_points=max(2, int(max_points or 6)))
+        if len(sampled_points) >= 2 and len(sampled_points) < int(max_points or 0):
+            dense_points: List[Dict[str, float]] = []
+            target_count = max(2, int(max_points))
+            for idx in range(target_count):
+                position = (idx / float(target_count - 1)) * float(len(sampled_points) - 1)
+                left_index = int(math.floor(position))
+                right_index = min(left_index + 1, len(sampled_points) - 1)
+                ratio = position - float(left_index)
+                left_point = sampled_points[left_index]
+                right_point = sampled_points[right_index]
+                dense_points.append({
+                    'lat': float(left_point['lat']) + ((float(right_point['lat']) - float(left_point['lat'])) * ratio),
+                    'lon': float(left_point['lon']) + ((float(right_point['lon']) - float(left_point['lon'])) * ratio),
+                })
+            sampled_points = dense_points
         if sampled_points and abs(sampled_points[0]['lat'] - float(start_lat)) < 0.000001 and abs(sampled_points[0]['lon'] - float(start_lon)) < 0.000001:
             sampled_points = sampled_points[1:]
         return sampled_points or [{'lat': float(end_lat), 'lon': float(end_lon)}]
@@ -9504,7 +9519,7 @@ def _admin_stress_build_segment_points(
         dist_m = _haversine_km(float(start_lat), float(start_lon), float(end_lat), float(end_lon)) * 1000.0
     except Exception:
         dist_m = 0.0
-    steps = max(1, min(max(1, int(max_points or 6)), int(max(1, math.ceil(dist_m / 180.0)))))
+    steps = max(1, min(max(1, int(max_points or 6)), int(max(1, math.ceil(dist_m / 70.0)))))
     out: List[Dict[str, float]] = []
     for idx in range(1, steps + 1):
         ratio = idx / float(steps)
@@ -9598,11 +9613,12 @@ def _run_admin_stress_driver_simulation(
             # between stops. The value can be tuned for local stress runs.
             route_speed_kmh = max(12.0, min(45.0, _env_float('ADMIN_STRESS_ROUTE_SPEED_KMH', 28.0)))
             travel_seconds = max(20.0, min(1800.0, (max(leg_distance_km, 0.15) / route_speed_kmh) * 3600.0))
-            max_points = max(16, min(180, int(math.ceil(max(leg_distance_km, 0.2) * 12.0))))
+            route_update_interval = max(2.0, min(8.0, _env_float('ADMIN_STRESS_ROUTE_UPDATE_INTERVAL_SEC', 4.0)))
+            max_points = max(12, min(300, int(math.ceil(travel_seconds / route_update_interval))))
             segment_points = _admin_stress_build_segment_points(current_lat, current_lon, point['lat'], point['lon'], max_points=max_points)
             if not segment_points:
                 segment_points = [{'lat': float(point['lat']), 'lon': float(point['lon'])}]
-            step_delay = max(1.5, min(8.0, travel_seconds / max(1, len(segment_points))))
+            step_delay = max(2.5, min(5.0, travel_seconds / max(1, len(segment_points))))
             speed_hint = route_speed_kmh
 
             for path_point in segment_points:

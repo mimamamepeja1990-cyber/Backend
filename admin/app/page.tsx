@@ -108,8 +108,7 @@ function DriverMap({ locations, orders = [] }: { locations: AnyRecord[]; orders?
   const container = useRef<HTMLDivElement>(null)
   const map = useRef<any>(null)
   const markers = useRef<Map<string, any>>(new Map())
-  const animationFrames = useRef<Map<string, number>>(new Map())
-  const locationTimes = useRef<Map<string, number>>(new Map())
+  const locationSamples = useRef<Map<string, Array<{ lat: number; lng: number; at: number }>>>(new Map())
   const routeLine = useRef<any>(null)
   const routeRenderer = useRef<any>(null)
   const routeRequest = useRef(0)
@@ -142,6 +141,7 @@ function DriverMap({ locations, orders = [] }: { locations: AnyRecord[]; orders?
       .sort((a, b) => Number(a.order.route_order ?? 999999) - Number(b.order.route_order ?? 999999))
   }, [orders, selectedDriverKey, selectedLocation?.driver_name])
   const routeSignature = routeOrders.map(point => `${point.order.id}:${point.lat.toFixed(5)}:${point.lon.toFixed(5)}`).join('|')
+  const selectedPositionSignature = selectedLocation ? `${Number(selectedLocation.lat).toFixed(5)}:${Number(selectedLocation.lon ?? selectedLocation.lng).toFixed(5)}` : ''
 
   useEffect(() => {
     let cancelled = false
@@ -155,14 +155,12 @@ function DriverMap({ locations, orders = [] }: { locations: AnyRecord[]; orders?
       cancelled = true
       routeRequest.current += 1
       plannedRouteRequest.current += 1
-      animationFrames.current.forEach(frame => window.cancelAnimationFrame(frame))
       markers.current.forEach(marker => marker.setMap(null))
       stopMarkers.current.forEach(marker => marker.setMap(null))
       routeLine.current?.setMap(null)
       routeRenderer.current?.setMap(null)
       markers.current.clear()
-      animationFrames.current.clear()
-      locationTimes.current.clear()
+      locationSamples.current.clear()
       stopMarkers.current = []
       routeLine.current = null
       routeRenderer.current = null
@@ -177,21 +175,6 @@ function DriverMap({ locations, orders = [] }: { locations: AnyRecord[]; orders?
       .map(location => ({ location, key: driverKey(location), lat: Number(location.lat), lon: Number(location.lon ?? location.lng) }))
       .filter(point => point.key && Number.isFinite(point.lat) && Number.isFinite(point.lon))
     const activeKeys = new Set(points.map(point => point.key))
-    const animateMarker = (key: string, marker: any, target: { lat: number; lng: number }, duration: number) => {
-      const previousFrame = animationFrames.current.get(key)
-      if (previousFrame) window.cancelAnimationFrame(previousFrame)
-      const current = marker.getPosition?.()
-      const from = current ? { lat: current.lat(), lng: current.lng() } : target
-      const started = performance.now()
-      const tick = (now: number) => {
-        const progress = Math.min(1, (now - started) / duration)
-        const eased = progress < 0.5 ? 2 * progress * progress : 1 - Math.pow(-2 * progress + 2, 2) / 2
-        marker.setPosition({ lat: from.lat + (target.lat - from.lat) * eased, lng: from.lng + (target.lng - from.lng) * eased })
-        if (progress < 1) animationFrames.current.set(key, window.requestAnimationFrame(tick))
-        else animationFrames.current.delete(key)
-      }
-      animationFrames.current.set(key, window.requestAnimationFrame(tick))
-    }
     points.forEach(({ location, key, lat, lon }) => {
       let marker = markers.current.get(key)
       if (!marker) {
@@ -220,18 +203,19 @@ function DriverMap({ locations, orders = [] }: { locations: AnyRecord[]; orders?
         markers.current.set(key, marker)
       }
       const recordedAt = Date.parse(String(location.recorded_at || ''))
-      const previousRecordedAt = locationTimes.current.get(key)
-      locationTimes.current.set(key, Number.isFinite(recordedAt) ? recordedAt : Date.now())
-      const updateInterval = Number.isFinite(recordedAt) && previousRecordedAt && recordedAt > previousRecordedAt ? (recordedAt - previousRecordedAt) : 4500
-      animateMarker(key, marker, { lat, lng: lon }, Math.max(1200, Math.min(9000, updateInterval * 0.92)))
+      const at = Number.isFinite(recordedAt) ? recordedAt : Date.now()
+      const samples = locationSamples.current.get(key) || []
+      const last = samples[samples.length - 1]
+      if (!last || at > last.at) {
+        samples.push({ lat, lng: lon, at })
+        locationSamples.current.set(key, samples.slice(-24))
+      }
     })
     markers.current.forEach((marker, key) => {
       if (!activeKeys.has(key)) {
-        const frame = animationFrames.current.get(key)
-        if (frame) window.cancelAnimationFrame(frame)
         marker.setMap(null)
         markers.current.delete(key)
-        animationFrames.current.delete(key)
+        locationSamples.current.delete(key)
       }
     })
     if (!points.length) hasFitted.current = false
@@ -243,6 +227,41 @@ function DriverMap({ locations, orders = [] }: { locations: AnyRecord[]; orders?
       hasFitted.current = true
     }
   }, [locations, mapReady])
+
+  useEffect(() => {
+    if (!mapReady) return
+    let frame = 0
+    const bufferMs = 3500
+    const renderBufferedPositions = () => {
+      const displayAt = Date.now() - bufferMs
+      locationSamples.current.forEach((samples, key) => {
+        const marker = markers.current.get(key)
+        if (!marker || !samples.length) return
+        let position = samples[0]
+        if (displayAt >= samples[samples.length - 1].at) {
+          position = samples[samples.length - 1]
+        } else if (displayAt > samples[0].at) {
+          for (let index = 1; index < samples.length; index += 1) {
+            const after = samples[index]
+            const before = samples[index - 1]
+            if (displayAt <= after.at) {
+              const ratio = Math.max(0, Math.min(1, (displayAt - before.at) / Math.max(1, after.at - before.at)))
+              position = {
+                lat: before.lat + ((after.lat - before.lat) * ratio),
+                lng: before.lng + ((after.lng - before.lng) * ratio),
+                at: displayAt,
+              }
+              break
+            }
+          }
+        }
+        marker.setPosition({ lat: position.lat, lng: position.lng })
+      })
+      frame = window.requestAnimationFrame(renderBufferedPositions)
+    }
+    frame = window.requestAnimationFrame(renderBufferedPositions)
+    return () => window.cancelAnimationFrame(frame)
+  }, [mapReady])
 
   useEffect(() => {
     if (!mapReady || !map.current || !window.google?.maps) return
@@ -274,7 +293,14 @@ function DriverMap({ locations, orders = [] }: { locations: AnyRecord[]; orders?
       .map(point => ({ lat: Number(point.lat), lng: Number(point.lon) }))
       .filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lng))
     if (plannedPath.length >= 2) {
-      routeLine.current = new maps.Polyline({ map: map.current, path: plannedPath, geodesic: true, strokeColor: '#059669', strokeOpacity: 0.94, strokeWeight: 5 })
+      let nearestIndex = 0
+      let nearestDistance = Number.POSITIVE_INFINITY
+      plannedPath.forEach((point, index) => {
+        const distance = Math.pow(point.lat - currentPoint.lat, 2) + Math.pow((point.lng - currentPoint.lng) * Math.cos(currentPoint.lat * Math.PI / 180), 2)
+        if (distance < nearestDistance) { nearestDistance = distance; nearestIndex = index }
+      })
+      const remainingPath = [currentPoint, ...plannedPath.slice(Math.min(nearestIndex + 1, plannedPath.length - 1))]
+      if (remainingPath.length >= 2) routeLine.current = new maps.Polyline({ map: map.current, path: remainingPath, geodesic: true, strokeColor: '#059669', strokeOpacity: 0.94, strokeWeight: 5 })
       return
     }
 
@@ -306,7 +332,7 @@ function DriverMap({ locations, orders = [] }: { locations: AnyRecord[]; orders?
         drawFallback()
       }
     })
-  }, [mapReady, selectedDriverKey, routeSignature, plannedRoutePath])
+  }, [mapReady, selectedDriverKey, selectedPositionSignature, routeSignature, plannedRoutePath])
 
   return <div className="relative min-h-[420px] overflow-hidden rounded-xl bg-slate-100">
     <div ref={container} className="absolute inset-0" />
