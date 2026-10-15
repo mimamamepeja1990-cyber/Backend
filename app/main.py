@@ -705,6 +705,11 @@ _GEOCODE_CACHE_DIRTY = False
 _ROUTE_START_CACHE: Dict[str, Any] = {}
 DRIVER_LOCATIONS: Dict[str, Dict[str, Any]] = {}
 DRIVER_LOCATIONS_LOCK = threading.Lock()
+ADMIN_STRESS_LOCATION_PERSIST_INTERVAL_SEC = max(
+    1.0,
+    _env_float('ADMIN_STRESS_LOCATION_PERSIST_INTERVAL_SEC', 4.0),
+)
+ADMIN_STRESS_LOCATION_LAST_PERSIST: Dict[str, float] = {}
 DRIVER_LIFECYCLE_STATE: Dict[str, Dict[str, Any]] = {}
 DRIVER_LIFECYCLE_LOCK = threading.Lock()
 APP_EVENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
@@ -9062,36 +9067,43 @@ def _admin_stress_set_driver_location(
         'recorded_at': recorded_at or _admin_stress_now_utc(),
     }
     key = str(driver_id if driver_id is not None else driver_username or 'unknown')
+    persist_location = False
+    now_wall = time.time()
     with DRIVER_LOCATIONS_LOCK:
-        DRIVER_LOCATIONS[key] = dict(payload, updated_at=time.time())
-    try:
-        db_local = SessionLocal()
+        DRIVER_LOCATIONS[key] = dict(payload, updated_at=now_wall)
+        last_persist = float(ADMIN_STRESS_LOCATION_LAST_PERSIST.get(key) or 0.0)
+        if now_wall - last_persist >= ADMIN_STRESS_LOCATION_PERSIST_INTERVAL_SEC:
+            ADMIN_STRESS_LOCATION_LAST_PERSIST[key] = now_wall
+            persist_location = True
+    if persist_location:
         try:
-            db_local.add(models.AdminDriverLocation(
-                admin_user_id=int(driver_id) if driver_id is not None else None,
-                username=driver_username,
-                full_name=driver_name,
-                lat=float(lat),
-                lon=float(lon),
-                accuracy=8.0,
-                speed=float(speed) if speed is not None else None,
-                heading=None,
-                battery=100.0,
-                recorded_at=payload['recorded_at'],
-            ))
-            db_local.commit()
+            db_local = SessionLocal()
+            try:
+                db_local.add(models.AdminDriverLocation(
+                    admin_user_id=int(driver_id) if driver_id is not None else None,
+                    username=driver_username,
+                    full_name=driver_name,
+                    lat=float(lat),
+                    lon=float(lon),
+                    accuracy=8.0,
+                    speed=float(speed) if speed is not None else None,
+                    heading=None,
+                    battery=100.0,
+                    recorded_at=payload['recorded_at'],
+                ))
+                db_local.commit()
+            except Exception:
+                try:
+                    db_local.rollback()
+                except Exception:
+                    pass
+            finally:
+                try:
+                    db_local.close()
+                except Exception:
+                    pass
         except Exception:
-            try:
-                db_local.rollback()
-            except Exception:
-                pass
-        finally:
-            try:
-                db_local.close()
-            except Exception:
-                pass
-    except Exception:
-        logger.exception('admin stress driver location persistence failed')
+            logger.exception('admin stress driver location persistence failed')
     try:
         event_payload = dict(payload)
         if isinstance(event_payload.get('recorded_at'), datetime.datetime):
@@ -9108,6 +9120,7 @@ def _admin_stress_clear_driver_location(driver: Any) -> None:
     key = str(driver_id if driver_id is not None else driver_username or 'unknown')
     with DRIVER_LOCATIONS_LOCK:
         DRIVER_LOCATIONS.pop(key, None)
+        ADMIN_STRESS_LOCATION_LAST_PERSIST.pop(key, None)
         if driver_username:
             for current_key, payload in list(DRIVER_LOCATIONS.items()):
                 if str((payload or {}).get('driver_username') or '').strip() == driver_username:
