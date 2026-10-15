@@ -2,8 +2,8 @@
 
 import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { LucideIcon } from 'lucide-react'
-import { Activity, AlertTriangle, BarChart3, Bell, Boxes, Building2, Check, ChevronRight, CircleDollarSign, ClipboardList, FileText, LayoutDashboard, Loader2, LogOut, MapPin, Menu, Package, PanelLeftClose, PanelLeftOpen, Plus, RefreshCw, Route, Save, Search, Settings, ShoppingCart, Terminal, Trash2, Truck, UserRound, UserPlus, Users, X } from 'lucide-react'
-import { ApiError, adminLogin, apiFetch, getAdminToken, setAdminToken, websocketUrl } from '@/lib/api'
+import { Activity, AlertTriangle, BarChart3, Bell, Boxes, Building2, Check, ChevronRight, CircleDollarSign, ClipboardList, Download, FileText, Filter, Image as ImageIcon, LayoutDashboard, Loader2, LogOut, MapPin, Menu, Package, PanelLeftClose, PanelLeftOpen, Plus, RefreshCw, Route, Save, Search, Settings, ShoppingCart, Terminal, Trash2, Truck, Upload, UserRound, UserPlus, Users, X } from 'lucide-react'
+import { ApiError, adminLogin, apiFetch, apiUrl, getAdminToken, setAdminToken, websocketUrl } from '@/lib/api'
 
 type AnyRecord = Record<string, any>
 type SectionId = 'dashboard' | 'operations' | 'orders' | 'catalog' | 'inventory' | 'sales' | 'customers' | 'drivers' | 'deliveries' | 'promotions' | 'settings' | 'owner-console'
@@ -109,7 +109,80 @@ function ProductsFunctional({ products, inventoryOnly, onReload, onAutoCategoriz
   return <div className="space-y-5"><PageTitle title={inventoryOnly ? 'Inventario y stock' : 'Productos y catálogo'} action={<div className="flex gap-2">{canAutoCategorize && <button onClick={onAutoCategorize} className="secondary-button">Auto-categorizar</button>}{!inventoryOnly ? <button onClick={() => setEditor(null)} className="primary-button"><Plus className="size-4" />Nuevo producto</button> : <button onClick={onReload} className="secondary-button"><RefreshCw className="size-4" />Actualizar</button>}</div>} /><Card className="overflow-hidden"><div className="border-b border-slate-100 p-4"><div className="search-field max-w-md"><Search className="size-4 text-slate-400" /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Buscar por nombre, código o categoría…" /></div></div><div className="overflow-x-auto"><table className="data-table"><thead><tr><th>Imagen</th><th>Producto</th><th>Categoría</th><th>Precio</th><th>Stock</th><th>Estado</th><th /></tr></thead><tbody>{filtered.length ? filtered.map(product => { const low = Number(product.stock || 0) <= Number(product.min_stock || 0); return <tr key={product.id}><td><ProductImage src={product.image_url} name={product.name} /></td><td><p className="font-semibold text-slate-800">{product.name}</p><p className="text-[11px] text-slate-400">{product.code || `ID ${product.id}`}{product.brand ? ` · ${product.brand}` : ''}</p></td><td className="text-slate-500">{product.category || '—'}</td><td className="font-semibold">{money(product.price)}</td><td><span className={low ? 'font-bold text-red-600' : 'font-semibold text-slate-700'}>{product.stock ?? 0}</span><span className="text-xs text-slate-400"> / mín. {product.min_stock ?? 0}</span></td><td><Pill tone={product.active === false ? 'gray' : low ? 'red' : 'green'}>{product.active === false ? 'Inactivo' : low ? 'Stock bajo' : 'Disponible'}</Pill></td><td><button onClick={() => setEditor(product)} className="link-button">Editar</button></td></tr> }) : <tr><td colSpan={7}><Empty /></td></tr>}</tbody></table></div></Card>{editor !== undefined && <ProductEditorFunctional product={editor} onClose={() => setEditor(undefined)} onSaved={onReload} />}</div>
 }
 
-;(Products as any) = ProductsFunctional
+function ProductCatalogRestored({ products, inventoryOnly, onReload, onAutoCategorize, canAutoCategorize, scope = 'mayorista' }: { products: Product[]; inventoryOnly?: boolean; onReload: () => void; onAutoCategorize?: () => void; canAutoCategorize?: boolean; scope?: string }) {
+  const effectiveScope = typeof window !== 'undefined' ? window.localStorage.getItem('distriar_business_scope') || scope : scope
+  const [query, setQuery] = useState('')
+  const [category, setCategory] = useState('')
+  const [editor, setEditor] = useState<Product | null | undefined>()
+  const [filters, setFilters] = useState<AnyRecord[]>([])
+  const [filtersOpen, setFiltersOpen] = useState(false)
+  const [newFilter, setNewFilter] = useState('')
+  const [filterBusy, setFilterBusy] = useState(false)
+  const [csvBusy, setCsvBusy] = useState(false)
+  const [message, setMessage] = useState('')
+  const csvInput = useRef<HTMLInputElement>(null)
+
+  const normalizeFilters = (value: any) => asArray(value).map((item, index) => {
+    const name = typeof item === 'string' ? item.trim() : String(item?.name || item?.label || item?.value || '').trim()
+    const filterValue = typeof item === 'string' ? name.toLowerCase() : String(item?.value || name).trim().toLowerCase()
+    return name && filterValue ? { id: item?.id ?? `filter_${index}_${filterValue}`, name, value: filterValue } : null
+  }).filter(Boolean) as AnyRecord[]
+
+  const loadFilters = useCallback(async () => {
+    try { setFilters(normalizeFilters(await apiFetch<any>('/filters.json', { businessScope: effectiveScope }))) } catch { setFilters([]) }
+  }, [effectiveScope])
+  useEffect(() => { if (!inventoryOnly) void loadFilters() }, [inventoryOnly, loadFilters])
+
+  const categories = useMemo(() => {
+    const values = filters.map(item => String(item.value || '').trim()).filter(Boolean)
+    if (values.length) return values
+    return [...new Set(products.map(product => String(product.category || '').trim().toLowerCase()).filter(Boolean))]
+  }, [filters, products])
+  const filtered = useMemo(() => products.filter(product => {
+    const low = Number(product.stock || 0) <= Number(product.min_stock || 0)
+    const text = `${product.name} ${product.code || ''} ${product.category || ''} ${product.brand || ''}`.toLowerCase()
+    return (!inventoryOnly || low) && (!category || String(product.category || '').toLowerCase() === category) && text.includes(query.toLowerCase())
+  }), [products, inventoryOnly, category, query])
+
+  async function exportCsv() {
+    setCsvBusy(true); setMessage('')
+    try {
+      const headers = new Headers({ 'X-Business-Scope': effectiveScope })
+      const token = getAdminToken(); if (token) headers.set('Authorization', `Bearer ${token}`)
+      const response = await fetch(apiUrl('/export?format=csv'), { headers, cache: 'no-store' })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const blob = await response.blob(); const url = URL.createObjectURL(blob); const link = document.createElement('a')
+      link.href = url; link.download = `productos-${new Date().toISOString().slice(0, 10)}.csv`; document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url)
+      setMessage('CSV exportado correctamente.')
+    } catch (value) { setMessage(errorMessage(value, 'No se pudo exportar el CSV.')) } finally { setCsvBusy(false) }
+  }
+
+  async function importCsv(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]; if (!file) return
+    setCsvBusy(true); setMessage('')
+    try {
+      const body = new FormData(); body.append('file', file, file.name)
+      const result = await apiFetch<AnyRecord>('/products/import-excel', { method: 'POST', businessScope: effectiveScope, body })
+      setMessage(`CSV importado: ${Number(result?.created || 0)} creados, ${Number(result?.updated || 0)} actualizados.`)
+      onReload()
+    } catch (value) { setMessage(errorMessage(value, 'No se pudo importar el CSV.')) } finally { setCsvBusy(false); event.target.value = '' }
+  }
+
+  async function saveFilters(next: AnyRecord[]) {
+    setFilterBusy(true); setMessage('')
+    try { await apiFetch('/filters', { method: 'POST', businessScope: effectiveScope, body: JSON.stringify(next) }); setFilters(next); setMessage('Filtros guardados.') } catch (value) { setMessage(errorMessage(value, 'No se pudieron guardar los filtros.')) } finally { setFilterBusy(false) }
+  }
+  async function addFilter() {
+    const name = newFilter.trim(); if (!name) return
+    const value = name.toLowerCase().replace(/\s+/g, '_')
+    if (filters.some(item => item.value === value)) return
+    await saveFilters([...filters, { id: `filter_${Date.now()}`, name, value }]); setNewFilter('')
+  }
+
+  return <div className="space-y-5"><PageTitle title={inventoryOnly ? 'Inventario y stock' : 'Productos y catálogo'} action={<div className="flex flex-wrap gap-2">{!inventoryOnly && <><button disabled={csvBusy} onClick={exportCsv} className="secondary-button"><Download className="size-4" />Exportar CSV</button><button disabled={csvBusy} onClick={() => csvInput.current?.click()} className="secondary-button"><Upload className="size-4" />Importar CSV</button><input ref={csvInput} type="file" accept=".csv,text/csv" onChange={event => void importCsv(event)} className="hidden" /><button onClick={() => setFiltersOpen(value => !value)} className="secondary-button"><Filter className="size-4" />Filtros</button></>}{canAutoCategorize && <button onClick={onAutoCategorize} className="secondary-button">Auto-categorizar</button>}{!inventoryOnly ? <button onClick={() => setEditor(null)} className="primary-button"><Plus className="size-4" />Nuevo producto</button> : <button onClick={onReload} className="secondary-button"><RefreshCw className="size-4" />Actualizar</button>}</div>} />{message && <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700">{message}</div>}{filtersOpen && !inventoryOnly && <Card className="p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="section-title">Filtros del catálogo</h3><p className="muted">Estos filtros se guardan en el backend y se usan para clasificar los productos.</p></div><button disabled={filterBusy} onClick={() => void loadFilters()} className="secondary-button"><RefreshCw className="size-4" />Importar filtros</button></div><div className="mt-4 flex flex-wrap gap-2">{filters.map(item => <span key={String(item.id)} className="inline-flex items-center gap-2 rounded-lg bg-slate-100 px-3 py-2 text-sm text-slate-700">{item.name}<button disabled={filterBusy} onClick={() => void saveFilters(filters.filter(current => current.id !== item.id))} className="text-slate-400 hover:text-red-600"><X className="size-3.5" /></button></span>)}{!filters.length && <span className="text-sm text-slate-500">No hay filtros guardados.</span>}</div><div className="mt-4 flex max-w-md gap-2"><input value={newFilter} onChange={event => setNewFilter(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void addFilter() } }} placeholder="Nuevo filtro, por ejemplo lácteos" className="field" /><button disabled={filterBusy || !newFilter.trim()} onClick={() => void addFilter()} className="primary-button">Agregar</button></div></Card>}<Card className="overflow-hidden"><div className="flex flex-wrap gap-3 border-b border-slate-100 p-4"><div className="search-field max-w-md"><Search className="size-4 text-slate-400" /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Buscar por nombre, código, marca o categoría…" /></div><select value={category} onChange={event => setCategory(event.target.value)} className="field max-w-56"><option value="">Todas las categorías</option>{categories.map(value => <option key={value} value={value}>{value.replace(/_/g, ' ')}</option>)}</select></div><div className="overflow-x-auto"><table className="data-table"><thead><tr><th>Foto</th><th>Producto</th><th>Categoría</th><th>Precio</th><th>Stock</th><th>Estado</th><th /></tr></thead><tbody>{filtered.length ? filtered.map(product => { const low = Number(product.stock || 0) <= Number(product.min_stock || 0); return <tr key={product.id}><td><ProductImage src={product.image_url} name={product.name} /></td><td><p className="font-semibold text-slate-800">{product.name}</p><p className="text-[11px] text-slate-400">{product.code || `ID ${product.id}`}{product.brand ? ` · ${product.brand}` : ''}</p></td><td className="text-slate-500">{product.category || '—'}</td><td className="font-semibold">{money(product.price)}</td><td><span className={low ? 'font-bold text-red-600' : 'font-semibold text-slate-700'}>{product.stock ?? 0}</span><span className="text-xs text-slate-400"> / mín. {product.min_stock ?? 0}</span></td><td><Pill tone={product.active === false ? 'gray' : low ? 'red' : 'green'}>{product.active === false ? 'Inactivo' : low ? 'Stock bajo' : 'Disponible'}</Pill></td><td><button onClick={() => setEditor(product)} className="link-button"><ImageIcon className="size-3.5" />Editar / foto</button></td></tr> }) : <tr><td colSpan={7}><Empty /></td></tr>}</tbody></table></div></Card>{editor !== undefined && <ProductEditorFunctional product={editor} onClose={() => setEditor(undefined)} onSaved={onReload} />}</div>
+}
+
+;(Products as any) = ProductCatalogRestored
 
 export default function Page() {
   const [deliveries, setDeliveries] = useState<Order[]>([])
@@ -330,7 +403,44 @@ function DriversWithGlobalAutoAssign(props: { users: AdminUser[]; locations: Any
   }
   return <div className="space-y-5"><LegacyDrivers {...props} /><Card className="p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="section-title">Asignación automática por zona</h3><p className="muted">Busca pedidos preparados sin asignar y los persiste en el repartidor compatible de cada zona. No reemplaza asignaciones existentes.</p></div><button disabled={busy} onClick={() => void assignByZone()} className="primary-button">{busy && <Loader2 className="size-4 animate-spin" />}Autoasignar pedidos por zona</button></div>{message && <p className="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{message}</p>}</Card><NextZoneAssignments scope={props.users[0]?.business_scope || 'mayorista'} users={props.users} zones={props.zones} /></div>
 }
-;(Drivers as any) = DriversWithGlobalAutoAssign
+
+function AssignedOrdersByDriver({ drivers, orders }: { drivers: AdminUser[]; orders: Order[] }) {
+  const activeOrders = orders.filter(order => {
+    const status = String(order.status || '').toLowerCase()
+    const assigned = order.assigned_driver_id || order.assigned_driver_username || order.assigned_driver_name
+    return Boolean(assigned) && !['entregado', 'cancelado'].includes(status)
+  })
+  const assignedByDriver = (driver: AdminUser) => activeOrders.filter(order => {
+    const sameId = order.assigned_driver_id != null && String(order.assigned_driver_id) === String(driver.id)
+    const sameUsername = order.assigned_driver_username && String(order.assigned_driver_username) === String(driver.username)
+    const sameName = !order.assigned_driver_id && !order.assigned_driver_username && order.assigned_driver_name && String(order.assigned_driver_name) === String(driver.full_name || driver.username)
+    return sameId || sameUsername || sameName
+  })
+  const addressFor = (order: Order) => order.user_address || order.delivery_address || [order.user_calle, order.user_numeracion, order.user_barrio].filter(Boolean).join(', ')
+  return <Card className="p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><h3 className="section-title">Pedidos asignados por repartidor</h3><p className="muted">Detalle de los pedidos activos que recibió cada repartidor desde la asignación por zona.</p></div><Pill tone={activeOrders.length ? 'green' : 'gray'}>{activeOrders.length} pedidos asignados</Pill></div>{drivers.length ? <div className="mt-4 grid gap-3 xl:grid-cols-2">{drivers.map(driver => { const driverOrders = assignedByDriver(driver); return <div key={driver.id} className="rounded-xl border border-slate-200 bg-slate-50 p-4"><div className="flex items-start justify-between gap-3"><div><p className="text-sm font-semibold text-slate-800">{driver.full_name || driver.username}</p><p className="text-xs text-slate-500">{driver.zone || 'Sin zona'}</p></div><Pill tone={driverOrders.length ? 'blue' : 'gray'}>{driverOrders.length} {driverOrders.length === 1 ? 'pedido' : 'pedidos'}</Pill></div>{driverOrders.length ? <div className="mt-3 space-y-2">{driverOrders.map(order => <div key={String(order.id)} className="rounded-lg border border-slate-200 bg-white p-3"><div className="flex items-start justify-between gap-3"><div><p className="text-sm font-semibold text-slate-800">Pedido #{order.id}</p><p className="text-xs text-slate-600">{order.user_full_name || 'Cliente'}</p></div><Pill tone={statusTone(String(order.status || 'preparado'))}>{statusLabels[String(order.status || 'preparado')] || order.status || 'Preparado'}</Pill></div>{addressFor(order) && <p className="mt-2 text-xs text-slate-500">{addressFor(order)}</p>}<p className="mt-2 text-xs font-semibold text-slate-700">{money(order.total)}</p></div>)}</div> : <p className="mt-3 text-xs text-slate-500">Todavía no tiene pedidos activos asignados.</p>}</div> })}</div> : <Empty message="No hay repartidores visibles en este rubro." />}</Card>
+}
+
+function DriversTabbed(props: { users: AdminUser[]; locations: AnyRecord[]; orders: Order[]; zones: string[]; onReload: () => void; onAutoAssign: (driverId: string) => Promise<boolean>; onInspect: (driver: AdminUser) => void }) {
+  const [tab, setTab] = useState<'orders' | 'next'>('orders')
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
+  const drivers = props.users.filter(user => user.role === 'repartidor')
+  const scope = props.users[0]?.business_scope || 'mayorista'
+
+  async function assignByZone() {
+    setBusy(true)
+    setMessage('')
+    try {
+      const ok = await props.onAutoAssign('')
+      setMessage(ok ? 'Pedidos preparados asignados por zona y rutas actualizadas.' : '')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return <div className="space-y-5"><PageTitle title="Repartidores y mapa" action={<button onClick={props.onReload} className="secondary-button"><RefreshCw className="size-4" />Actualizar</button>} /><div className="flex flex-wrap gap-2 rounded-xl border border-slate-200 bg-white p-2"><button onClick={() => setTab('orders')} className={`rounded-lg px-4 py-2 text-sm font-semibold transition ${tab === 'orders' ? 'bg-emerald-600 text-white' : 'text-slate-500 hover:bg-slate-50'}`}>Pedidos y rutas</button><button onClick={() => setTab('next')} className={`rounded-lg px-4 py-2 text-sm font-semibold transition ${tab === 'next' ? 'bg-emerald-600 text-white' : 'text-slate-500 hover:bg-slate-50'}`}>Asignaciones del día siguiente</button></div>{tab === 'orders' ? <><LegacyDrivers {...props} /><Card className="p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="section-title">Asignación automática por zona</h3><p className="muted">Busca pedidos preparados sin asignar y los persiste en el repartidor compatible de cada zona. No reemplaza asignaciones existentes.</p></div><button disabled={busy} onClick={() => void assignByZone()} className="primary-button">{busy && <Loader2 className="size-4 animate-spin" />}Autoasignar pedidos por zona</button></div>{message && <p className="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{message}</p>}</Card><AssignedOrdersByDriver drivers={drivers} orders={props.orders} /></> : <NextZoneAssignments scope={scope} users={props.users} zones={props.zones} />}</div>
+}
+;(Drivers as any) = DriversTabbed
 
 function LiveDriverMap({ locations }: { locations: AnyRecord[] }) {
   const container = useRef<HTMLDivElement>(null)

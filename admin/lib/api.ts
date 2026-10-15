@@ -67,6 +67,7 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
 }
 
 export async function adminLogin(username: string, password: string, businessScope: string) {
+  if (typeof window !== 'undefined') window.localStorage.setItem('distriar_business_scope', businessScope)
   const body = new URLSearchParams({ username, password, scope: businessScope })
   const response = await fetch(apiUrl('/admin/auth/token'), {
     method: 'POST',
