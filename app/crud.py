@@ -43,6 +43,29 @@ def _get_table_columns(db: Session, table_name: str) -> Set[str]:
         return set()
 
 
+def _ensure_admin_permissions_column(db: Session) -> bool:
+    """Ensure permissions can be persisted while older Render schemas roll forward."""
+    available = _get_table_columns(db, 'admin_users')
+    if 'permissions' in available:
+        return True
+    try:
+        dialect = str(getattr(db.get_bind().dialect, 'name', '') or '').lower()
+        if 'postgres' in dialect:
+            db.execute(text('ALTER TABLE admin_users ADD COLUMN IF NOT EXISTS permissions JSON'))
+        else:
+            db.execute(text('ALTER TABLE admin_users ADD COLUMN permissions JSON'))
+        db.commit()
+        _TABLE_COLUMNS_CACHE.pop('admin_users', None)
+        return 'permissions' in _get_table_columns(db, 'admin_users')
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        _TABLE_COLUMNS_CACHE.pop('admin_users', None)
+        return False
+
+
 def _normalize_cutoff_hour(raw_value, default_value=18):
     try:
         value = int(str(raw_value).strip())
@@ -3253,6 +3276,11 @@ def create_admin_user(
             raise
         try:
             available = _get_table_columns(db, 'admin_users')
+            requested_permissions = getattr(obj, 'permissions', None)
+            if requested_permissions is not None and 'permissions' not in available:
+                if not _ensure_admin_permissions_column(db):
+                    raise RuntimeError('No se pudo crear la columna de permisos de admin')
+                available = _get_table_columns(db, 'admin_users')
             values = {
                 'username': username,
                 'full_name': obj.full_name,
@@ -3385,6 +3413,10 @@ def update_admin_user_scope_and_zone(
         user.permissions = permissions
     if not isinstance(user, models.AdminUser):
         available = _get_table_columns(db, 'admin_users')
+        if permissions is not None and 'permissions' not in available:
+            if not _ensure_admin_permissions_column(db):
+                raise RuntimeError('No se pudo crear la columna de permisos de admin')
+            available = _get_table_columns(db, 'admin_users')
         updates = {}
         if business_scope is not None and 'business_scope' in available:
             updates['business_scope'] = getattr(user, 'business_scope', None)
