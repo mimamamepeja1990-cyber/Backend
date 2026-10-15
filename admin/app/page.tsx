@@ -42,7 +42,7 @@ function Card({ children, className = '' }: { children: React.ReactNode; classNa
 function Pill({ children, tone = 'gray' }: { children: React.ReactNode; tone?: string }) { const tones: Record<string, string> = { green: 'bg-emerald-50 text-emerald-700', red: 'bg-red-50 text-red-700', blue: 'bg-blue-50 text-blue-700', violet: 'bg-violet-50 text-violet-700', amber: 'bg-amber-50 text-amber-700', gray: 'bg-slate-100 text-slate-600' }; return <span className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-[11px] font-semibold ${tones[tone] || tones.gray}`}><span className="size-1.5 rounded-full bg-current" />{children}</span> }
 function Metric({ label, value, detail, icon: Icon, tone = 'green' }: { label: string; value: string; detail?: string; icon: LucideIcon; tone?: string }) { const iconTone: Record<string, string> = { green: 'bg-emerald-50 text-emerald-600', blue: 'bg-blue-50 text-blue-600', amber: 'bg-amber-50 text-amber-600', red: 'bg-red-50 text-red-600', violet: 'bg-violet-50 text-violet-600' }; return <Card className="p-5"><div className="flex items-start justify-between"><div><p className="text-xs font-medium text-slate-500">{label}</p><p className="mt-2 text-2xl font-bold tracking-tight text-slate-900">{value}</p></div><span className={`flex size-10 items-center justify-center rounded-xl ${iconTone[tone] || iconTone.green}`}><Icon className="size-5" /></span></div>{detail && <p className="mt-3 text-xs text-slate-500">{detail}</p>}</Card> }
 function Empty({ message = 'No hay datos para mostrar.' }: { message?: string }) { return <div className="flex min-h-32 items-center justify-center p-8 text-sm text-slate-500">{message}</div> }
-function PageTitle({ title, description, action }: { title: string; description: string; action?: React.ReactNode }) { return <div className="flex flex-wrap items-end justify-between gap-3"><div><h2 className="text-2xl font-bold tracking-tight text-slate-900">{title}</h2><p className="mt-1 text-sm text-slate-500">{description}</p></div>{action}</div> }
+function PageTitle({ title, action }: { title: string; description?: string; action?: React.ReactNode }) { return <div className="flex flex-wrap items-end justify-between gap-3"><div><h2 className="text-2xl font-bold tracking-tight text-slate-900">{title}</h2></div>{action}</div> }
 function Field({ label, value, onChange, type = 'text', required = false, placeholder = '' }: { label: string; value: any; onChange: (value: string) => void; type?: string; required?: boolean; placeholder?: string }) { return <label className="block text-sm font-medium text-slate-700">{label}<input required={required} type={type} value={value ?? ''} placeholder={placeholder} onChange={event => onChange(event.target.value)} className="field mt-1.5" /></label> }
 
 function Login({ onLoggedIn }: { onLoggedIn: (user: AdminUser) => void }) {
@@ -91,12 +91,13 @@ export default function Page() {
   useEffect(() => { const token = getAdminToken(); if (!token) return; apiFetch<AdminUser>('/admin/auth/me').then(loggedUser => { setUser(loggedUser); setScope(loggedUser.active_business_scope || loggedUser.business_scope || 'mayorista') }).catch(() => setAdminToken(null)) }, [])
   useEffect(() => { if (user) void load(active) }, [user, active, scope])
   useEffect(() => { if (!user || active !== 'drivers') return; const timer = window.setInterval(() => void load('drivers'), 30000); return () => window.clearInterval(timer) }, [user, active, load])
-  useEffect(() => { if (!user || (active !== 'dashboard' && active !== 'catalog' && active !== 'inventory')) return; let socket: WebSocket | null = null; try { socket = new WebSocket(websocketUrl()); socket.onmessage = () => void load(active) } catch { /* HTTP remains the source of truth. */ } return () => socket?.close() }, [user, active, load])
+  useEffect(() => { if (!user || (active !== 'dashboard' && active !== 'catalog' && active !== 'inventory')) return; let socket: WebSocket | null = null; try { socket = new WebSocket(websocketUrl()); socket.onopen = () => socket?.send(JSON.stringify({ scope, topics: ['product', 'order', 'driver'] })); socket.onmessage = () => void load(active); socket.onerror = () => socket?.close() } catch { /* HTTP remains the source of truth. */ } return () => socket?.close() }, [user, active, scope, load])
   async function updateOrderStatus(order: Order, status: string) { try { await apiFetch(`/orders/${order.id}/status`, { method: 'PATCH', body: JSON.stringify({ status }), headers: { 'X-Actor': user?.username || '' } }); await load('orders') } catch (e) { setError(errorMessage(e, 'No se pudo actualizar el pedido')) } }
   async function assignOrder(order: Order, driverId: string) { if (!driverId) { setError('El backend no expone desasignación desde este endpoint.'); return } try { await apiFetch(`/admin/orders/${order.id}/assign`, { method: 'PATCH', businessScope: scope, body: JSON.stringify({ driver_id: Number(driverId) }) }); await load(active === 'drivers' ? 'drivers' : 'orders') } catch (e) { setError(errorMessage(e, 'No se pudo asignar el pedido')) } }
-  async function autoAssign(driverId: string) { try { await apiFetch('/admin/routes/auto-assign', { method: 'POST', businessScope: scope, body: JSON.stringify({ driver_id: Number(driverId), include_assigned: true, customer_type: scope }) }); await load('drivers') } catch (e) { setError(errorMessage(e, 'No se pudo generar la ruta')) } }
+  async function autoAssign(driverId: string) { try { const body: AnyRecord = { include_assigned: Boolean(driverId), customer_type: scope }; if (driverId) body.driver_id = Number(driverId); await apiFetch('/admin/routes/auto-assign', { method: 'POST', businessScope: scope, body: JSON.stringify(body) }); await load('drivers'); return true } catch (e) { setError(errorMessage(e, 'No se pudo generar la ruta')); return false } }
   async function inspectDriver(driver: AdminUser) { try { const insight = await apiFetch<AnyRecord>(`/admin/driver-insights?driver_id=${encodeURIComponent(driver.id)}&customer_type=${encodeURIComponent(scope)}`, { businessScope: scope }); setError(`Actividad de ${driver.full_name || driver.username}: ${JSON.stringify(insight)}`) } catch (e) { setError(errorMessage(e, 'No se pudo consultar la actividad del repartidor')) } }
   async function autoCategorize() { try { await apiFetch('/admin/products/auto-categorize', { method: 'POST', businessScope: scope, body: JSON.stringify({ overwrite_category: false }) }); await load('catalog') } catch (e) { setError(errorMessage(e, 'No se pudo auto-categorizar')) } }
+  useEffect(() => { const openDrivers = () => setActive('drivers'); window.addEventListener('distriar-open-drivers', openDrivers); return () => window.removeEventListener('distriar-open-drivers', openDrivers) }, [])
   if (!user) return <Login onLoggedIn={loggedUser => { setUser(loggedUser); setScope(loggedUser.active_business_scope || loggedUser.business_scope || 'mayorista') }} />
   const visibleNav = nav.filter(item => !item.ownerOnly || user.role === 'owner'); const groups = [...new Set(visibleNav.map(item => item.group))]; const currentLabel = visibleNav.find(item => item.id === active)?.label || 'Resumen'; const drivers = users.filter(item => item.role === 'repartidor')
   return <div className="flex min-h-screen bg-slate-50 text-slate-900"><aside className={`fixed inset-y-0 left-0 z-40 flex w-64 flex-col border-r border-slate-200 bg-white transition-transform lg:static lg:translate-x-0 ${collapsed ? 'lg:w-[78px]' : ''} ${mobileNav ? 'translate-x-0' : '-translate-x-full'}`}><div className={`flex h-[72px] items-center border-b border-slate-100 ${collapsed ? 'justify-center' : 'gap-3 px-5'}`}><span className="flex size-9 items-center justify-center rounded-xl bg-emerald-600 font-bold text-white">D</span>{!collapsed && <div><p className="font-bold">Distri<span className="text-emerald-600">Ar</span></p><p className="text-[9px] font-semibold uppercase tracking-widest text-slate-400">Panel admin</p></div>}</div><nav className="flex-1 overflow-y-auto px-3 py-5">{groups.map(group => <div key={group} className="mb-5"><p className={`mb-2 px-3 text-[10px] font-bold tracking-widest text-slate-400 ${collapsed ? 'text-center' : ''}`}>{collapsed ? '•' : group}</p>{visibleNav.filter(item => item.group === group).map(item => <button key={item.id} title={collapsed ? item.label : undefined} onClick={() => { setActive(item.id); setMobileNav(false) }} className={`mb-1 flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-xs font-medium transition ${active === item.id ? 'bg-emerald-50 font-semibold text-emerald-700' : 'text-slate-500 hover:bg-slate-50 hover:text-slate-900'} ${collapsed ? 'justify-center' : ''}`}><item.icon className="size-4 shrink-0" />{!collapsed && <span className="truncate">{item.label}</span>}</button>)}</div>)}</nav><div className="border-t border-slate-100 p-3"><button onClick={() => { setAdminToken(null); setUser(null) }} className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-xs font-medium text-slate-500 hover:bg-red-50 hover:text-red-700 ${collapsed ? 'justify-center' : ''}`}><LogOut className="size-4" />{!collapsed && 'Cerrar sesión'}</button><button onClick={() => setCollapsed(value => !value)} className="mt-1 flex w-full justify-center rounded-lg py-2 text-slate-400 hover:bg-slate-50">{collapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}</button></div></aside><main className="min-w-0 flex-1"><header className="sticky top-0 z-30 flex h-[72px] items-center justify-between border-b border-slate-200 bg-white/95 px-4 backdrop-blur sm:px-6 lg:px-8"><div className="flex items-center gap-3"><button onClick={() => setMobileNav(value => !value)} className="icon-button lg:hidden"><Menu className="size-5" /></button><div><div className="hidden items-center gap-2 text-[11px] text-slate-400 sm:flex"><span>Inicio</span><ChevronRight className="size-3" /><span>Panel</span></div><h1 className="text-lg font-bold">{currentLabel}</h1></div></div><div className="flex items-center gap-3"><label className="hidden items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-400 md:flex"><span>Rubro</span><select value={scope} onChange={event => setScope(event.target.value)} className="bg-transparent font-semibold text-slate-700 outline-none"><option value="mayorista">Mayorista</option><option value="minorista">Minorista</option></select></label><button onClick={() => void load(active)} className="icon-button" title="Actualizar"><RefreshCw className={`size-4 ${loading ? 'animate-spin' : ''}`} /></button><div className="flex items-center gap-2 border-l border-slate-100 pl-3"><span className="flex size-9 items-center justify-center rounded-full bg-emerald-100 text-xs font-bold text-emerald-700">{(user.full_name || user.username).slice(0, 2).toUpperCase()}</span><div className="hidden sm:block"><p className="text-xs font-semibold">{user.full_name || user.username}</p><p className="text-[11px] text-slate-400">{user.role}</p></div></div></div></header><div className="mx-auto max-w-[1480px] p-4 sm:p-6 lg:p-8">{error && <div className="mb-5 flex items-start justify-between gap-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700"><span className="break-words">{error}</span><button onClick={() => setError('')}><X className="size-4" /></button></div>}{loading && !orders.length && !products.length && <div className="mb-5 flex items-center gap-2 text-sm text-slate-500"><Loader2 className="size-4 animate-spin" />Cargando información real…</div>}{active === 'dashboard' && <Dashboard data={{ ...operations, sales }} orders={orders} onSection={setActive} />}{active === 'operations' && <Operations data={operations} />}{active === 'orders' && <Orders orders={orders} drivers={drivers} onReload={() => void load('orders')} onStatus={updateOrderStatus} onAssign={assignOrder} />}{active === 'catalog' && <Products products={products} onReload={() => void load('catalog')} onAutoCategorize={autoCategorize} canAutoCategorize={user.role === 'owner' || user.role === 'admin'} />}{active === 'inventory' && <Products products={products} inventoryOnly onReload={() => void load('inventory')} />}{active === 'sales' && <Sales sales={sales} />}{active === 'customers' && <Customers executive={executive} />}{active === 'drivers' && <Drivers users={users} locations={locations} orders={orders} zones={zones} onReload={() => void load('drivers')} onAutoAssign={autoAssign} onInspect={inspectDriver} />}{active === 'promotions' && <Promotions promotions={promotions} consumos={consumos} onReload={() => void load('promotions')} />}{active === 'settings' && <SettingsView currentUser={user} scope={scope} users={users} branches={branches} zones={zones} onReload={() => void load('settings')} />}{active === 'owner-console' && user.role === 'owner' && <OwnerConsole scope={scope} />}</div></main></div>
@@ -173,3 +174,69 @@ function EnhancedOrders(props: { orders: Order[]; drivers: AdminUser[]; onReload
   return <div className="space-y-4"><div className="flex flex-wrap items-center justify-between gap-3"><p className="text-sm text-slate-500">El flujo legacy conserva recibido → visto → preparado; al preparar, FastAPI ejecuta la autoasignación por zona.</p><button disabled={busy} onClick={() => void markAllSeen()} className="secondary-button">{busy && <Loader2 className="size-4 animate-spin" />}Marcar todos vistos</button></div><LegacyOrders {...props} /></div>
 }
 ;(Orders as any) = EnhancedOrders
+
+function BatchOrders(props: { orders: Order[]; drivers: AdminUser[]; onReload: () => void; onStatus: (order: Order, status: string) => void; onAssign: (order: Order, driverId: string) => void }) {
+  const [busy, setBusy] = useState(false)
+  const [progress, setProgress] = useState('')
+  const [error, setError] = useState('')
+
+  async function persistStatus(order: Order, status: string) {
+    await apiFetch(`/orders/${order.id}/status`, {
+      method: 'PATCH',
+      body: JSON.stringify({ status }),
+    })
+  }
+
+  async function prepareAndOpenAssignment() {
+    const received = props.orders.filter(order => String(order.status || 'recibido') === 'recibido')
+    const alreadySeen = props.orders.filter(order => String(order.status || '') === 'visto')
+    const toPrepare = [...alreadySeen]
+    if (!received.length && !alreadySeen.length) {
+      setError('No hay pedidos recibidos o vistos para avanzar.')
+      return
+    }
+    if (!window.confirm(`Se marcarán ${received.length} como vistos y luego ${received.length + alreadySeen.length} como preparados. ¿Continuar?`)) return
+    setBusy(true)
+    setError('')
+    try {
+      for (let index = 0; index < received.length; index += 1) {
+        const order = received[index]
+        setProgress(`Marcando vistos: ${index + 1}/${received.length}`)
+        await persistStatus(order, 'visto')
+        toPrepare.push(order)
+      }
+      for (let index = 0; index < toPrepare.length; index += 1) {
+        setProgress(`Marcando preparados: ${index + 1}/${toPrepare.length}`)
+        await persistStatus(toPrepare[index], 'preparado')
+      }
+      setProgress('Pedidos preparados. Abriendo asignación por zona…')
+      await props.onReload()
+      window.dispatchEvent(new Event('distriar-open-drivers'))
+    } catch (value) {
+      setError(errorMessage(value, 'No se pudo completar el avance de los pedidos.'))
+    } finally {
+      setBusy(false)
+      setProgress('')
+    }
+  }
+
+  return <div className="space-y-4"><div className="flex flex-wrap items-center justify-between gap-3"><div>{progress && <p className="mt-1 text-xs font-medium text-emerald-700">{progress}</p>}{error && <p className="mt-1 text-xs text-red-700">{error}</p>}</div><button disabled={busy} onClick={() => void prepareAndOpenAssignment()} className="primary-button">{busy && <Loader2 className="size-4 animate-spin" />}Marcar vistos y preparados</button></div><LegacyOrders {...props} /></div>
+}
+;(Orders as any) = BatchOrders
+
+function DriversWithGlobalAutoAssign(props: { users: AdminUser[]; locations: AnyRecord[]; orders: Order[]; zones: string[]; onReload: () => void; onAutoAssign: (driverId: string) => Promise<boolean>; onInspect: (driver: AdminUser) => void }) {
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState('')
+  async function assignByZone() {
+    setBusy(true)
+    setMessage('')
+    try {
+      const ok = await props.onAutoAssign('')
+      setMessage(ok ? 'Pedidos preparados asignados por zona y rutas actualizadas.' : '')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return <div className="space-y-5"><LegacyDrivers {...props} /><Card className="p-5"><div className="flex flex-wrap items-center justify-between gap-3"><div><h3 className="section-title">Asignación automática por zona</h3><p className="muted">Busca pedidos preparados sin asignar y los persiste en el repartidor compatible de cada zona. No reemplaza asignaciones existentes.</p></div><button disabled={busy} onClick={() => void assignByZone()} className="primary-button">{busy && <Loader2 className="size-4 animate-spin" />}Autoasignar pedidos por zona</button></div>{message && <p className="mt-3 rounded-lg bg-emerald-50 px-3 py-2 text-sm text-emerald-700">{message}</p>}</Card><NextZoneAssignments scope={props.users[0]?.business_scope || 'mayorista'} users={props.users} zones={props.zones} /></div>
+}
+;(Drivers as any) = DriversWithGlobalAutoAssign

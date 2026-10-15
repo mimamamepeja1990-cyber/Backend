@@ -748,6 +748,20 @@ def _running_on_render() -> bool:
     )
 
 
+# A stress test runs inside the same single-worker service as the API. Keep a
+# safe default for Render so a large QA run cannot exhaust the web process or
+# its database pool. It can be raised explicitly with Render env config when
+# the database/service plan has enough capacity.
+ADMIN_STRESS_MAX_ORDERS = max(
+    1,
+    min(_env_int('ADMIN_STRESS_MAX_ORDERS', 200 if _running_on_render() else 2000), 2000),
+)
+ADMIN_STRESS_SEED_WORKERS = max(
+    1,
+    min(_env_int('ADMIN_STRESS_SEED_WORKERS', 2 if _running_on_render() else 4), 4),
+)
+
+
 def _startup_skip_enabled() -> bool:
     return _is_truthy(os.environ.get('SKIP_STARTUP_BOOTSTRAP') or os.environ.get('SKIP_STARTUP'))
 
@@ -8959,7 +8973,7 @@ def _run_admin_stress_seed(
             'note',
         )
 
-        worker_count = max(1, min(8, int(requested_count or 0)))
+        worker_count = max(1, min(ADMIN_STRESS_SEED_WORKERS, int(requested_count or 0)))
         threads: List[threading.Thread] = []
         for worker_idx in range(worker_count):
             bucket = [idx for idx in range(worker_idx + 1, int(requested_count or 0) + 1, worker_count)]
@@ -9744,8 +9758,13 @@ async def admin_stress_test_start(request: Request, current_owner=Depends(requir
         requested_count = int(body.get('count') or 0)
     except Exception:
         requested_count = 0
-    if requested_count < 1 or requested_count > 2000:
+    if requested_count < 1:
         raise HTTPException(status_code=400, detail='count_invalid')
+    if requested_count > ADMIN_STRESS_MAX_ORDERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f'stress_test_count_limit:{ADMIN_STRESS_MAX_ORDERS}',
+        )
 
     current = _admin_stress_snapshot()
     current_phase = str(current.get('phase') or '').strip().lower()
@@ -16179,7 +16198,10 @@ async def admin_auto_assign_routes(request: Request, current_admin=Depends(get_c
         body = {}
     driver_id = body.get('driver_id')
     driver_username = body.get('driver_username')
-    include_assigned = body.get('include_assigned', True)
+    # Re-running the global action must never claim orders that already have a
+    # valid driver. Callers that intentionally rebuild one driver's route can
+    # opt in explicitly with include_assigned=true.
+    include_assigned = body.get('include_assigned', False)
     customer_type_filter = _resolve_admin_customer_type_filter(current_admin, body.get('customer_type'))
 
     drivers = []

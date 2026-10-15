@@ -183,3 +183,27 @@
   .data-table td { @apply border-t border-slate-100 px-5 py-3.5 align-middle; }
   .data-table tbody tr { @apply transition hover:bg-slate-50/70; }
 }
+
+/* Keep the administrative navigation visible while the main panel scrolls. */
+@media (min-width: 1024px) {
+  aside {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    align-self: flex-start;
+  }
+}
+
+/* Use the real DistriAr mark in the fixed administrative header. */
+aside > div:first-child > span {
+  background-color: transparent;
+  background-image: url('/admin/icon.png');
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
+  font-size: 0;
+}
+
+aside > div:first-child > div > p:last-child {
+  display: none;
+}
