@@ -4,6 +4,7 @@ import { ChangeEvent, FormEvent, useCallback, useEffect, useMemo, useRef, useSta
 import type { LucideIcon } from 'lucide-react'
 import { Activity, AlertTriangle, BarChart3, Bell, Boxes, Building2, Check, ChevronRight, CircleDollarSign, ClipboardList, Download, FileText, Filter, Image as ImageIcon, LayoutDashboard, Loader2, LogOut, MapPin, Menu, Package, PanelLeftClose, PanelLeftOpen, Plus, RefreshCw, Route, Save, Search, Settings, ShoppingCart, Terminal, Trash2, Truck, Upload, UserRound, UserPlus, Users, X } from 'lucide-react'
 import { ApiError, adminLogin, apiFetch, apiUrl, getAdminToken, setAdminToken, websocketUrl } from '@/lib/api'
+import { DriverPlayback } from '@/lib/driverPlayback'
 
 type AnyRecord = Record<string, any>
 type SectionId = 'dashboard' | 'operations' | 'orders' | 'catalog' | 'inventory' | 'sales' | 'customers' | 'drivers' | 'assignments' | 'deliveries' | 'promotions' | 'settings' | 'owner-console'
@@ -12,7 +13,7 @@ type Product = AnyRecord & { id: number; name: string; price: number; stock?: nu
 type Order = AnyRecord & { id: number | string; total: number; status?: string; user_full_name?: string; user_email?: string }
 
 declare global {
-  interface Window { google?: any; __distriarGoogleMapsPromise?: Promise<any> }
+  interface Window { google?: any; __distriarGoogleMapsPromise?: Promise<any>; __distriarDriverPlaybackDiagnostics?: () => AnyRecord }
 }
 
 const nav: { id: SectionId; label: string; icon: LucideIcon; group: string; ownerOnly?: boolean }[] = [
@@ -50,8 +51,32 @@ function userPermissions(user: AdminUser) {
 
 const statusLabels: Record<string, string> = { recibido: 'Recibido', visto: 'Visto', preparado: 'Preparado', enviado: 'Enviado', entregado: 'Entregado', cancelado: 'Cancelado' }
 const mapsKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY || ''
+const driverPlaybackDelayMs = Math.max(1000, Math.min(8000, Number(process.env.NEXT_PUBLIC_DRIVER_PLAYBACK_DELAY_MS) || 3500))
 
 function asArray(value: any): any[] { return Array.isArray(value) ? value : [] }
+function driverLocationKey(value: AnyRecord) { return String(value?.driver_id ?? value?.driver_username ?? '') }
+function mergeDriverLocations(current: AnyRecord[], incoming: AnyRecord[]) {
+  const merged = new Map(current.map(item => [driverLocationKey(item), item]))
+  incoming.forEach(item => {
+    const key = driverLocationKey(item)
+    if (!key) return
+    const previous = merged.get(key)
+    const nextAt = Date.parse(String(item?.recorded_at || ''))
+    const previousAt = Date.parse(String(previous?.recorded_at || ''))
+    if (previous && Number.isFinite(nextAt) && Number.isFinite(previousAt) && nextAt < previousAt) return
+    merged.set(key, item)
+  })
+  return Array.from(merged.values())
+}
+function reconcileDriverLocations(current: AnyRecord[], incoming: AnyRecord[]) {
+  const previous = new Map(current.map(item => [driverLocationKey(item), item]))
+  return mergeDriverLocations([], incoming).map(item => {
+    const old = previous.get(driverLocationKey(item))
+    const nextAt = Date.parse(String(item?.recorded_at || ''))
+    const oldAt = Date.parse(String(old?.recorded_at || ''))
+    return old && Number.isFinite(nextAt) && Number.isFinite(oldAt) && nextAt < oldAt ? old : item
+  })
+}
 function money(value: any) { return new Intl.NumberFormat('es-AR', { style: 'currency', currency: 'ARS', maximumFractionDigits: 0 }).format(Number(value) || 0) }
 function date(value: any) { if (!value) return '—'; const parsed = new Date(value); return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString('es-AR', { dateStyle: 'short', timeStyle: 'short' }) }
 function statusTone(value: string) { return value === 'entregado' ? 'green' : value === 'cancelado' ? 'red' : value === 'enviado' ? 'blue' : value === 'preparado' ? 'violet' : 'amber' }
@@ -108,7 +133,7 @@ function DriverMap({ locations, orders = [] }: { locations: AnyRecord[]; orders?
   const container = useRef<HTMLDivElement>(null)
   const map = useRef<any>(null)
   const markers = useRef<Map<string, any>>(new Map())
-  const locationSamples = useRef<Map<string, Array<{ lat: number; lng: number; at: number; sourceAt?: number }>>>(new Map())
+  const playbacks = useRef<Map<string, DriverPlayback>>(new Map())
   const routeLine = useRef<any>(null)
   const routeRenderer = useRef<any>(null)
   const routeRequest = useRef(0)
@@ -132,11 +157,7 @@ function DriverMap({ locations, orders = [] }: { locations: AnyRecord[]; orders?
         const sameName = !order.assigned_driver_id && !order.assigned_driver_username && order.assigned_driver_name && String(order.assigned_driver_name) === String(selectedLocation?.driver_name || '')
         return sameId || sameUsername || sameName
       })
-      .map(order => ({
-        order,
-        lat: Number(order.delivery_lat ?? order.lat ?? order.latitude),
-        lon: Number(order.delivery_lon ?? order.lon ?? order.longitude),
-      }))
+      .map(order => ({ order, lat: Number(order.delivery_lat ?? order.lat ?? order.latitude), lon: Number(order.delivery_lon ?? order.lon ?? order.longitude) }))
       .filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lon))
       .sort((a, b) => Number(a.order.route_order ?? 999999) - Number(b.order.route_order ?? 999999))
   }, [orders, selectedDriverKey, selectedLocation?.driver_name])
@@ -160,7 +181,7 @@ function DriverMap({ locations, orders = [] }: { locations: AnyRecord[]; orders?
       routeLine.current?.setMap(null)
       routeRenderer.current?.setMap(null)
       markers.current.clear()
-      locationSamples.current.clear()
+      playbacks.current.clear()
       stopMarkers.current = []
       routeLine.current = null
       routeRenderer.current = null
@@ -171,12 +192,16 @@ function DriverMap({ locations, orders = [] }: { locations: AnyRecord[]; orders?
   useEffect(() => {
     if (!mapReady || !map.current || !window.google?.maps) return
     const maps = window.google.maps
+    const now = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now()
     const points = (locations || [])
       .map(location => ({ location, key: driverKey(location), lat: Number(location.lat), lon: Number(location.lon ?? location.lng) }))
       .filter(point => point.key && Number.isFinite(point.lat) && Number.isFinite(point.lon))
     const activeKeys = new Set(points.map(point => point.key))
     points.forEach(({ location, key, lat, lon }) => {
       let marker = markers.current.get(key)
+      let playback = playbacks.current.get(key)
+      if (!playback) { playback = new DriverPlayback({ playbackDelayMs: driverPlaybackDelayMs, maxGapMs: 15000 }); playbacks.current.set(key, playback) }
+      playback.addLocation(location, now, Date.now())
       if (!marker) {
         marker = new maps.Marker({
           map: map.current,
@@ -198,26 +223,16 @@ function DriverMap({ locations, orders = [] }: { locations: AnyRecord[]; orders?
               if (requestId !== plannedRouteRequest.current) return
               setPlannedRoutePath(asArray(insight?.planned_route_path).filter(point => Number.isFinite(Number(point?.lat)) && Number.isFinite(Number(point?.lon))))
             })
-            .catch(() => { /* Directions fallback remains visible if the preview is unavailable. */ })
+            .catch(() => { /* The marker remains on the temporal GPS track if no road path is available. */ })
         })
         markers.current.set(key, marker)
-      }
-      const recordedAt = Date.parse(String(location.recorded_at || ''))
-      const sourceAt = Number.isFinite(recordedAt) ? recordedAt : undefined
-      const at = Date.now()
-      const samples = locationSamples.current.get(key) || []
-      const last = samples[samples.length - 1]
-      const isNewSample = !last || (sourceAt != null ? last.sourceAt == null || sourceAt > last.sourceAt : Math.abs(last.lat - lat) > 0.000001 || Math.abs(last.lng - lon) > 0.000001)
-      if (isNewSample) {
-        samples.push({ lat, lng: lon, at, sourceAt })
-        locationSamples.current.set(key, samples.slice(-24))
       }
     })
     markers.current.forEach((marker, key) => {
       if (!activeKeys.has(key)) {
         marker.setMap(null)
         markers.current.delete(key)
-        locationSamples.current.delete(key)
+        playbacks.current.delete(key)
       }
     })
     if (!points.length) hasFitted.current = false
@@ -231,38 +246,31 @@ function DriverMap({ locations, orders = [] }: { locations: AnyRecord[]; orders?
   }, [locations, mapReady])
 
   useEffect(() => {
+    const playback = selectedDriverKey ? playbacks.current.get(selectedDriverKey) : undefined
+    if (!playback) return
+    playback.setRoute(plannedRoutePath.map(point => ({ lat: Number(point.lat), lng: Number(point.lon) })).filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lng)))
+  }, [selectedDriverKey, plannedRoutePath, locations])
+
+  useEffect(() => {
     if (!mapReady) return
     let frame = 0
-    const bufferMs = 3500
-    const renderBufferedPositions = () => {
-      const displayAt = Date.now() - bufferMs
-      locationSamples.current.forEach((samples, key) => {
+    const renderPlayback = (timestamp: number) => {
+      playbacks.current.forEach((playback, key) => {
         const marker = markers.current.get(key)
-        if (!marker || !samples.length) return
-        let position = samples[0]
-        if (displayAt >= samples[samples.length - 1].at) {
-          position = samples[samples.length - 1]
-        } else if (displayAt > samples[0].at) {
-          for (let index = 1; index < samples.length; index += 1) {
-            const after = samples[index]
-            const before = samples[index - 1]
-            if (displayAt <= after.at) {
-              const ratio = Math.max(0, Math.min(1, (displayAt - before.at) / Math.max(1, after.at - before.at)))
-              position = {
-                lat: before.lat + ((after.lat - before.lat) * ratio),
-                lng: before.lng + ((after.lng - before.lng) * ratio),
-                at: displayAt,
-              }
-              break
-            }
-          }
-        }
-        marker.setPosition({ lat: position.lat, lng: position.lng })
+        const rendered = playback.frame(timestamp)
+        if (!marker || !rendered) return
+        marker.setPosition(rendered.position)
       })
-      frame = window.requestAnimationFrame(renderBufferedPositions)
+      frame = window.requestAnimationFrame(renderPlayback)
     }
-    frame = window.requestAnimationFrame(renderBufferedPositions)
+    frame = window.requestAnimationFrame(renderPlayback)
     return () => window.cancelAnimationFrame(frame)
+  }, [mapReady])
+
+  useEffect(() => {
+    if (!mapReady || new URLSearchParams(window.location.search).get('location_debug') !== '1') return
+    window.__distriarDriverPlaybackDiagnostics = () => Object.fromEntries(Array.from(playbacks.current.entries()).map(([key, playback]) => [key, playback.diagnosticsSnapshot]))
+    return () => { delete window.__distriarDriverPlaybackDiagnostics }
   }, [mapReady])
 
   useEffect(() => {
@@ -501,11 +509,11 @@ function ProductCatalogRestored({ products, inventoryOnly, onReload, onAutoCateg
 export default function Page() {
   const [deliveries, setDeliveries] = useState<Order[]>([])
   const [user, setUser] = useState<AdminUser | null>(null); const [scope, setScope] = useState('mayorista'); const [active, setActive] = useState<SectionId>('dashboard'); const [collapsed, setCollapsed] = useState(false); const [mobileNav, setMobileNav] = useState(false); const [loading, setLoading] = useState(false); const [error, setError] = useState(''); const [orders, setOrders] = useState<Order[]>([]); const [products, setProducts] = useState<Product[]>([]); const [operations, setOperations] = useState<AnyRecord>({}); const [executive, setExecutive] = useState<AnyRecord>({}); const [sales, setSales] = useState<AnyRecord>({}); const [users, setUsers] = useState<AdminUser[]>([]); const [branches, setBranches] = useState<AnyRecord[]>([]); const [locations, setLocations] = useState<AnyRecord[]>([]); const [zones, setZones] = useState<string[]>([]); const [promotions, setPromotions] = useState<AnyRecord[]>([]); const [consumos, setConsumos] = useState<AnyRecord[]>([])
-  const load = useCallback(async (section: SectionId = active) => { if (!user || section === 'owner-console') return; setLoading(true); setError(''); const options = { businessScope: scope }; try { if (section === 'dashboard' || section === 'operations') { const results = await Promise.allSettled([apiFetch<AnyRecord>('/admin/operations/overview?days=30', options), apiFetch<AnyRecord>('/admin/resumen-ejecutivo?days=30', options), apiFetch<AnyRecord>('/admin/sales/stats?days=30', options), apiFetch<Order[]>('/admin/orders?limit=100', options)]); const labels = ['operaciones', 'resumen ejecutivo', 'ventas', 'pedidos']; const failures: string[] = []; results.forEach((result, index) => { if (result.status === 'rejected') failures.push(`${labels[index]}: ${errorMessage(result.reason, 'falló')}`); else if (index === 0) setOperations(result.value); else if (index === 1) setExecutive(result.value); else if (index === 2) setSales(result.value); else setOrders(asArray(result.value)) }); if (failures.length) setError(`Carga parcial del panel: ${failures.join(' · ')}`) } else if (section === 'orders') { const results = await Promise.allSettled([apiFetch<Order[]>('/admin/orders?limit=500', options), apiFetch<AdminUser[]>('/admin/users', options)]); if (results[0].status === 'fulfilled') setOrders(asArray(results[0].value)); else setError(`Pedidos: ${errorMessage(results[0].reason, 'no se pudieron cargar')}`); if (results[1].status === 'fulfilled') setUsers(asArray(results[1].value)); } else if (section === 'catalog' || section === 'inventory') { const result = await apiFetch<AnyRecord>('/products/paged?skip=0&limit=200&sort=name', options); setProducts(asArray(result.items)) } else if (section === 'sales') setSales(await apiFetch<AnyRecord>('/admin/sales/stats?days=30', options)); else if (section === 'customers') setExecutive(await apiFetch<AnyRecord>('/admin/resumen-ejecutivo?days=30', options)); else if (section === 'drivers') { const results = await Promise.allSettled([apiFetch<AdminUser[]>('/admin/users', options), apiFetch<AnyRecord[]>('/admin/driver-locations', options), apiFetch<Order[]>('/admin/orders?limit=2000', options), apiFetch<AnyRecord>('/admin/zones', options)]); const failures: string[] = []; if (results[0].status === 'fulfilled') setUsers(asArray(results[0].value)); else failures.push(`repartidores: ${errorMessage(results[0].reason, 'falló')}`); if (results[1].status === 'fulfilled') setLocations(asArray(results[1].value)); else failures.push(`ubicaciones: ${errorMessage(results[1].reason, 'falló')}`); if (results[2].status === 'fulfilled') setOrders(asArray(results[2].value)); if (results[3].status === 'fulfilled') setZones(asArray(results[3].value.zones)); if (failures.length) setError(`Carga parcial de repartidores: ${failures.join(' · ')}`) } else if (section === 'promotions') { const results = await Promise.allSettled([apiFetch<AnyRecord[]>('/api/promos', options), apiFetch<AnyRecord[]>('/api/consumos', options)]); if (results[0].status === 'fulfilled') setPromotions(asArray(results[0].value)); if (results[1].status === 'fulfilled') setConsumos(asArray(results[1].value)); if (results.some(result => result.status === 'rejected')) setError('No se pudo cargar una parte de promociones/consumos.') } else if (section === 'settings') { const results = await Promise.allSettled([apiFetch<AdminUser[]>('/admin/users', options), apiFetch<AnyRecord[]>('/admin/branches', options), apiFetch<AnyRecord>('/admin/zones', options)]); if (results[0].status === 'fulfilled') setUsers(asArray(results[0].value)); else setError(`Usuarios: ${errorMessage(results[0].reason, 'no se pudieron cargar')}`); if (results[1].status === 'fulfilled') setBranches(asArray(results[1].value)); else setError(`Sucursales: ${errorMessage(results[1].reason, 'no se pudieron cargar')}`); if (results[2].status === 'fulfilled') setZones(asArray(results[2].value.zones)) } } catch (e) { if (e instanceof ApiError && e.status === 401) { setAdminToken(null); setUser(null) } else setError(`Error de carga: ${errorMessage(e, 'no se pudieron cargar los datos')}`) } finally { setLoading(false) } }, [active, scope, user])
+  const load = useCallback(async (section: SectionId = active) => { if (!user || section === 'owner-console') return; setLoading(true); setError(''); const options = { businessScope: scope }; try { if (section === 'dashboard' || section === 'operations') { const results = await Promise.allSettled([apiFetch<AnyRecord>('/admin/operations/overview?days=30', options), apiFetch<AnyRecord>('/admin/resumen-ejecutivo?days=30', options), apiFetch<AnyRecord>('/admin/sales/stats?days=30', options), apiFetch<Order[]>('/admin/orders?limit=100', options)]); const labels = ['operaciones', 'resumen ejecutivo', 'ventas', 'pedidos']; const failures: string[] = []; results.forEach((result, index) => { if (result.status === 'rejected') failures.push(`${labels[index]}: ${errorMessage(result.reason, 'falló')}`); else if (index === 0) setOperations(result.value); else if (index === 1) setExecutive(result.value); else if (index === 2) setSales(result.value); else setOrders(asArray(result.value)) }); if (failures.length) setError(`Carga parcial del panel: ${failures.join(' · ')}`) } else if (section === 'orders') { const results = await Promise.allSettled([apiFetch<Order[]>('/admin/orders?limit=500', options), apiFetch<AdminUser[]>('/admin/users', options)]); if (results[0].status === 'fulfilled') setOrders(asArray(results[0].value)); else setError(`Pedidos: ${errorMessage(results[0].reason, 'no se pudieron cargar')}`); if (results[1].status === 'fulfilled') setUsers(asArray(results[1].value)); } else if (section === 'catalog' || section === 'inventory') { const result = await apiFetch<AnyRecord>('/products/paged?skip=0&limit=200&sort=name', options); setProducts(asArray(result.items)) } else if (section === 'sales') setSales(await apiFetch<AnyRecord>('/admin/sales/stats?days=30', options)); else if (section === 'customers') setExecutive(await apiFetch<AnyRecord>('/admin/resumen-ejecutivo?days=30', options)); else if (section === 'drivers') { const results = await Promise.allSettled([apiFetch<AdminUser[]>('/admin/users', options), apiFetch<AnyRecord[]>('/admin/driver-locations', options), apiFetch<Order[]>('/admin/orders?limit=2000', options), apiFetch<AnyRecord>('/admin/zones', options)]); const failures: string[] = []; if (results[0].status === 'fulfilled') setUsers(asArray(results[0].value)); else failures.push(`repartidores: ${errorMessage(results[0].reason, 'falló')}`); if (results[1].status === 'fulfilled') setLocations(current => reconcileDriverLocations(current, asArray((results[1] as PromiseFulfilledResult<AnyRecord[]>).value))); else failures.push(`ubicaciones: ${errorMessage(results[1].reason, 'falló')}`); if (results[2].status === 'fulfilled') setOrders(asArray(results[2].value)); if (results[3].status === 'fulfilled') { const zoneResult = results[3] as PromiseFulfilledResult<AnyRecord>; setZones(asArray(zoneResult.value.zones)) }; if (failures.length) setError(`Carga parcial de repartidores: ${failures.join(' · ')}`) } else if (section === 'promotions') { const results = await Promise.allSettled([apiFetch<AnyRecord[]>('/api/promos', options), apiFetch<AnyRecord[]>('/api/consumos', options)]); if (results[0].status === 'fulfilled') setPromotions(asArray(results[0].value)); if (results[1].status === 'fulfilled') setConsumos(asArray(results[1].value)); if (results.some(result => result.status === 'rejected')) setError('No se pudo cargar una parte de promociones/consumos.') } else if (section === 'settings') { const results = await Promise.allSettled([apiFetch<AdminUser[]>('/admin/users', options), apiFetch<AnyRecord[]>('/admin/branches', options), apiFetch<AnyRecord>('/admin/zones', options)]); if (results[0].status === 'fulfilled') setUsers(asArray(results[0].value)); else setError(`Usuarios: ${errorMessage(results[0].reason, 'no se pudieron cargar')}`); if (results[1].status === 'fulfilled') setBranches(asArray((results[1] as PromiseFulfilledResult<AnyRecord[]>).value)); else setError(`Sucursales: ${errorMessage(results[1].reason, 'no se pudieron cargar')}`); if (results[2].status === 'fulfilled') setZones(asArray(results[2].value.zones)) } } catch (e) { if (e instanceof ApiError && e.status === 401) { setAdminToken(null); setUser(null) } else setError(`Error de carga: ${errorMessage(e, 'no se pudieron cargar los datos')}`) } finally { setLoading(false) } }, [active, scope, user])
   useEffect(() => { const token = getAdminToken(); if (!token) return; apiFetch<AdminUser>('/admin/auth/me').then(loggedUser => { setUser(loggedUser); setScope(loggedUser.active_business_scope || loggedUser.business_scope || 'mayorista') }).catch(() => setAdminToken(null)) }, [])
   useEffect(() => { if (user) void load(active) }, [user, active, scope])
   useEffect(() => { if (!user || active !== 'drivers') return; const timer = window.setInterval(() => void load('drivers'), 10000); return () => window.clearInterval(timer) }, [user, active, load])
-  useEffect(() => { if (!user || !['dashboard', 'catalog', 'inventory', 'drivers', 'deliveries'].includes(active)) return; let socket: WebSocket | null = null; let reloadTimer: number | null = null; const scheduleReload = () => { if (reloadTimer !== null) return; reloadTimer = window.setTimeout(() => { reloadTimer = null; void load(active) }, 800) }; try { socket = new WebSocket(websocketUrl()); socket.onopen = () => socket?.send(JSON.stringify({ scope, topics: ['product', 'order', 'driver'] })); socket.onmessage = event => { try { const payload = JSON.parse(event.data); const action = String(payload.action || payload.type || ''); const driver = payload.driver || payload.data?.driver; if ((action === 'driver_location' || action === 'driver.location.updated' || action === 'driver-location') && driver) { if (active === 'drivers') { const key = String(driver.driver_id || driver.driver_username || ''); if (key) setLocations(current => [...current.filter(item => String(item.driver_id || item.driver_username || '') !== key), driver]) } return } if ((action === 'driver_location_offline' || action === 'driver.location.offline' || action === 'driver-location-offline') && driver) { if (active === 'drivers') { const key = String(driver.driver_id || driver.driver_username || ''); setLocations(current => current.filter(item => String(item.driver_id || item.driver_username || '') !== key)) } return } if (active !== 'deliveries') scheduleReload() } catch { if (active !== 'deliveries') scheduleReload() } }; socket.onerror = () => socket?.close() } catch { /* HTTP remains the source of truth. */ } return () => { if (reloadTimer !== null) window.clearTimeout(reloadTimer); socket?.close() } }, [user, active, scope, load])
+  useEffect(() => { if (!user || !['dashboard', 'catalog', 'inventory', 'drivers', 'deliveries'].includes(active)) return; let socket: WebSocket | null = null; let reloadTimer: number | null = null; const scheduleReload = () => { if (reloadTimer !== null) return; reloadTimer = window.setTimeout(() => { reloadTimer = null; void load(active) }, 800) }; try { socket = new WebSocket(websocketUrl()); socket.onopen = () => socket?.send(JSON.stringify({ scope, topics: ['product', 'order', 'driver'] })); socket.onmessage = event => { try { const payload = JSON.parse(event.data); const action = String(payload.action || payload.type || ''); const driver = payload.driver || payload.data?.driver; if ((action === 'driver_location' || action === 'driver.location.updated' || action === 'driver-location') && driver) { if (active === 'drivers') setLocations(current => mergeDriverLocations(current, [driver])); return } if ((action === 'driver_location_offline' || action === 'driver.location.offline' || action === 'driver-location-offline') && driver) { if (active === 'drivers') { const key = driverLocationKey(driver); setLocations(current => current.filter(item => driverLocationKey(item) !== key)) } return } if (active !== 'deliveries') scheduleReload() } catch { if (active !== 'deliveries') scheduleReload() } }; socket.onerror = () => socket?.close() } catch { /* HTTP remains the source of truth. */ } return () => { if (reloadTimer !== null) window.clearTimeout(reloadTimer); socket?.close() } }, [user, active, scope, load])
   useEffect(() => { if (!user || active !== 'deliveries') return; let cancelled = false; const refresh = async () => { try { const rows = await apiFetch<Order[]>('/admin/deliveries?limit=500', { businessScope: scope }); if (!cancelled) setDeliveries(asArray(rows)) } catch (value) { if (!cancelled) setError(`Entregas: ${errorMessage(value, 'no se pudieron cargar')}`) } }; void refresh(); const timer = window.setInterval(() => void refresh(), 5000); return () => { cancelled = true; window.clearInterval(timer) } }, [user, active, scope])
   async function updateOrderStatus(order: Order, status: string) { try { await apiFetch(`/orders/${order.id}/status`, { method: 'PATCH', body: JSON.stringify({ status }), headers: { 'X-Actor': user?.username || '' } }); await load('orders') } catch (e) { setError(errorMessage(e, 'No se pudo actualizar el pedido')) } }
   async function assignOrder(order: Order, driverId: string) { if (!driverId) { setError('El backend no expone desasignación desde este endpoint.'); return } try { await apiFetch(`/admin/orders/${order.id}/assign`, { method: 'PATCH', businessScope: scope, body: JSON.stringify({ driver_id: Number(driverId) }) }); await load(active === 'drivers' ? 'drivers' : 'orders') } catch (e) { setError(errorMessage(e, 'No se pudo asignar el pedido')) } }
