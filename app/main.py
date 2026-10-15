@@ -7492,6 +7492,7 @@ async def save_consumos(request: Request, db: Session = Depends(get_db)):
             os.makedirs(CATALOG_DIR, exist_ok=True)
             with open(consumos_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+            _invalidate_read_caches()
             # Persist to DB settings so consumos survive deploys
             try:
                 crud.set_setting(db, _scoped_setting_key('consumos', scope), data)
@@ -7533,31 +7534,27 @@ def delete_consumo(product_id: str, request: Request, db: Session = Depends(get_
         pid = product_id
     try:
         consumos_path = os.path.join(CATALOG_DIR, _scoped_snapshot_filename('consumos.json', scope))
-        items = []
-        if os.path.exists(consumos_path):
+        items = _load_consumos_snapshot(db, business_scope=scope)
+        new_items = [it for it in items if it.get('id') != pid and str(it.get('id')) != str(pid)]
+        try:
+            os.makedirs(CATALOG_DIR, exist_ok=True)
+            with open(consumos_path, 'w', encoding='utf-8') as f:
+                json.dump(new_items, f, ensure_ascii=False, indent=2)
+            _invalidate_read_caches()
             try:
-                with open(consumos_path, 'r', encoding='utf-8') as f:
-                    items = json.load(f) or []
+                crud.set_setting(db, _scoped_setting_key('consumos', scope), new_items)
             except Exception:
-                items = []
-            new_items = [it for it in items if it.get('id') != pid and str(it.get('id')) != str(pid)]
+                logger.exception('delete_consumo failed updating scoped setting')
             try:
-                with open(consumos_path, 'w', encoding='utf-8') as f:
-                    json.dump(new_items, f, ensure_ascii=False, indent=2)
-                try:
-                    crud.set_setting(db, _scoped_setting_key('consumos', scope), new_items)
-                except Exception:
-                    logger.exception('delete_consumo failed updating scoped setting')
-                try:
-                    _push_event_threadsafe({"action": "consumos-updated", "consumos": new_items, "scope": scope})
-                except Exception:
-                    pass
-                headers = _cors_headers_for_request(request)
-                return JSONResponse(status_code=200, content={'detail': 'deleted'}, headers=headers)
-            except Exception as write_err:
-                logger.exception('delete_consumo write failed: %s', write_err)
-                headers = _cors_headers_for_request(request)
-                return JSONResponse(status_code=500, content={'detail': 'failed to delete consumos'}, headers=headers)
+                _push_event_threadsafe({"action": "consumos-updated", "consumos": new_items, "scope": scope})
+            except Exception:
+                pass
+            headers = _cors_headers_for_request(request)
+            return JSONResponse(status_code=200, content={'detail': 'deleted'}, headers=headers)
+        except Exception as write_err:
+            logger.exception('delete_consumo write failed: %s', write_err)
+            headers = _cors_headers_for_request(request)
+            return JSONResponse(status_code=500, content={'detail': 'failed to delete consumos'}, headers=headers)
     except Exception as e:
         logger.exception('delete_consumo failed: %s', e)
         headers = _cors_headers_for_request(request)
