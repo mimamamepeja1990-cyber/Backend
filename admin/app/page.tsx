@@ -104,7 +104,199 @@ function Operations({ data }: { data: AnyRecord }) { const recommendations = asA
 
 function loadGoogleMaps() { if (!mapsKey) return Promise.reject(new Error('Falta NEXT_PUBLIC_GOOGLE_MAPS_API_KEY en el build del frontend.')); if (typeof window === 'undefined') return Promise.reject(new Error('Google Maps sólo se carga en el navegador.')); if (window.google?.maps) return Promise.resolve(window.google.maps); if (window.__distriarGoogleMapsPromise) return window.__distriarGoogleMapsPromise; window.__distriarGoogleMapsPromise = new Promise((resolve, reject) => { const callbackName = '__distriarMapsReady'; (window as any)[callbackName] = () => { delete (window as any)[callbackName]; resolve(window.google?.maps) }; const script = document.createElement('script'); script.id = 'distriar-google-maps'; script.async = true; script.defer = true; script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(mapsKey)}&loading=async&callback=${callbackName}&v=weekly`; script.onerror = () => { delete (window as any)[callbackName]; reject(new Error('No se pudo cargar Google Maps. Verificá la clave, las restricciones y Maps JavaScript API.')) }; document.head.appendChild(script) }); return window.__distriarGoogleMapsPromise }
 
-function DriverMap({ locations, orders = [] }: { locations: AnyRecord[]; orders?: Order[] }) { const container = useRef<HTMLDivElement>(null); const map = useRef<any>(null); const markers = useRef<Map<string, any>>(new Map()); const animationFrames = useRef<Map<string, number>>(new Map()); const routeLine = useRef<any>(null); const stopMarkers = useRef<any[]>([]); const hasFitted = useRef(false); const [mapError, setMapError] = useState(''); const [mapReady, setMapReady] = useState(false); const [selectedDriverKey, setSelectedDriverKey] = useState(''); const driverKey = (location: AnyRecord) => String(location.driver_id ?? location.driver_username ?? ''); const selectedLocation = locations.find(location => driverKey(location) === selectedDriverKey); const routeOrders = useMemo(() => { if (!selectedDriverKey) return []; return (orders || []).filter(order => { const status = String(order.status || '').toLowerCase(); if (['entregado', 'cancelado'].includes(status)) return false; const sameId = order.assigned_driver_id != null && String(order.assigned_driver_id) === selectedDriverKey; const sameUsername = order.assigned_driver_username && String(order.assigned_driver_username) === selectedDriverKey; const sameName = !order.assigned_driver_id && !order.assigned_driver_username && order.assigned_driver_name && String(order.assigned_driver_name) === String(selectedLocation?.driver_name || ''); return sameId || sameUsername || sameName }).map(order => ({ order, lat: Number(order.delivery_lat ?? order.lat ?? order.latitude), lon: Number(order.delivery_lon ?? order.lon ?? order.longitude) })).filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lon)).sort((a, b) => Number(a.order.route_order ?? 999999) - Number(b.order.route_order ?? 999999)) }, [orders, selectedDriverKey, selectedLocation?.driver_name]); useEffect(() => { let cancelled = false; if (!mapsKey) { setMapError('Falta NEXT_PUBLIC_GOOGLE_MAPS_API_KEY en Render.'); return } void loadGoogleMaps().then(maps => { if (cancelled || !container.current) return; map.current = new maps.Map(container.current, { center: { lat: -32.883, lng: -68.84 }, zoom: 12, mapTypeControl: false, streetViewControl: false, fullscreenControl: true }); setMapReady(true) }).catch(error => { if (!cancelled) setMapError(error instanceof Error ? error.message : 'Google Maps no disponible.') }); return () => { cancelled = true; animationFrames.current.forEach(frame => window.cancelAnimationFrame(frame)); markers.current.forEach(marker => marker.setMap(null)); stopMarkers.current.forEach(marker => marker.setMap(null)); routeLine.current?.setMap(null); markers.current.clear(); animationFrames.current.clear(); stopMarkers.current = []; routeLine.current = null; map.current = null } }, []); useEffect(() => { if (!mapReady || !map.current || !window.google?.maps) return; const maps = window.google.maps; const points = (locations || []).map(location => ({ location, key: driverKey(location), lat: Number(location.lat), lon: Number(location.lon ?? location.lng) })).filter(point => point.key && Number.isFinite(point.lat) && Number.isFinite(point.lon)); const activeKeys = new Set(points.map(point => point.key)); const animateMarker = (key: string, marker: any, target: { lat: number; lng: number }) => { const previousFrame = animationFrames.current.get(key); if (previousFrame) window.cancelAnimationFrame(previousFrame); const current = marker.getPosition?.(); const from = current ? { lat: current.lat(), lng: current.lng() } : target; const started = performance.now(); const duration = 1350; const tick = (now: number) => { const progress = Math.min(1, (now - started) / duration); const eased = progress < 0.5 ? 2 * progress * progress : 1 - Math.pow(-2 * progress + 2, 2) / 2; marker.setPosition({ lat: from.lat + (target.lat - from.lat) * eased, lng: from.lng + (target.lng - from.lng) * eased }); if (progress < 1) animationFrames.current.set(key, window.requestAnimationFrame(tick)); else animationFrames.current.delete(key) }; animationFrames.current.set(key, window.requestAnimationFrame(tick)) }; points.forEach(({ location, key, lat, lon }) => { let marker = markers.current.get(key); if (!marker) { marker = new maps.Marker({ map: map.current, position: { lat, lng: lon }, title: location.driver_name || location.driver_username || 'Repartidor', zIndex: 30, icon: { path: maps.SymbolPath.CIRCLE, scale: 8, fillColor: '#10b981', fillOpacity: 0.98, strokeColor: '#064e3b', strokeOpacity: 0.95, strokeWeight: 2 }, label: { text: String(location.driver_name || location.driver_username || 'R').slice(0, 1).toUpperCase(), color: '#ffffff', fontSize: '10px', fontWeight: '700' } }); marker.addListener('click', () => { setSelectedDriverKey(key); map.current?.panTo({ lat, lng: lon }) }); markers.current.set(key, marker) } animateMarker(key, marker, { lat, lng: lon }) }); markers.current.forEach((marker, key) => { if (!activeKeys.has(key)) { const frame = animationFrames.current.get(key); if (frame) window.cancelAnimationFrame(frame); marker.setMap(null); markers.current.delete(key); animationFrames.current.delete(key) } }); if (!points.length) hasFitted.current = false; else if (!hasFitted.current) { const bounds = new maps.LatLngBounds(); points.forEach(point => bounds.extend({ lat: point.lat, lng: point.lon })); if (points.length === 1) { map.current.setCenter({ lat: points[0].lat, lng: points[0].lon }); map.current.setZoom(15) } else map.current.fitBounds(bounds, 64); hasFitted.current = true } }, [locations, mapReady]); useEffect(() => { if (!mapReady || !map.current || !window.google?.maps) return; const maps = window.google.maps; routeLine.current?.setMap(null); stopMarkers.current.forEach(marker => marker.setMap(null)); stopMarkers.current = []; routeLine.current = null; if (!selectedLocation || !routeOrders.length) return; const currentPoint = { lat: Number(selectedLocation.lat), lng: Number(selectedLocation.lon ?? selectedLocation.lng) }; const path = [currentPoint, ...routeOrders.map(point => ({ lat: point.lat, lng: point.lon }))]; routeLine.current = new maps.Polyline({ map: map.current, path, geodesic: true, strokeColor: '#059669', strokeOpacity: 0.9, strokeWeight: 4 }); stopMarkers.current = routeOrders.map(({ order, lat, lon }, index) => new maps.Marker({ map: map.current, position: { lat, lng: lon }, title: `Pedido #${order.id}`, label: { text: String(index + 1), color: '#ffffff', fontSize: '11px', fontWeight: '700' }, icon: { path: maps.SymbolPath.CIRCLE, scale: 10, fillColor: '#2563eb', fillOpacity: 0.98, strokeColor: '#1e3a8a', strokeWeight: 2 } })); }, [mapReady, routeOrders, selectedLocation]); return <div className="relative min-h-[420px] overflow-hidden rounded-xl bg-slate-100"><div ref={container} className="absolute inset-0" />{mapError && <div className="absolute inset-x-4 top-4 rounded-xl border border-amber-200 bg-white/95 p-3 text-sm text-amber-800 shadow-sm">{mapError}</div>}{selectedLocation && <div className="absolute left-4 top-4 z-10 max-w-[270px] rounded-xl border border-emerald-100 bg-white/95 p-3 text-xs text-slate-700 shadow-lg backdrop-blur"><p className="font-semibold text-slate-900">Ruta de {selectedLocation.driver_name || selectedLocation.driver_username || 'repartidor'}</p><p className="mt-1 text-slate-500">{routeOrders.length ? `${routeOrders.length} pedidos en el recorrido` : 'No hay pedidos activos asignados'}</p>{routeOrders.slice(0, 5).map(({ order }, index) => <p key={String(order.id)} className="mt-1 truncate"><span className="font-semibold text-emerald-700">{index + 1}.</span> Pedido #{order.id} · {order.user_full_name || 'Cliente'}</p>)}{routeOrders.length > 5 && <p className="mt-1 text-slate-400">+{routeOrders.length - 5} pedidos más</p>}</div>}{!locations.length && <div className="pointer-events-none absolute inset-x-4 bottom-4 rounded-xl bg-white/90 p-3 text-sm text-slate-600 shadow-sm">Mapa listo. No hay ubicaciones recientes para mostrar.</div>}</div> }
+function DriverMap({ locations, orders = [] }: { locations: AnyRecord[]; orders?: Order[] }) {
+  const container = useRef<HTMLDivElement>(null)
+  const map = useRef<any>(null)
+  const markers = useRef<Map<string, any>>(new Map())
+  const animationFrames = useRef<Map<string, number>>(new Map())
+  const locationTimes = useRef<Map<string, number>>(new Map())
+  const routeLine = useRef<any>(null)
+  const routeRenderer = useRef<any>(null)
+  const routeRequest = useRef(0)
+  const stopMarkers = useRef<any[]>([])
+  const hasFitted = useRef(false)
+  const [mapError, setMapError] = useState('')
+  const [mapReady, setMapReady] = useState(false)
+  const [selectedDriverKey, setSelectedDriverKey] = useState('')
+  const driverKey = (location: AnyRecord) => String(location.driver_id ?? location.driver_username ?? '')
+  const selectedLocation = locations.find(location => driverKey(location) === selectedDriverKey)
+  const routeOrders = useMemo(() => {
+    if (!selectedDriverKey) return []
+    return (orders || [])
+      .filter(order => {
+        const status = String(order.status || '').toLowerCase()
+        if (['entregado', 'cancelado'].includes(status)) return false
+        const sameId = order.assigned_driver_id != null && String(order.assigned_driver_id) === selectedDriverKey
+        const sameUsername = order.assigned_driver_username && String(order.assigned_driver_username) === selectedDriverKey
+        const sameName = !order.assigned_driver_id && !order.assigned_driver_username && order.assigned_driver_name && String(order.assigned_driver_name) === String(selectedLocation?.driver_name || '')
+        return sameId || sameUsername || sameName
+      })
+      .map(order => ({
+        order,
+        lat: Number(order.delivery_lat ?? order.lat ?? order.latitude),
+        lon: Number(order.delivery_lon ?? order.lon ?? order.longitude),
+      }))
+      .filter(point => Number.isFinite(point.lat) && Number.isFinite(point.lon))
+      .sort((a, b) => Number(a.order.route_order ?? 999999) - Number(b.order.route_order ?? 999999))
+  }, [orders, selectedDriverKey, selectedLocation?.driver_name])
+  const routeSignature = routeOrders.map(point => `${point.order.id}:${point.lat.toFixed(5)}:${point.lon.toFixed(5)}`).join('|')
+
+  useEffect(() => {
+    let cancelled = false
+    if (!mapsKey) { setMapError('Falta NEXT_PUBLIC_GOOGLE_MAPS_API_KEY en Render.'); return }
+    void loadGoogleMaps().then(maps => {
+      if (cancelled || !container.current) return
+      map.current = new maps.Map(container.current, { center: { lat: -32.883, lng: -68.84 }, zoom: 12, mapTypeControl: false, streetViewControl: false, fullscreenControl: true })
+      setMapReady(true)
+    }).catch(error => { if (!cancelled) setMapError(error instanceof Error ? error.message : 'Google Maps no disponible.') })
+    return () => {
+      cancelled = true
+      routeRequest.current += 1
+      animationFrames.current.forEach(frame => window.cancelAnimationFrame(frame))
+      markers.current.forEach(marker => marker.setMap(null))
+      stopMarkers.current.forEach(marker => marker.setMap(null))
+      routeLine.current?.setMap(null)
+      routeRenderer.current?.setMap(null)
+      markers.current.clear()
+      animationFrames.current.clear()
+      locationTimes.current.clear()
+      stopMarkers.current = []
+      routeLine.current = null
+      routeRenderer.current = null
+      map.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!mapReady || !map.current || !window.google?.maps) return
+    const maps = window.google.maps
+    const points = (locations || [])
+      .map(location => ({ location, key: driverKey(location), lat: Number(location.lat), lon: Number(location.lon ?? location.lng) }))
+      .filter(point => point.key && Number.isFinite(point.lat) && Number.isFinite(point.lon))
+    const activeKeys = new Set(points.map(point => point.key))
+    const animateMarker = (key: string, marker: any, target: { lat: number; lng: number }, duration: number) => {
+      const previousFrame = animationFrames.current.get(key)
+      if (previousFrame) window.cancelAnimationFrame(previousFrame)
+      const current = marker.getPosition?.()
+      const from = current ? { lat: current.lat(), lng: current.lng() } : target
+      const started = performance.now()
+      const tick = (now: number) => {
+        const progress = Math.min(1, (now - started) / duration)
+        const eased = progress < 0.5 ? 2 * progress * progress : 1 - Math.pow(-2 * progress + 2, 2) / 2
+        marker.setPosition({ lat: from.lat + (target.lat - from.lat) * eased, lng: from.lng + (target.lng - from.lng) * eased })
+        if (progress < 1) animationFrames.current.set(key, window.requestAnimationFrame(tick))
+        else animationFrames.current.delete(key)
+      }
+      animationFrames.current.set(key, window.requestAnimationFrame(tick))
+    }
+    points.forEach(({ location, key, lat, lon }) => {
+      let marker = markers.current.get(key)
+      if (!marker) {
+        marker = new maps.Marker({
+          map: map.current,
+          position: { lat, lng: lon },
+          title: `${location.driver_name || location.driver_username || 'Repartidor'} · clic para ver ruta`,
+          zIndex: 30,
+          icon: { path: maps.SymbolPath.CIRCLE, scale: 8, fillColor: '#10b981', fillOpacity: 0.98, strokeColor: '#064e3b', strokeOpacity: 0.95, strokeWeight: 2 },
+          label: { text: String(location.driver_name || location.driver_username || 'R').slice(0, 1).toUpperCase(), color: '#ffffff', fontSize: '10px', fontWeight: '700' },
+        })
+        marker.addListener('click', () => { setSelectedDriverKey(key); map.current?.panTo({ lat, lng: lon }) })
+        markers.current.set(key, marker)
+      }
+      const recordedAt = Date.parse(String(location.recorded_at || ''))
+      const previousRecordedAt = locationTimes.current.get(key)
+      locationTimes.current.set(key, Number.isFinite(recordedAt) ? recordedAt : Date.now())
+      const updateInterval = Number.isFinite(recordedAt) && previousRecordedAt && recordedAt > previousRecordedAt ? (recordedAt - previousRecordedAt) : 4500
+      animateMarker(key, marker, { lat, lng: lon }, Math.max(1200, Math.min(9000, updateInterval * 0.92)))
+    })
+    markers.current.forEach((marker, key) => {
+      if (!activeKeys.has(key)) {
+        const frame = animationFrames.current.get(key)
+        if (frame) window.cancelAnimationFrame(frame)
+        marker.setMap(null)
+        markers.current.delete(key)
+        animationFrames.current.delete(key)
+      }
+    })
+    if (!points.length) hasFitted.current = false
+    else if (!hasFitted.current) {
+      const bounds = new maps.LatLngBounds()
+      points.forEach(point => bounds.extend({ lat: point.lat, lng: point.lon }))
+      if (points.length === 1) { map.current.setCenter({ lat: points[0].lat, lng: points[0].lon }); map.current.setZoom(15) }
+      else map.current.fitBounds(bounds, 64)
+      hasFitted.current = true
+    }
+  }, [locations, mapReady])
+
+  useEffect(() => {
+    if (!mapReady || !map.current || !window.google?.maps) return
+    const maps = window.google.maps
+    const requestId = ++routeRequest.current
+    routeRenderer.current?.setMap(null)
+    routeLine.current?.setMap(null)
+    stopMarkers.current.forEach(marker => marker.setMap(null))
+    routeRenderer.current = null
+    routeLine.current = null
+    stopMarkers.current = []
+    if (!selectedLocation || !routeOrders.length) return
+
+    const currentPoint = { lat: Number(selectedLocation.lat), lng: Number(selectedLocation.lon ?? selectedLocation.lng) }
+    const path = [currentPoint, ...routeOrders.map(point => ({ lat: point.lat, lng: point.lon }))]
+    const drawFallback = () => {
+      if (requestId !== routeRequest.current) return
+      routeLine.current = new maps.Polyline({ map: map.current, path, geodesic: true, strokeColor: '#059669', strokeOpacity: 0.9, strokeWeight: 4 })
+    }
+    stopMarkers.current = routeOrders.map(({ order, lat, lon }, index) => new maps.Marker({
+      map: map.current,
+      position: { lat, lng: lon },
+      title: `Pedido #${order.id}`,
+      label: { text: String(index + 1), color: '#ffffff', fontSize: '11px', fontWeight: '700' },
+      icon: { path: maps.SymbolPath.CIRCLE, scale: 10, fillColor: '#2563eb', fillOpacity: 0.98, strokeColor: '#1e3a8a', strokeWeight: 2 },
+    }))
+
+    if (routeOrders.length > 24 || !maps.DirectionsService || !maps.DirectionsRenderer) {
+      drawFallback()
+      return
+    }
+    const renderer = new maps.DirectionsRenderer({
+      map: map.current,
+      suppressMarkers: true,
+      preserveViewport: true,
+      polylineOptions: { strokeColor: '#059669', strokeOpacity: 0.92, strokeWeight: 5 },
+    })
+    const waypoints = routeOrders.slice(0, -1).map(point => ({ location: { lat: point.lat, lng: point.lon }, stopover: true }))
+    const destination = routeOrders[routeOrders.length - 1]
+    new maps.DirectionsService().route({
+      origin: currentPoint,
+      destination: { lat: destination.lat, lng: destination.lon },
+      waypoints,
+      optimizeWaypoints: false,
+      travelMode: maps.TravelMode.DRIVING,
+    }, (result: any, status: any) => {
+      if (requestId !== routeRequest.current) { renderer.setMap(null); return }
+      if (status === 'OK' && result) {
+        routeRenderer.current = renderer
+        renderer.setDirections(result)
+      } else {
+        renderer.setMap(null)
+        drawFallback()
+      }
+    })
+  }, [mapReady, selectedDriverKey, routeSignature])
+
+  return <div className="relative min-h-[420px] overflow-hidden rounded-xl bg-slate-100">
+    <div ref={container} className="absolute inset-0" />
+    {mapError && <div className="absolute inset-x-4 top-4 rounded-xl border border-amber-200 bg-white/95 p-3 text-sm text-amber-800 shadow-sm">{mapError}</div>}
+    {selectedLocation && <div className="absolute left-4 top-4 z-10 max-w-[270px] rounded-xl border border-emerald-100 bg-white/95 p-3 text-xs text-slate-700 shadow-lg backdrop-blur">
+      <p className="font-semibold text-slate-900">Ruta de {selectedLocation.driver_name || selectedLocation.driver_username || 'repartidor'}</p>
+      <p className="mt-1 text-slate-500">{routeOrders.length ? `${routeOrders.length} pedidos en el recorrido` : 'No hay pedidos activos asignados'}</p>
+      {routeOrders.slice(0, 5).map(({ order }, index) => <p key={String(order.id)} className="mt-1 truncate"><span className="font-semibold text-emerald-700">{index + 1}.</span> Pedido #{order.id} · {order.user_full_name || 'Cliente'}</p>)}
+      {routeOrders.length > 5 && <p className="mt-1 text-slate-400">+${routeOrders.length - 5} pedidos más</p>}
+    </div>}
+    {!selectedLocation && locations.length > 0 && <div className="pointer-events-none absolute left-4 top-4 rounded-xl border border-slate-200 bg-white/95 p-3 text-xs text-slate-600 shadow-sm">Hacé clic en un repartidor para ver su ruta.</div>}
+    {!locations.length && <div className="pointer-events-none absolute inset-x-4 bottom-4 rounded-xl bg-white/90 p-3 text-sm text-slate-600 shadow-sm">Mapa listo. No hay ubicaciones recientes para mostrar.</div>}
+  </div>
+}
 
 function Drivers({ users, locations, orders, zones, onReload, onAutoAssign, onInspect }: { users: AdminUser[]; locations: AnyRecord[]; orders: Order[]; zones: string[]; onReload: () => void; onAutoAssign: (driverId: string) => void; onInspect: (driver: AdminUser) => void }) { const drivers = users.filter(user => user.role === 'repartidor'); const [selected, setSelected] = useState(''); const live = new Map(locations.map(location => [String(location.driver_id || location.driver_username), location])); return <div className="space-y-5"><PageTitle title="Repartidores y mapa" description="Ubicaciones reales de /admin/driver-locations, actualizadas periódicamente." action={<button onClick={onReload} className="secondary-button"><RefreshCw className="size-4" />Actualizar</button>} /><div className="grid gap-5 xl:grid-cols-[1.25fr_.75fr]"><Card className="p-3"><DriverMap locations={locations} orders={orders} /></Card><Card className="p-5"><h3 className="section-title">Equipo de reparto</h3><p className="muted">{locations.length} ubicaciones vigentes · {drivers.length} repartidores visibles.</p><div className="mt-4 space-y-3">{drivers.length ? drivers.map(driver => { const point = live.get(String(driver.id)) || live.get(driver.username); return <div key={driver.id} className="rounded-xl bg-slate-50 p-3"><div className="flex items-center gap-3"><span className="flex size-9 items-center justify-center rounded-full bg-emerald-100 text-xs font-bold text-emerald-700">{(driver.full_name || driver.username).slice(0, 2).toUpperCase()}</span><div className="min-w-0 flex-1"><p className="truncate text-sm font-semibold text-slate-800">{driver.full_name || driver.username}</p><p className="truncate text-xs text-slate-500">{driver.zone || 'Sin zona'}</p></div><Pill tone={point ? 'green' : 'gray'}>{point ? 'En línea' : 'Sin ubicación'}</Pill></div><div className="mt-2 flex gap-2"><button className="link-button" onClick={() => onInspect(driver)}>Ver actividad</button><a className="link-button" target="_blank" rel="noreferrer" href={point ? `https://www.google.com/maps?q=${point.lat},${point.lon}` : '#'} aria-disabled={!point}>Abrir mapa</a></div></div> }) : <Empty message="No hay repartidores visibles en este rubro." />}</div></Card></div><Card className="p-5"><div className="flex items-center gap-2"><Route className="size-5 text-emerald-600" /><div><h3 className="section-title">Asignación automática de rutas</h3><p className="muted">Usa /admin/routes/auto-assign y persiste repartidor, ruta y orden.</p></div></div><div className="mt-4 flex flex-wrap gap-3"><select value={selected} onChange={event => setSelected(event.target.value)} className="field max-w-sm"><option value="">Seleccioná un repartidor</option>{drivers.map(driver => <option key={driver.id} value={driver.id}>{driver.full_name || driver.username} · {driver.zone || 'sin zona'}</option>)}</select><button disabled={!selected} onClick={() => onAutoAssign(selected)} className="primary-button">Asignar pedidos preparados</button></div><p className="mt-3 text-xs text-slate-500">{orders.filter(order => ['preparado', 'enviado'].includes(String(order.status))).length} pedidos en etapa de reparto cargados. Zonas backend: {zones.length ? zones.join(', ') : 'no disponibles'}.</p></Card></div> }
 

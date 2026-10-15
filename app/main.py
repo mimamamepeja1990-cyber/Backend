@@ -9594,16 +9594,16 @@ def _run_admin_stress_driver_simulation(
                 leg_distance_km = max(0.0, float(_haversine_km(current_lat, current_lon, point['lat'], point['lon']) or 0.0))
             except Exception:
                 leg_distance_km = 0.0
-            # Keep the visual simulation close to a normal urban driving pace.
-            # The previous 4-18 second legs made markers jump across the map.
-            simulation_time_factor = max(1.0, min(8.0, _env_float('ADMIN_STRESS_ROUTE_TIME_FACTOR', 3.0)))
-            travel_seconds = max(10.0, min(60.0, max(leg_distance_km, 0.35) * 4.0 * simulation_time_factor))
-            max_points = max(12, min(48, int(math.ceil(max(leg_distance_km, 0.6) * 6.0))))
+            # Simulate a vehicle at a normal urban speed instead of teleporting
+            # between stops. The value can be tuned for local stress runs.
+            route_speed_kmh = max(12.0, min(45.0, _env_float('ADMIN_STRESS_ROUTE_SPEED_KMH', 28.0)))
+            travel_seconds = max(20.0, min(1800.0, (max(leg_distance_km, 0.15) / route_speed_kmh) * 3600.0))
+            max_points = max(16, min(180, int(math.ceil(max(leg_distance_km, 0.2) * 12.0))))
             segment_points = _admin_stress_build_segment_points(current_lat, current_lon, point['lat'], point['lon'], max_points=max_points)
             if not segment_points:
                 segment_points = [{'lat': float(point['lat']), 'lon': float(point['lon'])}]
-            step_delay = max(0.75, min(2.5, travel_seconds / max(1, len(segment_points))))
-            speed_hint = max(14.0, min(32.0, max(leg_distance_km, 0.5) * 7.0))
+            step_delay = max(1.5, min(8.0, travel_seconds / max(1, len(segment_points))))
+            speed_hint = route_speed_kmh
 
             for path_point in segment_points:
                 if not _admin_stress_session_matches(session_id):
