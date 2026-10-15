@@ -4,7 +4,7 @@ from fastapi import HTTPException
 import os
 from typing import Optional, List, Dict, Set, Tuple
 from sqlalchemy import func, or_
-from sqlalchemy import inspect, text
+from sqlalchemy import inspect, text, bindparam, JSON
 from sqlalchemy.exc import IntegrityError
 import logging
 from types import SimpleNamespace
@@ -3087,6 +3087,16 @@ def _normalize_admin_business_scope(value: Optional[str], allow_all: bool = Fals
     return None
 
 
+def _normalize_raw_admin_permissions(data: dict) -> None:
+    raw_permissions = data.get('permissions')
+    if isinstance(raw_permissions, str):
+        try:
+            parsed = _json.loads(raw_permissions)
+        except Exception:
+            parsed = None
+        data['permissions'] = parsed if isinstance(parsed, list) else None
+
+
 def get_admin_user_by_username(db: Session, username: str) -> Optional[models.AdminUser]:
     uname = _normalize_admin_username(username)
     if not uname:
@@ -3103,11 +3113,14 @@ def get_admin_user_by_username(db: Session, username: str) -> Optional[models.Ad
         except Exception:
             pass
         try:
+            available = _get_table_columns(db, 'admin_users')
+            selected = ['id', 'username', 'full_name', 'role']
+            selected.extend(column for column in ('business_scope', 'zone', 'permissions') if column in available)
+            selected.extend(['hashed_password', 'is_active', 'created_by', 'created_at'])
             row = db.execute(
                 text(
-                    "SELECT id, username, full_name, role, "
-                    "hashed_password, is_active, created_by, created_at "
-                    "FROM admin_users WHERE LOWER(username) = LOWER(:username) LIMIT 1"
+                    f"SELECT {', '.join(selected)} FROM admin_users "
+                    "WHERE LOWER(username) = LOWER(:username) LIMIT 1"
                 ),
                 {'username': uname},
             ).mappings().first()
@@ -3117,6 +3130,7 @@ def get_admin_user_by_username(db: Session, username: str) -> Optional[models.Ad
             data.setdefault('business_scope', None)
             data.setdefault('zone', None)
             data.setdefault('permissions', None)
+            _normalize_raw_admin_permissions(data)
             return SimpleNamespace(**data)
         except Exception:
             return None
@@ -3131,11 +3145,14 @@ def get_admin_user_by_id(db: Session, user_id: int) -> Optional[models.AdminUser
         except Exception:
             pass
         try:
+            available = _get_table_columns(db, 'admin_users')
+            selected = ['id', 'username', 'full_name', 'role']
+            selected.extend(column for column in ('business_scope', 'zone', 'permissions') if column in available)
+            selected.extend(['hashed_password', 'is_active', 'created_by', 'created_at'])
             row = db.execute(
                 text(
-                    "SELECT id, username, full_name, role, "
-                    "hashed_password, is_active, created_by, created_at "
-                    "FROM admin_users WHERE id = :user_id LIMIT 1"
+                    f"SELECT {', '.join(selected)} FROM admin_users "
+                    "WHERE id = :user_id LIMIT 1"
                 ),
                 {'user_id': int(user_id)},
             ).mappings().first()
@@ -3145,6 +3162,7 @@ def get_admin_user_by_id(db: Session, user_id: int) -> Optional[models.AdminUser
             data.setdefault('business_scope', None)
             data.setdefault('zone', None)
             data.setdefault('permissions', None)
+            _normalize_raw_admin_permissions(data)
             return SimpleNamespace(**data)
         except Exception:
             return None
@@ -3168,7 +3186,7 @@ def list_admin_users(db: Session) -> List[models.AdminUser]:
                 'id', 'username', 'full_name', 'role', 'hashed_password',
                 'is_active', 'created_by', 'created_at',
             ]
-            for optional in ('business_scope', 'zone'):
+            for optional in ('business_scope', 'zone', 'permissions'):
                 if optional in available:
                     selected.insert(4, optional)
             rows = db.execute(
@@ -3180,6 +3198,7 @@ def list_admin_users(db: Session) -> List[models.AdminUser]:
                 data.setdefault('business_scope', None)
                 data.setdefault('zone', None)
                 data.setdefault('permissions', None)
+                _normalize_raw_admin_permissions(data)
                 result.append(SimpleNamespace(**data))
             return result
         except Exception:
@@ -3245,16 +3264,19 @@ def create_admin_user(
             for optional, value in (
                 ('business_scope', business_scope),
                 ('zone', obj.zone),
+                ('permissions', getattr(obj, 'permissions', None)),
             ):
                 if optional in available:
                     values[optional] = value
             columns = list(values)
             params = {f'v_{key}': value for key, value in values.items()}
             placeholders = ', '.join(f':v_{key}' for key in columns)
-            db.execute(
-                text(f"INSERT INTO admin_users ({', '.join(columns)}) VALUES ({placeholders})"),
-                params,
+            statement = text(
+                f"INSERT INTO admin_users ({', '.join(columns)}) VALUES ({placeholders})"
             )
+            if 'permissions' in values:
+                statement = statement.bindparams(bindparam('v_permissions', type_=JSON))
+            db.execute(statement, params)
             db.commit()
             created = get_admin_user_by_username(db, username)
             if created:
@@ -3285,6 +3307,17 @@ def delete_admin_user(db: Session, user_id: int) -> bool:
     user = get_admin_user_by_id(db, user_id)
     if not user:
         return False
+    if not isinstance(user, models.AdminUser):
+        try:
+            result = db.execute(
+                text('DELETE FROM admin_users WHERE id = :user_id'),
+                {'user_id': int(user_id)},
+            )
+            db.commit()
+            return bool(getattr(result, 'rowcount', 0))
+        except Exception:
+            db.rollback()
+            raise
     db.delete(user)
     try:
         db.commit()
@@ -3301,7 +3334,18 @@ def update_admin_user_zone(db: Session, user_id: int, zone: Optional[str]) -> Op
     user = get_admin_user_by_id(db, user_id)
     if not user:
         return None
-    user.zone = _normalize_admin_zone(zone)
+    normalized_zone = _normalize_admin_zone(zone)
+    if not isinstance(user, models.AdminUser):
+        available = _get_table_columns(db, 'admin_users')
+        if 'zone' not in available:
+            return user
+        db.execute(
+            text('UPDATE admin_users SET zone = :zone WHERE id = :user_id'),
+            {'zone': normalized_zone, 'user_id': int(user_id)},
+        )
+        db.commit()
+        return get_admin_user_by_id(db, user_id)
+    user.zone = normalized_zone
     db.add(user)
     try:
         db.commit()
@@ -3339,6 +3383,31 @@ def update_admin_user_scope_and_zone(
         user.zone = _normalize_admin_zone(zone)
     if permissions is not None:
         user.permissions = permissions
+    if not isinstance(user, models.AdminUser):
+        available = _get_table_columns(db, 'admin_users')
+        updates = {}
+        if business_scope is not None and 'business_scope' in available:
+            updates['business_scope'] = getattr(user, 'business_scope', None)
+        if zone is not None and 'zone' in available:
+            updates['zone'] = getattr(user, 'zone', None)
+        if permissions is not None and 'permissions' in available:
+            updates['permissions'] = permissions
+        if updates:
+            assignments = []
+            params = {'user_id': int(user_id)}
+            for field, value in updates.items():
+                param_name = f'v_{field}'
+                assignments.append(f'{field} = :{param_name}')
+                params[param_name] = value
+            statement = text(
+                f"UPDATE admin_users SET {', '.join(assignments)} WHERE id = :user_id"
+            )
+            if 'permissions' in updates:
+                statement = statement.bindparams(bindparam('v_permissions', type_=JSON))
+            db.execute(statement, params)
+            db.commit()
+            return get_admin_user_by_id(db, user_id)
+        return user
     db.add(user)
     try:
         db.commit()
